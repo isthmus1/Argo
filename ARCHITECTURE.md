@@ -260,9 +260,26 @@ Additions to the original keyword list are switch/case, do/while, unions, typede
 
 Both derivations give every node separate input and output handles, Blender-style. When a node is expanded, its interior shows a group-input node on the left and a group-output node on the right.
 
+As in UE5 Blueprints, pins come in two families that are never mixed:
+
+- **Control (exec) pins** carry execution order. A node runs when control arrives at its exec input, then leaves through exactly one exec output. Exec wires inside a group are the C statement order. Branching and looping appear as several exec outputs, not as data.
+- **Data pins** carry values, state handles and memory handles. Data wires show where a value comes from; they never decide when something runs.
+
+Which nodes get which pins:
+
+| Node | Control pins | Data pins |
+| --- | --- | --- |
+| Function, sequence, scope, fragment | One exec in; one exec out per control exit (normally just "then") | Parameters, return value, state/memory |
+| Branch (`if` chain) | Exec in; inside the group, a Branch-style node with one exec out per arm (`true`/`false`, or one per `else if`) | Condition, plus each arm's live-in/live-out values |
+| Loop | Exec in; inside the group, *body* and *completed* exec outs, with the body wired back to the loop | Loop-carried variables as in/out pins |
+| Switch | Exec in; inside the group, one exec out per case group plus `default` | Selector value, plus each case group's live-in/live-out values |
+| Type, enum, macro, global, side-effect-free expression | None (data-only, like UE5 pure nodes) | Fields, variants, parameters or value |
+
+The exec outputs of a region are its control exits, listed below. Unlike a UE5 pure node, an Argo data-only node doesn't rerun for each wire that reads it. Values are computed once per declared evaluation (5.6). A function call whose effects are all `pure` may be drawn data-only. Any call with another effect stays on the exec chain, so its side effects keep their order.
+
 **Boundary nodes** (functions, types, macros, globals) take their interface from the declaration:
 
-- *Function:* one input pin per parameter, one output pin for the return value, and exec in/out. Pointer parameters are memory-handle pins. Body analysis decides whether they're read, written or both (`memory_read`/`memory_write`). Globals and static locals the body touches also become state pins, because the signature hides them.
+- *Function:* exec in and exec out, one data input pin per parameter, and one data output pin for the return value. Pointer parameters are memory-handle pins. Body analysis decides whether they're read, written or both (`memory_read`/`memory_write`). Globals and static locals the body touches also become state pins, because the signature hides them.
 - *Struct/union:* one pin per field, in the style of UE5 make/break nodes. Type-use edges connect it to the nodes that use it. *Enum:* one pin per variant. *Macro:* its parameters, plus use-site edges. *Global:* one state pin.
 
 **Region nodes** (branch, loop, switch, scope, sequence, fragment) have no signature. Analysis of the region against its enclosing function computes:
@@ -270,7 +287,7 @@ Both derivations give every node separate input and output handles, Blender-styl
 - **Inputs (live-in):** each outer-scope variable the region reads whose value can come from before the region.
 - **Outputs (live-out):** each outer-scope variable the region may write that is read after it. A variable that is both read and written is an in/out pin.
 - **State and memory:** globals, static locals and memory reached through pointers become state or memory pins with the effect kinds of 5.6, not copied values. A local whose address escapes, for example `&x` passed to a call or stored, is a memory pin rather than a value pin.
-- **Control exits:** one exec output per distinct way out: fallthrough, `return` (with its value), `break` or `continue` to an enclosing loop or switch, and `goto` to an outer label. The parent dispatches on the exit taken.
+- **Control (exec) pins:** one exec input and one exec output per distinct way out: fallthrough, `return` (with its value), `break` or `continue` to an enclosing loop or switch, and `goto` to an outer label. The parent dispatches on the exit taken.
 
 Name resolution uses the configured AST's declaration references, never identifier text. Appendix A's lexical references remain hints. Outputs and exits matter as much as inputs. An `if` that assigns to a local, or returns from the function, isn't described by the values it reads.
 

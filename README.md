@@ -9,7 +9,7 @@ Argo is a Rust-first legacy-modernization project built around SpacetimeDB, agen
 ## The idea
 
 1. **Build the graph from templates.** Parse the C AST and match constructs (functions, structs, enums, macros, `if`/`else` chains, loops, `switch` …) against templates. Each template emits its piece of a hierarchical node graph. Functions and types get pins from their signatures. Statement regions get pins from the values they inherit from and hand back to the enclosing scope, plus their control exits.
-2. **Navigate it like Blueprints.** The top view shows functions, types and globals. Any function opens into its internal node groups, like a Blender node group or a UE5 collapsed graph.
+2. **Navigate it like Blueprints.** The top view shows functions, types and globals. Any function opens into its internal node groups, like a Blender node group or a UE5 collapsed graph. As in Blueprints, nodes have separate control (exec) pins for execution order and data pins for values.
 3. **Understand and plan.** Cheap agent calls explain leaves, then parents. An architect role sends grouping and interface guidance back down. Model access must be verified, and fallbacks must be disclosed.
 4. **Validate the graph as C.** Outline the graph's regions in C and confirm that the reorganized program still passes its tests before any Rust exists.
 5. **Translate bottom-up.** Workers claim C nodes from SpacetimeDB in real time, leaves first. They rewrite one node in Rust and test it inside the otherwise-C program before submitting it.
