@@ -2,7 +2,8 @@
 //! SpacetimeDB; it offers navigation and inspection, never editing.
 
 use crate::graph;
-use crate::mock::{Lang, RUST_SOURCE};
+use crate::layout::Placed;
+use crate::model::{Graph, Lang};
 use crate::palette::Pal;
 use rune_ui::{Color, El, Family, TextStyle, col, el, row, text};
 
@@ -32,21 +33,41 @@ fn card(p: &Pal) -> El {
         .shadow(8.0, 30.0, p.shadow.alpha(if p.dark { 0.5 } else { 0.12 }))
 }
 
-pub fn view(p: &Pal) -> El {
-    el().size(W, H)
-        .child(graph::view(p, W, H, [110.0, 380.0]).absolute(0.0, 0.0))
-        .child(breadcrumb(p).absolute(M, M))
+const RUST_SOURCE: &[&str] = &[
+    "pub fn step(acc: u32, i: u32) -> u32 {",
+    "    normalize(acc.wrapping_add(i))",
+    "}",
+    "",
+    "fn normalize(x: u32) -> u32 {",
+    "    x & 0xff",
+    "}",
+];
+
+pub fn view(p: &Pal, g: &Graph, pl: &Placed) -> El {
+    let detail_open = g.selected_group.is_some();
+    let right = if detail_open { W - M - DETAIL_W - M } else { W };
+    let mut root = el().size(W, H)
+        .child(graph::view(p, g, pl, W, H, [0.0, 64.0, right, H - 64.0 - 64.0]).absolute(0.0, 0.0))
+        .child(breadcrumb(p, g).absolute(M, M))
         .child(live(p).absolute(W - M - 76.0, M))
-        .child(detail(p).absolute(W - M - DETAIL_W, 68.0))
-        .child(legend(p).absolute(M, H - M - 40.0))
+        .child(legend(p).absolute(M, H - M - 40.0));
+    if let Some(gi) = g.selected_group {
+        root = root.child(detail(p, &g.groups[gi].title).absolute(W - M - DETAIL_W, 68.0));
+    }
+    root
 }
 
-fn breadcrumb(p: &Pal) -> El {
-    card(p).child(row().h(40.0).px(14.0).gap(8.0).items_center()
-        .child(text("◆").font(TextStyle::new(13.0, 700.0)).color(p.accent))
-        .child(label("fixture", p.muted))
-        .child(label("›", p.faint))
-        .child(text("compute").font(UI_STRONG).color(p.text)))
+fn breadcrumb(p: &Pal, g: &Graph) -> El {
+    let mut r = row().h(40.0).px(14.0).gap(8.0).items_center()
+        .child(text("◆").font(TextStyle::new(13.0, 700.0)).color(p.accent));
+    let last = g.crumbs.len().saturating_sub(1);
+    for (i, c) in g.crumbs.iter().enumerate() {
+        if i > 0 {
+            r = r.child(label("›", p.faint));
+        }
+        r = r.child(if i == last { text(*c).font(UI_STRONG).color(p.text) } else { label(c, p.muted) });
+    }
+    card(p).child(r)
 }
 
 fn live(p: &Pal) -> El {
@@ -56,7 +77,7 @@ fn live(p: &Pal) -> El {
 }
 
 /// Detail for the selected item: what it is, its evidence, and its current implementation.
-fn detail(p: &Pal) -> El {
+fn detail(p: &Pal, title: &str) -> El {
     let stat = |big: &str, small: &str, c: Color| {
         col().grow(1.0).padding(10.0).gap(2.0).radius(8.0).fill(p.code_bg)
             .child(text(big).font(TextStyle::new(15.0, 650.0)).color(c))
@@ -69,7 +90,7 @@ fn detail(p: &Pal) -> El {
     card(p).w(DETAIL_W).padding(14.0).gap(12.0)
         .child(row().gap(8.0).items_center()
             .child(dot(p.lang(Lang::Rust), 9.0))
-            .child(text("step ∘ normalize").font(TextStyle::new(14.0, 650.0)).color(p.text)))
+            .child(text(title).font(TextStyle::new(14.0, 650.0)).color(p.text)))
         .child(row().gap(8.0)
             .child(stat("33/33", "cases", p.ok))
             .child(stat("✓", "mixed build", p.ok)))

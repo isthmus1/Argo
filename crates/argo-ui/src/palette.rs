@@ -1,6 +1,6 @@
 //! Light and dark palettes. Every colour the views use comes from here; nothing hard-codes a mode.
 
-use crate::mock::{Lang, Ty};
+use crate::model::{Lang, Ty};
 use rune_ui::Color;
 
 #[derive(Clone, Copy)]
@@ -25,6 +25,8 @@ pub struct Pal {
     pub shadow: Color,
     pub exec: Color,
     pub u32_: Color,
+    pub bool_: Color,
+    pub ptr: Color,
     pub structural: Color,
     pub lang_c: Color,
     pub lang_rust: Color,
@@ -45,6 +47,8 @@ impl Pal {
         match ty {
             Ty::Exec => self.exec,
             Ty::U32 => self.u32_,
+            Ty::Bool => self.bool_,
+            Ty::Ptr => self.ptr,
         }
     }
 
@@ -86,6 +90,8 @@ fn dark_pal() -> Pal {
         shadow: Color::BLACK.alpha(0.5),
         exec: h("#e8e8e8"),
         u32_: h("#3fb6a2"),
+        bool_: h("#d6588a"),
+        ptr: h("#6b8fd6"),
         structural: h("#5a5a63"),
         lang_c: h("#7f97b3"),
         lang_rust: h("#e8844a"),
@@ -116,6 +122,8 @@ fn light_pal() -> Pal {
         shadow: Color::BLACK.alpha(0.12),
         exec: h("#2a2a2e"),
         u32_: h("#118a78"),
+        bool_: h("#b8406e"),
+        ptr: h("#3f63b0"),
         structural: h("#b4b4bc"),
         lang_c: h("#4f6886"),
         lang_rust: h("#c2581f"),
