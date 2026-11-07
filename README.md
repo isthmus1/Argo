@@ -8,11 +8,13 @@ Argo is a Rust-first legacy-modernization project built around SpacetimeDB, agen
 
 ## The idea
 
-1. **Understand bottom-up.** Walk an AST at meaningful block/function resolutions. Cheap agent calls explain the leaves, then build hierarchical explanations of their parents. The original source stays available; SpacetimeDB streams the growing semantic map to the viewer.
-2. **Plan top-down.** Give the map to the intended Nemotron Ultra 550B architect. Architectural decisions, dependency choices, and parent-region instructions flow down to the implementation agents. Model access must be verified; fallbacks must be disclosed.
-3. **Build the same program as a graph.** A UE5-Blueprints-like representation connects explicit data, execution, state, and effect boundaries. Each executable node retains its original-language implementation. First validate that reorganizing the program into this graph preserves the tested behavior.
-4. **Replace incrementally.** Generate Rust implementations behind stable C-compatible interfaces. Original C and Rust nodes execute together, so each replacement can be checked locally and inside the mixed application before acceptance.
-5. **Export Rust.** Once the selected program is migrated, reassemble an ordinary Rust project and validate the exported artifact again.
+1. **Build the graph from templates.** Parse the C AST and match constructs (functions, structs, enums, macros, `if`/`else` chains, loops, `switch` …) against templates. Each template emits its piece of a hierarchical node graph. Functions and types get pins from their signatures. Statement regions get pins from the values they inherit from and hand back to the enclosing scope, plus their control exits.
+2. **Navigate it like Blueprints.** The top view shows functions, types and globals. Any function opens into its internal node groups, like a Blender node group or a UE5 collapsed graph.
+3. **Understand and plan.** Cheap agent calls explain leaves, then parents. An architect role sends grouping and interface guidance back down. Model access must be verified, and fallbacks must be disclosed.
+4. **Validate the graph as C.** Outline the graph's regions in C and confirm that the reorganized program still passes its tests before any Rust exists.
+5. **Translate bottom-up.** Workers claim C nodes from SpacetimeDB in real time, leaves first. They rewrite one node in Rust and test it inside the otherwise-C program before submitting it.
+6. **Merge upward.** When neighboring nodes are both Rust, SpacetimeDB dispatches narrowly scoped jobs to strip the C interop between them and collapse the group into one node. This recurses until a single Rust program node remains.
+7. **Modernize.** Improve the resulting Rust, which may still be unsafe or C-shaped, through bounded, continuously tested changes.
 
 The graph is not merely an explanation visualization: it defines the replaceable boundaries and carries the evidence for each migration step. Passing tests demonstrate agreement on their stated inputs/domain, not universal correctness.
 
