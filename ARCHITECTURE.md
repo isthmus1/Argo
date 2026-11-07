@@ -1,6 +1,6 @@
 # Argo architecture
 
-> **Design, not an implementation report.** Drafted and revised on 2026-11-07. This revision incorporates the worker/swarm, private-model, and recursive-modernization discussion. This checkout contains documentation, not an executable workspace. The crates, schemas, commands, screenshots, and runtime behavior below are proposed. This document owns the architecture and initial acceptance milestones; it does not claim that any migration has run.
+> **Design, not an implementation report.** Drafted and revised on 2026-11-07. This revision incorporates the worker/swarm, private-model, and recursive-modernization discussion, defines the template-based block creation and merge pipeline (section 5), and absorbs the former block-generator specification as [Appendix A](#appendix-a-source-inventory-block-generator-specification). This checkout contains documentation, not an executable workspace. The crates, schemas, commands, screenshots, and runtime behavior below are proposed. This document owns the architecture and initial acceptance milestones; it does not claim that any migration has run.
 
 ## 1. Product and design basis
 
@@ -12,11 +12,11 @@ Argo progressively migrates a legacy program to Rust through a live, UE5-Bluepri
 
 The product follows these user-originated decisions:
 
-1. Use source syntax/AST structure as a proxy for recursive decomposition, not token-level nodes. Functions, structs/unions, enums, macros and globals provide practical initial regions. Nested explanation regions need not be independently executable. Cheap agents explain leaves and parents while retaining original source; publish the map as work completes.
+1. Create blocks by parsing the C AST and matching constructs against templates (functions, structs, enums, macros, `if`/`else` chains, loops, `switch` and others), not by token-level nodes. Each template turns its AST node into a piece of the graph. Boundary nodes (functions, types) take their pins from their signatures. Statement regions take pins from live-in/live-out and control-exit analysis. The result is a hierarchy that starts at a function/type view and opens into node groups. Cheap agents explain leaves and parents while retaining original source; publish the map as work completes (section 5).
 2. Use architect guidance for grouping, dependencies and bounded refactors. Ultra 550B was the original larger-model option, not a mandatory external service or a claim of verified access. In private mode every participating model must run within the approved environment; do not conceal a frontier-model rescue behind a small-worker demonstration.
 3. Represent source provenance, executable relationships and replacement/composite regions as distinct graph views. Declaration boundaries do not imply purity, independent ownership, or a permanent target architecture. A callable region declares its interface, control behavior and relevant effects.
 4. First validate the graph-organized original-language program. Port implementations incrementally through temporary C ABI bridges, allowing faithful structure and justified unsafe Rust. Establish a validated Rust checkpoint before demanding idiomatic redesign; ABI compatibility is not behavioral correctness.
-5. Modernize through recursive region coarsening: neighboring accepted Rust regions can form a composite, then agents improve bounded internal relationships while preserving the external contract. Repeatedly test and accept small improvements. The final root represents a program of ordinary Rust modules, not one enormous function or model prompt.
+5. Translate bottom-up, one node at a time, then merge upward. Workers claim C nodes from SpacetimeDB, leaves first, and test each Rust node inside the otherwise-C program before submitting it. On each acceptance, SpacetimeDB detects neighbors that are now both Rust and parents whose children are all Rust. It dispatches narrowly scoped jobs that strip the C interop between them and collapse finished groups into one node. This recurses until a single Rust program node remains. Further modernization then improves the result through bounded, tested changes. The final root represents a program of ordinary Rust modules, not one enormous function or model prompt.
 6. SpacetimeDB coordinates work **before ingestion begins** and throughout decomposition, translation, validation and modernization. Workers read repositories and execute tools/models; the server owns durable task dependencies, claims, revision checks and accepted state.
 7. Start with one worker and a small fixture, but freeze swarm-safe ownership and revision semantics early. Demonstrate competing claims/recovery before enabling concurrent mutation. Private small-model swarms and bounded modernization are core design goals; automatic cluster provisioning and unrestricted whole-program redesign are not prerequisites.
 8. Build the application frontend and backend in Rust. Legacy inputs and generated C shims are migration artifacts. Source, source-derived summaries/prompts, traces and diagnostic logs stay within the approved trust boundary; privacy applies to the database, harness, model endpoints and telemetry too.
@@ -29,15 +29,15 @@ Supporting mechanisms below are engineering proposals, not additional user requi
 
 - One local SpacetimeDB instance, one Rust worker process, one Rust GUI client; one migration job/model interaction at a time. The worker may run in one prebuilt container. No cluster or VM provisioning service.
 - A deliberately small, documented C input subset: a few functions, fixed-width integer arguments/results, bounded arithmetic, calls, conditionals, and a loop. Start with a supplied deterministic fixture rather than arbitrary repositories.
-- AST-derived function/block hierarchy with bottom-up explanations appearing live. Function-level boundaries are independently replaceable in the first slice. Nested blocks can be visible explanation regions without falsely claiming that every region is already an independently executable ABI node.
+- Template-derived function/region hierarchy (section 5.3) with bottom-up explanations appearing live. Function nodes and at least one outlined region node (the fixture's loop body) are independently replaceable. Nodes below the work-unit floor stay visible for navigation and explanation without becoming separate ABI nodes.
 - A generated same-language graph build that matches the original on the declared fixture/test domain.
 - An actual agent-generated Rust replacement for at least one node, used by a mixed C/Rust program, with local and mixed-program checks recorded before acceptance.
 - A GUI closely resembling UE5 Blueprints, connected to real database updates, with source/explanation inspection and visible validation evidence.
-- An all-Rust fixture checkpoint with no original C dependency, followed by at least one accepted bounded modernization inside a composite Rust region. Demonstrate removal of an unnecessary internal compatibility boundary and rerun the unchanged regression domain. A C-free checkpoint alone does not establish idiomatic modernization.
+- An all-Rust fixture checkpoint with no original C dependency, reached through server-detected cleanup and collapse jobs (section 5.10): the outlined loop body is re-inlined, internal `extern "C"` boundaries are removed, and the unchanged regression domain is rerun. Then at least one accepted bounded modernization follows. A C-free checkpoint alone does not establish idiomatic modernization.
 
 ### Explicitly not required for the first slice
 
-Arbitrary languages/repositories; every AST block becoming a callable unit; pointer-heavy C; heap aliasing; threads; macros beyond the selected fixture; exceptions; production external effects; hot library unloading; universal equivalence proofs; automatic remote worker provisioning; multi-machine deployment; collaborative semantic graph editing; sophisticated auto-layout; arbitrary target-language backends; or unrestricted architectural rewrites. This sequencing does not defer the swarm protocol or make bounded Rust modernization a stretch goal.
+Arbitrary languages/repositories; every AST construct becoming its own work unit; templates beyond catalog v1; pointer-heavy C; heap aliasing; threads; macros beyond the selected fixture; exceptions; production external effects; hot library unloading; universal equivalence proofs; automatic remote worker provisioning; multi-machine deployment; collaborative semantic graph editing; sophisticated auto-layout; arbitrary target-language backends; or unrestricted architectural rewrites. This sequencing does not defer the swarm protocol or make bounded Rust modernization a stretch goal.
 
 Reject unsupported constructs with a source-located diagnostic. Do not quietly replace them with a model's prose. Test results establish agreement on their stated domain, not a proof for all executions.
 
@@ -59,7 +59,7 @@ The small-subset restrictions above describe the bootstrap slice, not permission
 
 **Deterministic validation mode:** upstream native code enables real-time RTC; clock, input, filesystem/network completion and scheduling otherwise make repeated boots diverge. S's harness must provide controlled time/event inputs (for example, a disclosed cycle-based clock mode and scheduled input), applied equivalently to baseline and candidate. Record any harness patch separately from the pristine baseline. Use bounded architectural-state checkpoints, memory hashes and device events; normalize resource identities instead of comparing host pointer bytes, padding or incidental timestamps. Interactive desktop acceptance is a separate check, not a claim that arbitrary live boots are byte-identical.
 
-**Bounded interpreter work is required on the golden path:** the CPU interpreter is generated from a roughly 57 KB template function with extensive shared locals and `goto` exits. Declaration-level splitting alone does not make this a small-model task. Demonstrate a supported region-scale strategy early: outlined chunks with explicit live-in/live-out frames, state handles and control-exit tags, or staged bounded edits with defined C/Rust boundaries and compilable, tested checkpoints. Merely splitting text at `case` labels is not a semantic extraction rule. Start coarse enough not to add an ABI hop to every instruction. Broader arbitrary extraction remains stretch; solving the actual interpreter with small agents cannot be deferred until after claiming the golden result.
+**Bounded interpreter work is required on the golden path:** the CPU interpreter is generated from a roughly 57 KB template function with extensive shared locals and `goto` exits. Declaration-level splitting alone does not make this a small-model task. Demonstrate a supported region-scale strategy early. The primary route is template-derived regions (`switch` case groups, loops, branches) outlined with explicit live-in/live-out frames, state handles and control-exit tags (sections 5.3–5.6). The fallback is staged bounded edits with defined C/Rust boundaries and compilable, tested checkpoints. Its `goto` exits are opaque in template catalog v1, so the interpreter needs either a `goto`-aware template or coarse opaque regions. Merely splitting text at `case` labels is not a semantic extraction rule. Start coarse enough not to add an ABI hop to every instruction. Broader arbitrary extraction remains stretch; solving the actual interpreter with small agents cannot be deferred until after claiming the golden result.
 
 TinyEMU → X11 is the requested north-star acceptance test, not a guarantee of hackathon completion. G3 is the minimum honest incremental-migration demo, G4 is the faithful toy Rust checkpoint, G4m completes its modernization slice, and G4b is the first TinyEMU-native replacement; none completes G6 or G6m. If the original desktop baseline cannot be reproduced, mark the golden gates blocked while continuing bootstrap development.
 
@@ -81,13 +81,14 @@ Proposed layout (not created yet):
 - `crates/argo-server/`: Rust SpacetimeDB module and server-side transition rules.
 - `crates/argo-harness/`: S-owned native support library/runner for reproducible baselines, layout assertions, test execution, traces and captures. W invokes it locally; it is not a fourth deployed subsystem.
 - `crates/argo-worker/`: Rust native worker, transport/model adapters, claimed task execution, generation/linking, harness invocation, modernization and export.
-- `crates/blocks/`: source-inventory package proposed by [the block-generator draft](docs/BLOCK_GENERATOR_SPEC.md). W integrates its lossless records into the shared protocol; this is not a separate authoritative job system.
+- `crates/blocks/`: Clang-free lossless source inventory specified in [Appendix A](#appendix-a-source-inventory-block-generator-specification). W integrates its records into the shared protocol; this is not a separate authoritative job system.
+- `crates/argo-graphgen/`: W-owned configured AST, `Template` registry, interface derivation and outlining (sections 5.2–5.6).
 - `crates/argo-ui/`: selected Rust UI toolkit, graph scene, inspectors, subscription adapter.
 - `fixtures/`: small C inputs, fixed test domain, expected graph/protocol snapshots, and deliberately failing candidates.
 
 Keep toolkit-specific types out of protocol/domain records. Freeze protocol v1 before independent implementations commit to incompatible meanings. W can begin against a fake server sink and shared transcript without waiting for a completed backend; the protocol and S-owned harness invocation/result contract are the early prerequisites.
 
-The block-generator draft owns lossless source segmentation and edit points, not the entire executable IR, worker scheduler or modernization model. Its implementation references are not present in this checkout. Integrate its records with project/revision/configured-instance identities rather than creating an unrelated set of database tables. Lexical candidate references are useful context, not proven executable dependencies or safe replacement boundaries.
+Appendix A owns lossless source segmentation and edit points, not the executable graph, worker scheduler or modernization model. Its implementation references are not present in this checkout. Its records integrate with project/revision/configured-instance identities rather than forming an unrelated set of database tables. Lexical candidate references are useful context, not proven executable dependencies or safe replacement boundaries. Templates and the configured AST (section 5) decide nodes and pins.
 
 ## 4. Interface between the parts
 
@@ -119,20 +120,20 @@ Initial proposed limits: 1 MiB/source file, 16 MiB/source bundle, 128 records/gr
 | `SourceBlock` / `ConfiguredInstance` | Lossless source range/kind and snapshot identity; separate identity for each translation-unit/template configuration, with original/expansion provenance |
 | `BuildConfig` / `TranslationUnit` | Target triple, compiler/flags/defines, include inputs, selected translation unit and macro/template instantiation identity |
 | `GraphRevision` | Project/source/build identity, parent, `draft`/`frozen`, canonical frozen-content hash; accepted history is immutable |
-| `Node` / `CompositeRegion` | Logical ID + revision + configured-instance identity, parent/children, source provenance, executable/explanation/type/state role, external interface/effects; a composite is not necessarily one function |
-| `Pin` / `Edge` | Stable pin IDs, directions/types, exec/data/state/control-exit semantics; explicit call/callback relationships |
+| `Node` / `CompositeRegion` | Logical ID + revision + configured-instance identity, parent/children, source provenance, producing template ID and node kind, work-unit flag, executable/explanation/type/state role, external interface/effects, migration state (C / Rust candidate / Rust accepted / collapsed); a composite is not necessarily one function |
+| `Pin` / `Edge` | Stable pin IDs, directions/types, input/output/in-out, exec/data/state/memory/control-exit semantics, signature- or analysis-derived origin; explicit call/callback/type-use relationships and whether an edge still crosses a C ABI |
 | `TypeLayout` / `EffectContract` | Optional on scalar fixture, required where used: size/alignment/field offsets; state/resource accesses, indirect calls and control exits |
 | `Annotation` | Summary, assumptions/unknowns, source/context/model attribution; never executable truth |
 | `ArchitectPlan` / `NodeDirective` | Input semantic-map identity, architect model/run, updated plan, dependency decisions, parent directive chain, per-region instructions |
 | `Implementation` / `ModernizationProposal` | Region/interface/build identity, source/hash, selected children or bounded changes, objective and affected callers/resources, artifacts and evidence |
-| `Run` / `Job` / `Attempt` | Stage, prerequisites, canonical logical-task key, exact inputs/base revision, mutation scope, authenticated worker, lease/fence generation, lifecycle, request/batch IDs, progress and model/tool usage |
+| `Run` / `Job` / `Attempt` | Stage (import, explain, translate, edge cleanup, collapse, modernize, export …), prerequisites, canonical logical-task key, exact inputs/base revision, mutation scope, authenticated worker, lease/fence generation, lifecycle, request/batch IDs, progress and model/tool usage |
 | `ValidationReport` | Exact baseline/candidate/full-manifest identities, build/toolchain/test-domain/harness identity, outcome, cases, counterexample, bounded logs and relevant performance/quality evidence |
 | `Manifest` | Versioned region → implementation/composition mapping, frozen graph/interface/build identity, accepted base version |
 | `Artifact` | Hash, kind, size, owner/location and optional bounded inline preview; report/source/boot evidence references |
 
 A source block is not a configured executable instance. TinyEMU compiles/includes the same source under different width/XLEN settings, and one shared-source edit can affect several instances. Namespace records by project and immutable snapshot/revision; bind task/report identity to the relevant build, translation unit and template instance. File paths, names, short hashes or collision ordinals alone are not persistent logical identity. Retain provenance when an edit splits, merges or replaces a region.
 
-At G0 select the source-segmentation and configured-compilation route. A lossless non-preprocessing scanner can be the first inventory stage, but stored `#if` text or lexical identifier matching does not establish which definition the compiler uses. Validate active configurations with the actual toolchain; do not quietly implement an incomplete replacement preprocessor. RV64 targeting does not justify deleting all x32 paths or 32-bit floating-point behavior. Exclude x86/RV128 only through an explicit validated build configuration.
+At G0 confirm the configured-compilation route (section 5.2 recommends Clang's AST over Appendix A's lossless inventory). The lossless non-preprocessing scanner is the first inventory stage, but stored `#if` text or lexical identifier matching does not establish which definition the compiler uses. Validate active configurations with the actual toolchain; do not quietly implement an incomplete replacement preprocessor. RV64 targeting does not justify deleting all x32 paths or 32-bit floating-point behavior. Exclude x86/RV128 only through an explicit validated build configuration.
 
 Node positions, viewport and selection belong to U and are excluded from semantic hashes. Language and validation status are independent dimensions.
 
@@ -149,7 +150,7 @@ These are proposed contracts, not existing Rust functions:
 - `publish_plan`, `submit_candidate`, `submit_report` — owning attempt/fence → S; persist version-bound proposals/evidence, not automatic acceptance. Candidate metadata declares affected regions/callers and any interface changes.
 - `report_progress`, `finish_attempt` — owning attempt/fence → S; progress and completion with required output/report references.
 - `cancel_run` / `retry_job` — owner → S; abandon/cancel safely or create a new attempt; W observes cancellation and stops its owned execution.
-- `accept_manifest(project_id, expected_base_version, candidate_manifest, report_ids)` — W/owner → S; compare-and-swap acceptance under the checks below, not self-certified correctness.
+- `accept_manifest(project_id, expected_base_version, candidate_manifest, report_ids)` — W/owner → S; compare-and-swap acceptance under the checks below, not self-certified correctness. In the same transaction, S marks newly ready translation jobs (section 5.8) and enqueues edge-cleanup and collapse jobs (section 5.10).
 
 Lifecycle: `queued → running → succeeded | failed | abandoned`. Retry/reclaim creates a new attempt and fencing generation. Lease expiry allows recovery; an old worker may still be computing, but its stale writes cannot modify current draft/accepted state. Historical outputs can remain inspectable through an explicitly non-authoritative path. Cancellation is checked again when publishing and accepting, not only when claiming.
 
@@ -171,82 +172,226 @@ U initializes from the SDK's applied subscription/cache, then processes deltas; 
 
 At G0 agree one source/graph/manifest example and a complete import/claim/update/accept transcript. W emits it through a fake sink; U renders it; S checks duplicate requests, competing claims, stale attempts and invalid submissions. Include a TinyEMU-shaped state handle, callback/control-exit example and a two-region modernization with a changed internal interface. G1 replays the same meanings through real SDK bindings. W also initializes/reconnects from durable job state rather than independently choosing repository work outside the protocol.
 
-## 5. Worker pipeline and executable graph
+## 5. Block creation and migration pipeline
 
-### 5.1 Understand bottom-up
+This section owns how C source becomes graph nodes, and how those nodes move from C to Rust and merge upward until one Rust program remains. [Appendix A](#appendix-a-source-inventory-block-generator-specification) owns the lossless source inventory underneath it. Every crate, type, job and command named here is proposed, not implemented.
 
-After claiming import/decomposition work, inventory meaningful source regions with exact spans and configured-instance provenance. Declaration-level functions/types/macros/globals are a valid starting point; AST nesting can add explanation regions. A macro is a compile-time dependency/generator, a struct/enum is a type node, and a global is shared state—not every box is callable. Preserve preprocessing provenance rather than treating expanded results as the original source.
+### 5.1 Pipeline overview
 
-Explain leaves with bounded source/context, then parents using child explanations plus retained source. Record interfaces, referenced definitions, state/effects, control exits and unresolved questions. Publish completed batches immediately. Source remains immutable; substituting summaries in a model's view is not deleting executable content. Lexical references and explanations are attributed hints, not proof of independence or purity.
+| Step | Stage | Runs in | Output |
+| --- | --- | --- | --- |
+| 0 | Source inventory | W (`crates/blocks`) | Lossless files, segments, top-level blocks, template instantiations and edit points (Appendix A) |
+| 1 | Parse | W (`crates/argo-graphgen`) | Configured C AST per translation unit, mapped back to block ranges (5.2) |
+| 2 | Template matching | W | One node per recognized construct, recursively; anything unrecognized becomes an opaque node (5.3) |
+| 3 | Interface derivation | W | Pins: from the signature for boundary nodes, from live-in/live-out/exit analysis for region nodes (5.4) |
+| 4 | Hierarchical graph | W publishes, S freezes | Graph revision with a containment hierarchy plus call, data, type, state and control-exit edges (5.5) |
+| 5 | Bottom-up assignment | S schedules, W claims | Translation jobs for ready nodes, leaves first (5.8) |
+| 6 | Translate and validate | W | A Rust node compiled into the otherwise-C program, a report, and a submission (5.8, 5.9) |
+| 7 | Merge | S detects, W executes | Cleanup and collapse jobs that remove C interop between Rust neighbors and fold finished groups (5.10) |
+| 8 | Root | — | One Rust program node; modernization continues from there (5.11) |
 
-The first worker executes sequentially against the same durable task protocol that later workers share. Avoid token-level model calls and duplicate global import loops; parallelism comes from claimed task fan-out, not each agent independently decomposing the entire repository.
+Steps 0–4 build the graph once per source snapshot. Steps 5–7 repeat until the root node is Rust. Bottom-up explanations and architect guidance (5.7) annotate nodes and jobs along the way; they never create, split or delete nodes.
 
-### 5.2 Executable IR v0 and same-language validation
+### 5.2 Source inventory and parsing (steps 0–1)
 
-Keep three notions distinct: source/explanation regions, executable behavior, and replaceable/composite regions. The containment hierarchy is not an execution schedule; control edges, calls, data dependencies and state access are separate relations. Initial callable units are functions with generated C-compatible boundaries. Branches/loops remain in retained bodies and may be explanation-only. Coupled functions can form a larger replacement region when shared ownership or callbacks prevent independent changes.
+Two layers with separate jobs:
 
-Do not require a novel pure-node compiler before the first faithful port. Conversely, AST slicing does not make arbitrary blocks self-contained: intra-function extraction needs live-in/live-out, alias/state and control-exit rules, demonstrated for the supported TinyEMU strategy. A region can be faithful unsafe Rust before it is idiomatic; record that status rather than advertising safety. The source graph is provenance, not an immutable template for the final Rust architecture.
+- **Lossless inventory** (`crates/blocks`, Appendix A): a Clang-free lexical scanner over the unpreprocessed text. It owns exact bytes, top-level blocks, template and fragment file roles, instantiations, function-head edit points and byte-exact rebuild. Every source edit Argo makes, including outlining (5.6), lands as a segment replacement here.
+- **Configured AST** (`crates/argo-graphgen`): parses each configured translation unit (one `.c` file plus its defines from the manifest in A.5) into a statement-level AST with resolved declarations and types. Every AST node maps to a block and a range within it. Code produced by a macro expansion maps to its macro call site. Code inside a template or fragment file maps to that file plus the instantiation that produced it.
 
-The graph is authoritative for supported call-site bindings and selected implementations: generated wrappers/link bindings must invoke the graph-declared target, not leave original symbols secretly in charge. Compile source bodies retained from the original, not reconstructed from summaries. Show indirect calls as callback pins/dynamic-call nodes with known targets or an explicit unresolved marker.
+Neither layer is enough alone. The inventory can't see inside function bodies, and it can't tell a local from a global or a macro constant. The AST can't drive edits, because preprocessing loses the exact source text.
 
-**Evaluation:** materialize arguments/results once per declared call; sharing a data pin does not implicitly execute a side effect again. Retain sequencing, return destinations, loop backedges and exit behavior. The fixture avoids unspecified C argument evaluation and undefined behavior; later imports must declare compiler/configuration and defined-behavior assumptions rather than invent universal C semantics. Numeric operations preserve source widths, truncation/wrapping, shifts and exceptional cases explicitly. Emulator SoftFP behavior includes guest rounding and exception flags, not a substitution with host floating point.
+**Parser choice (open; recommendation recorded):** use Clang's AST for the configured layer, either through libclang bindings or `clang -Xclang -ast-dump=json`, run with the same defines and include paths as the build.
 
-**Minimal typed effects:** `pure`; `state_read/write(resource, fields)`; `memory_read/write(parameter)`; `indirect_call(callback)`; `host_io(resource)`; control exits/nonreturn; and `unknown`. Effects identify the state to snapshot and the dependencies to display; they are not a theorem that all behavior has been captured. The fixture permits pure computation only, with explicit call/return. Unknown/unsupported effects prevent a local node from being advertised as validated; expand the envelope for the golden track.
+- *Why:* it resolves every name to its declaration, which live-in/live-out analysis (5.4) needs. It provides types for pins. It expands TinyEMU's `glue()` names, template files and in-body fragment includes into separate subtrees per instance. It also reports spelling and expansion locations for mapping back to blocks.
+- *Alternatives:* tree-sitter-c is lossless and error-tolerant, but purely syntactic. It would need a hand-written scope resolver, and it can't see the statements inside a fragment file included in a function body. A Rust C parser over preprocessed text loses source ranges through macros.
+- *Cost:* Clang becomes a worker dependency. The `blocks` crate keeps its no-Clang rule and B8.
+- *Falsifier:* if the G0 spike can't map Clang ranges back to block ranges for `riscv_cpu.c` with `MAX_XLEN=64` (templated functions, the in-body fragment include and `TARGET_READ_WRITE`), revisit the choice.
 
-**Worked fixture contract (proposed, not implemented):** `compute(n)` starts `acc = 0`, loops `i = 0..n`, and calls `step(acc, i)`; `step` calls `normalize(acc + i)`; `normalize(x)` returns `x & 255`. Use unsigned 32-bit values and a declared test domain `n = 0..32`. The hierarchy shows the loop inside `compute`, while executable calls bind `compute → step → normalize`. A manifest choosing C `compute`, Rust `step`, and C `normalize` exercises an actual C → Rust → C path. Compare original C, generated all-C graph, mixed manifest and final Rust export on the same cases, plus a deliberately incorrect `step` candidate.
+### 5.3 Templates (step 2)
 
-### 5.3 Architect and translate top-down
+A template recognizes one kind of C construct and turns that AST node into its piece of the graph. Templates implement one trait:
 
-An architect returns a versioned `ArchitectPlan`: grouping intentions, dependencies, interface decisions, assumptions and bounded directives. Walk the planned hierarchy top-down; each child receives compact parent guidance, its directive, allowed dependencies, relevant source and evidence. Persist this lineage. The architect is a role, not necessarily a separate process or an always-required giant model.
+```rust
+/// Proposed; not implemented.
+pub trait Template: Send + Sync {
+    /// Stable identifier, recorded on every node this template produces.
+    fn id(&self) -> TemplateId;
+    /// Structural test against one AST node.
+    fn matches(&self, ast: &AstNode, cx: &MatchCx) -> bool;
+    /// Build this construct's node and name the child regions to expand next.
+    fn expand(&self, ast: &AstNode, cx: &mut ExpandCx) -> Result<Expansion, Unsupported>;
+}
 
-Start with faithful boundaries and permissive implementation structure; separately schedule modernization after a validated Rust checkpoint. Ultra 550B remains an optional original architect candidate. Verify actual access, hardware/context budget and privacy policy before selecting any endpoint. Lightning/Nano worker capability is likewise unproven until measured. Private operation may not export source-derived context to an external architect; public-demo endpoints must be disclosed and cannot establish an in-house capability claim.
+pub struct Expansion {
+    pub node: Node,                 // the node for `ast`, with pins derived per 5.4
+    pub children: Vec<ChildRegion>, // ordered sub-regions, each matched recursively
+    pub edges: Vec<Edge>,           // relationships discovered at this level
+}
+```
 
-**Bounded tasks:** supply a concrete objective, invariants, relevant interfaces/callers and compiler/test feedback. Let agents retrieve additional source with tools; summaries do not replace source needed for correctness. Budget affected semantic scope as well as context/diff size. A large parent may require many small jobs, not a larger rewrite prompt. If a task cannot be safely decomposed or handled by the selected model, record the blocker, stage compatibility steps or seek an explicit allowed model/strategy change. Do not silently outsource it.
+**Driver:** walk every top-level declaration. At each AST node, try templates in registry priority order. The first match wins, and its children recurse. More specific templates come first, so an `if / else if / else` chain matches before a plain `if`. A template that returns `Unsupported` falls through to the next one. The registry always ends with an `Opaque` template that matches anything. An opaque node keeps its whole text as one leaf, gets a diagnostic, and is translated as a unit inside its parent's context. This is the template layer's version of fail-closed (B3): no template guesses a boundary.
 
-**Token discipline:** cache summaries by source + resolved-context + prompt/model identity; batch small meaningful regions without losing IDs; reuse only genuinely equivalent template summaries. Record actual models, tokens, retries, tool/test time and human interventions. Include validation and orchestration overhead in cost/latency comparisons. Do not regenerate a validated child solely because its parent explanation changed.
+**Catalog v1:**
 
-### 5.4 Mixed-language incremental replacement
+| Level | Template | Node | Children |
+| --- | --- | --- | --- |
+| Top level | Function definition | Function (boundary) | Body statements, as regions |
+| | `struct` / `union` | Type, fields as pins | — |
+| | `enum` | Type, variants as pins | — |
+| | `typedef` | Type alias | — |
+| | Global or file-static variable | State | Non-trivial initializer |
+| | Object-like or function-like macro | Macro (compile-time) | — |
+| | Code-generating macro call (A.6.6) | Group | One node per generated symbol |
+| | Prototype / `extern` declaration | No node; an edge target | — |
+| Statement | `if`, `if/else`, `if / else if / else` | Branch region | One child per arm |
+| | `for`, `while`, `do/while` | Loop region | Body; init, condition and step stay on the loop |
+| | `switch` | Switch region | One child per case group; cases joined by fallthrough stay together |
+| | Bare compound block `{ … }` | Scope region | Its statements |
+| | Straight-line run between control statements | Sequence region | — (leaf) |
+| | Fragment file included in a body (A.6.7) | Fragment region, one per instantiation | Its statements |
+| | `goto`/labels, computed goto, inline asm, `setjmp`, variadic bodies | Opaque in v1 | — |
 
-A region has a logical behavioral contract; generated C ABI adapters serve the actual mixed-language boundary, not the permanent identity of every node. These are **same-target** contracts, not portable wire formats. Pin target triple, scalar widths, layout/alignment, ownership/allocation/freeing, callback lifetimes and panic/unwind policy. Use `extern "C"`, checked representations and explicit scalar/buffer/handle/control-exit types where crossing C. Never assume `repr(C)` makes Rust containers, references or trait objects C-compatible.
+Additions to the original keyword list are switch/case, do/while, unions, typedefs, globals, code-generating macro calls, bare blocks, fragment includes and sequences. Sequences are required because every statement must belong to some node, or the hierarchy has holes. `return`, `break`, `continue` and `goto` aren't nodes. They're control exits of the region that contains them (5.4). Static locals are state, not inputs.
 
-For the golden shared-state ABI, generate mirrors/accessors from the same configured headers and check size/alignment/field offsets on both sides. Initially retain C-owned state identity; Rust accesses raw pointers/accessors with explicit lifetimes. Do not hold exclusive Rust references across callbacks that can re-enter and mutate that state. This phase may require unsafe Rust; it is not advertised as a safe-Rust proof. Reject unsupported layouts/callbacks. Prevent panics unwinding across FFI; use an explicit policy such as abort or caught-unwind-to-status for supported entry points.
+**Work-unit floor:** every matched construct becomes a node in the hierarchy, for viewing and explanation. Not every node becomes its own translation job. Function nodes are always work units. A region node becomes a work unit only above a size threshold (initial proposal: about 15 statements, or containing a loop). A node below the floor is translated together with its nearest work-unit ancestor. Without a floor, every small `if` arm would become a separate outlined FFI function, model call and regression run, and TinyEMU would produce tens of thousands of them. The threshold is a tunable scheduling policy, not a semantic rule. The toy fixture sets it to zero (5.6).
 
-Keep both implementations available, but select implementations **at link time from the manifest**, rebuilding between runs. Do not put a generic runtime dispatcher into each guest-instruction hot path by default; benchmark granularity against the measured baseline budget. C/Rust crossings use generated bindings; native Rust-to-Rust calls can replace adapters once contracts permit. Remaining C callers or C-owned callback tables may still require exported shims. Removing `extern "C"` alone does not recover ownership or remove hidden shared state. No hot unloading is needed.
+### 5.4 Interfaces (step 3)
 
-Before acceptance, run local cases and the actual mixed program containing that candidate and selected neighbors. Reports identify the full build and manifest. A local pass does not certify every combination; milestone desktop boots complement bounded instruction/device checks. ABI compatibility alone proves neither behavior nor ownership isolation.
+Both derivations give every node separate input and output handles, Blender-style. When a node is expanded, its interior shows a group-input node on the left and a group-output node on the right.
 
-The fixture has no irreversible effects/shared aliased heap. Golden nodes require controlled state/event inputs and the explicit effect contracts above. Never run two real external writes as a shadow comparison. Candidate tests execute without the supervisor's database/provider credentials and with bounded paths, time and resources.
+**Boundary nodes** (functions, types, macros, globals) take their interface from the declaration:
 
-### 5.5 Reassemble and export
+- *Function:* one input pin per parameter, one output pin for the return value, and exec in/out. Pointer parameters are memory-handle pins. Body analysis decides whether they're read, written or both (`memory_read`/`memory_write`). Globals and static locals the body touches also become state pins, because the signature hides them.
+- *Struct/union:* one pin per field, in the style of UE5 make/break nodes. Type-use edges connect it to the nodes that use it. *Enum:* one pin per variant. *Macro:* its parameters, plus use-site edges. *Global:* one state pin.
 
-Once the in-scope migration units are Rust, emit an ordinary Rust project and establish a reproducible working checkpoint. This may initially retain C-shaped types, structure and justified unsafe code. Remove original C linkage and unnecessary adapters where supported; disclose remaining compatibility scaffolding as modernization work. Legitimate OS/external-library FFI is not an undisclosed original-emulator implementation.
+**Region nodes** (branch, loop, switch, scope, sequence, fragment) have no signature. Analysis of the region against its enclosing function computes:
 
-Treat evaluation order, errors and destruction timing as semantics; do not concatenate snippets blindly. Rerun the declared tests and clean source/link inventory. C-free export is a separate checked stage, not implied by green node badges, and not proof that modernization is complete.
+- **Inputs (live-in):** each outer-scope variable the region reads whose value can come from before the region.
+- **Outputs (live-out):** each outer-scope variable the region may write that is read after it. A variable that is both read and written is an in/out pin.
+- **State and memory:** globals, static locals and memory reached through pointers become state or memory pins with the effect kinds of 5.6, not copied values. A local whose address escapes, for example `&x` passed to a call or stored, is a memory pin rather than a value pin.
+- **Control exits:** one exec output per distinct way out: fallthrough, `return` (with its value), `break` or `continue` to an enclosing loop or switch, and `goto` to an outer label. The parent dispatches on the exit taken.
 
-### 5.6 Recursive merging and Rust modernization
+Name resolution uses the configured AST's declaration references, never identifier text. Appendix A's lexical references remain hints. Outputs and exits matter as much as inputs. An `if` that assigns to a local, or returns from the function, isn't described by the values it reads.
 
-After a validated Rust checkpoint, hill-climb it through accepted, behavior-preserving improvements. Early Rust regions can also be composed without demanding immediate idiomatic redesign. The rule is: **inside an owned region, interfaces may evolve; outside it, preserve the declared behavioral contract unless the migration explicitly includes the affected callers.**
+### 5.5 Hierarchical graph and views (step 4)
 
-1. Select a connected, sensible group of accepted Rust regions and claim its mutation scope at an exact base manifest. Call cycles, shared state, callbacks and ownership can require a cluster; adjacency on the canvas is insufficient. Containment is hierarchical but dependencies need not form a tree.
-2. Distinguish structural aggregation from code cleanup. A composite can contain accepted children without flattening their source. The common accepted workspace already contains those implementations; do not hand a model two accumulated patches and ask it to merge them.
-3. Propose one bounded improvement: remove an internal shim, introduce a native interface, consolidate a type, clarify ownership, replace a dependency or restructure a small behavior. Preserve adapters still needed at the region's outer boundary. Use staged compatibility changes if one safe edit cannot span the necessary callers.
-4. Materialize an isolated candidate, run the required regression gate and inspect the intended quality improvement. Reject/revert failures; preserve the last accepted checkpoint. Passing tests are necessary, but merely relocating unsafe code or reducing line counts is not modernization evidence.
-5. Atomically accept the tested full manifest and new composition/provenance mapping. Keep original source, child regions, prior implementations and reports inspectable. If the accepted base moved, integrate and retest before acceptance.
-6. Repeat over larger regions through bounded jobs. Larger ownership scope is not a requirement for larger context or diffs. A root composite represents the whole program as normal modules; it is neither one giant function nor proof that every possible refactor is finished.
+The graph is hierarchical. The root view shows top-level items (functions, types, globals and macros) connected by call, type-use and state edges. Double-clicking a function opens its body as a subgraph, like a Blender node group or a UE5 collapsed or function graph. It shows a group-input node, a group-output node, and region nodes wired by exec and data edges between them. Each region can be opened in turn, and breadcrumbs lead back out (section 6).
 
-Source and target need not remain one-to-one. A missing or incompatible Rust library requires implementing the needed behavior, adapting a demonstrated alternative, or explicitly negotiating a scope/behavior change. A similarly named crate is not evidence of equivalence. Native Rust types are introduced only with their semantic requirements accounted for; for example, replacing arbitrary bytes with `String` introduces a UTF-8 constraint.
+Containment (parent/child) is one relation, and it forms a tree. Call, data, type-use, state and control-exit edges are separate relations, and they don't. The same hierarchy carries migration state: each node shows C, Rust candidate or accepted Rust. Merged groups (5.10) display collapsed unless expanded, exactly like a function.
 
-The swarm can port/refactor disjoint regions and run independent checks, but parallelism naturally narrows near shared interfaces and the root. Serialize conflicting edits and use normal source integration plus tests, not model-based conflict resolution as the default. Some global changes may remain blocked by model capability; hierarchical bookkeeping does not guarantee they are locally solvable.
+Above the function level, the hierarchy is program → module → top-level items. The initial module grouping is the original source file. It's drawn as a frame in the root view and becomes a Rust module when its group collapses. An architect plan may regroup items before collapse (open decision in section 9).
 
-### 5.7 Continuous correctness and capability evidence
+A top-level item defined in a template file, such as `divu{XLEN}`, is one source node with one configured instance per instantiation (`divu32`, `divu64`, `divu128`). The graph shows the instances. Acceptance is per instance, though one candidate may cover all of them (for example a generic or `macro_rules!` implementation) when it is validated against each.
 
-A fixed regression suite is the hill-climber's backbone. Once a Rust workspace exists, `cargo test` should exercise its relevant unit/integration paths and invoke the harness through an agreed entrypoint. No such command is implemented here yet. Candidate agents may not silently weaken tests, golden outputs, supported domains or performance budgets to make a patch pass; changes to that contract require separately reviewed, versioned evidence.
+### 5.6 Executable graph and same-language validation
 
-Keep evidence levels distinct: lossless source reconstruction; original-language identity/extraction checks; actual C → Rust → C execution; C-free Rust behavior; and modernized full-program behavior. A C wrapper calling renamed C is not Rust-ABI validation and is not universally identity-preserving when function identity is observable. Unsupported heads, variants and skipped tests must be counted, not silently treated as covered.
+Keep three notions distinct: source and explanation regions, executable behavior, and replaceable or composite regions. The containment hierarchy isn't an execution schedule. Control, call, data and state relations are separate edges. The source graph is provenance, not an immutable template for the final Rust architecture.
 
-For TinyEMU, a controlled desktop workload is the primary end-to-end modernization oracle: pinned guest/configuration, repeatable time/events, scripted interaction, and meaningful state/device/log checkpoints plus visual evidence. It exercises many subsystems together; a final screenshot alone can hide divergence. Near-complete coverage and repeatability must be measured, not assumed. Use coverage findings and focused instruction/exception/device tests to fill gaps and localize failures. G0 establishes quick-feedback and full-acceptance budgets; record which exact suite each accepted artifact passed.
+**Outlining:** before any Rust exists, the graph must run as C. For each work-unit region node, `argo-graphgen` generates a C function `argo_<node>(inputs, output pointers, state handles) -> exit tag`. It replaces the region's text in the parent with a call, followed by a dispatch on the exit tag (fallthrough, `return`, `break`, `goto` …). Function nodes need no outlining; their call sites are rebound through generated link bindings, so the graph-declared target is always the one invoked. Edits go through the block generator's segments and edit points, so rebuilt files are exact except for the intended replacements. Bodies are compiled from retained original source, never reconstructed from summaries. Indirect calls appear as callback pins or dynamic-call nodes with known targets or an explicit unresolved marker.
 
-Compare original C, faithful Rust and modernized Rust on the same declared workload. To substantiate the product thesis, record the small model and serving hardware, context/concurrency limits, success rate, retries, test time, human/strong-model intervention and total cost. A useful experiment compares a small model working directly with that same model using Argo; a strong-model port is an optional baseline. Fewer parameters do not alone prove lower total cost or an in-house deployment.
+Outlining generalizes Appendix A's identity swap (BT5) to region nodes. The fully outlined C program matching the original on the regression domain is gate G2's evidence. It also catches wrong interface derivations before any model sees the node: a missed live-out fails here.
+
+**Evaluation:** materialize arguments and results once per declared call. Sharing a data pin doesn't execute a side effect again. Preserve sequencing, return destinations, loop backedges and exit behavior. The fixture avoids unspecified C argument evaluation and undefined behavior. Later imports must declare their compiler, configuration and defined-behavior assumptions rather than invent universal C semantics. Numeric operations preserve source widths, truncation/wrapping, shifts and exceptional cases explicitly. Emulator SoftFP behavior includes guest rounding and exception flags; it isn't replaced with host floating point.
+
+**Minimal typed effects:** `pure`; `state_read/write(resource, fields)`; `memory_read/write(parameter)`; `indirect_call(callback)`; `host_io(resource)`; control exits/nonreturn; and `unknown`. Effects identify the state to snapshot and the dependencies to display. They don't prove that all behavior has been captured. The fixture permits pure computation only, with explicit call/return. An unknown or unsupported effect prevents a node from being advertised as validated. The golden track expands this envelope.
+
+**Worked fixture contract (proposed, not implemented):** `compute(n)` starts `acc = 0`, loops `i = 0..n`, and calls `step(acc, i)`. `step` calls `normalize(acc + i)`, and `normalize(x)` returns `x & 255`. Values are unsigned 32-bit, with a declared test domain of `n = 0..32`. The fixture sets the work-unit floor to zero, so the loop body in `compute` is outlined as a region node (live-in `acc`, `i`; live-out `acc`; fallthrough exit). This exercises region translation as well as function translation. Executable calls bind `compute → step → normalize`. A manifest choosing C `compute`, Rust `step` and C `normalize` exercises an actual C → Rust → C path. Compare original C, the outlined all-C graph, the mixed manifest and the final Rust on the same cases, plus a deliberately incorrect `step` candidate.
+
+### 5.7 Explanation and architect guidance
+
+**Bottom-up explanation:** cheap model calls explain leaf nodes with bounded source and context. Parents are then explained from child explanations plus retained source. Explanations record interfaces, referenced definitions, state/effects, control exits and unresolved questions, and are published as batches complete. Source stays immutable. Showing a model summaries instead of source doesn't delete executable content. Explanations are attributed hints, never proof of independence or purity. Avoid token-level model calls. Parallelism comes from claimed task fan-out, not from each agent decomposing the whole repository.
+
+**Top-down guidance:** an architect returns a versioned `ArchitectPlan` with grouping intentions, dependency and interface decisions, assumptions and bounded directives. Each work unit receives compact parent guidance, its directive, allowed dependencies, relevant source and evidence, and this lineage is persisted. The architect is a role, not necessarily a separate process or an always-required giant model. Ultra 550B remains an optional original candidate. Verify access, hardware/context budget and privacy policy before selecting any endpoint. Lightning/Nano worker capability is likewise unproven until measured. Private operation may not send source-derived context to an external architect. Public-demo endpoints must be disclosed and can't establish an in-house capability claim.
+
+**Token discipline:** cache summaries by source, resolved context, and prompt/model identity. Batch small regions without losing IDs. Record actual models, tokens, retries, tool/test time and human interventions, and include validation and orchestration overhead in cost comparisons. Don't regenerate a validated child only because its parent's explanation changed.
+
+### 5.8 Bottom-up assignment and translation (steps 5–6)
+
+**Readiness (evaluated by S):** a work-unit node is ready when it meets all three conditions:
+
+1. It has an accepted C implementation and no accepted Rust implementation.
+2. Every work-unit descendant has accepted Rust.
+3. Every type node it uses has a Rust mirror.
+
+Callee-before-caller order in the call graph is a scheduling priority, not a prerequisite. A Rust function can call a C function through a binding, and recursion makes strict call-graph order impossible.
+
+**Type mirrors:** in the first phase, a struct, union or enum's Rust implementation is a `#[repr(C)]` mirror. It is generated mechanically from the configured headers, with size, alignment and field-offset assertions on both sides (5.9), rather than written by an agent. Native redesign of a type happens only after all of its users are Rust (5.10).
+
+**Worker loop:**
+
+1. Claim a ready node through S (claim, lease and fence; section 4).
+2. Assemble context: the node's C text, pins, exits and effects; the accepted Rust of its children; explanations; the architect directive; and relevant callers and callees. Agents may retrieve more source with tools. Summaries don't replace source that correctness depends on.
+3. The model writes Rust for the node behind its current ABI: `extern "C"` with the declared or outlined signature and exit tag.
+4. Build the program with that node swapped in by link-time manifest selection (5.9). Every other node uses its current accepted implementation, which is mostly C early on.
+5. Run the quick regression tier (5.12). On failure, feed compiler and test output back within a bounded retry budget. On persistent failure, record the blocker and release the claim rather than escalating silently to a larger model.
+6. Submit the candidate and its report. S accepts by compare-and-swap on the base manifest (section 4). Full-tier checks run at checkpoints.
+
+A parent's own translation covers the code left after its work-unit children were outlined: the skeleton that sequences child calls and dispatches their exits. Its children are already Rust, so the Rust parent calls them, initially still through their C-shaped interfaces.
+
+Budget affected semantic scope as well as context and diff size. If a node can't be decomposed safely or handled by the selected model, record the blocker, stage compatibility steps, or seek an explicitly allowed model or strategy change. Don't outsource it silently.
+
+### 5.9 Mixed-language ABI
+
+A region has a logical behavioral contract. Generated C ABI adapters serve the actual mixed-language boundary; they aren't the permanent identity of the node. These are **same-target** contracts, not portable wire formats. Pin the target triple, scalar widths, layout/alignment, ownership/allocation/freeing, callback lifetimes and panic/unwind policy. Use `extern "C"`, checked representations, and explicit scalar/buffer/handle/control-exit types where code crosses into C. Never assume `repr(C)` makes Rust containers, references or trait objects C-compatible.
+
+For the golden shared-state ABI, generate mirrors and accessors from the same configured headers, and check size, alignment and field offsets on both sides. Initially C keeps ownership of state; Rust accesses it through raw pointers or accessors with explicit lifetimes. Don't hold exclusive Rust references across callbacks that can re-enter and mutate that state. This phase may need unsafe Rust and isn't advertised as a safe-Rust proof. Reject unsupported layouts and callbacks. Prevent panics from unwinding across FFI with an explicit policy, such as abort or caught-unwind-to-status, at supported entry points.
+
+Keep both implementations available, but select them **at link time from the manifest**, rebuilding between runs. Don't put a generic runtime dispatcher in every guest-instruction hot path. Benchmark granularity against the measured baseline budget; this is another reason for the work-unit floor. No hot unloading is needed.
+
+Before acceptance, run local cases and the actual mixed program containing the candidate and its selected neighbors. Reports identify the full build and manifest. A local pass doesn't certify every combination. Milestone desktop boots complement bounded instruction and device checks. ABI compatibility alone proves neither behavior nor ownership isolation.
+
+The fixture has no irreversible effects and no shared aliased heap. Golden nodes require controlled state/event inputs and the effect contracts above. Never run two real external writes as a shadow comparison. Candidate tests run without the supervisor's database or provider credentials, with bounded paths, time and resources.
+
+### 5.10 Merge (step 7)
+
+S evaluates merge opportunities in the same transaction that accepts a node. This is pure table logic, with no compilation:
+
+- **Edge cleanup:** for each edge (call, data or type-use) from the accepted node to a neighbor in the same parent group, if both ends now have accepted Rust and no C user of that interface remains, enqueue a cleanup job for the edge.
+- **Collapse:** when a parent and all of its work-unit children have accepted Rust and the edges inside the group are clean, enqueue a collapse job for the parent.
+
+Both job kinds use canonical logical-task keys, so two acceptances that detect the same opportunity create one job.
+
+Cleanup and collapse jobs run under a dedicated, narrowly scoped worker skill.
+
+- **Allowed:**
+  - Remove `extern "C"`, `#[no_mangle]` and exported shims from items that no longer have a C caller. Keep them where a C caller or C-owned callback table remains.
+  - Re-inline outlined region nodes into their parent function. Outlining was a migration device, not a design decision, and shouldn't survive into the Rust code.
+  - Turn output pointers into return values or `&mut` parameters, and exit tags into native control flow (`return`, `break`, `?`).
+  - Replace C scalar aliases and raw pointers with Rust types where layout and semantics are unchanged and every user is Rust. Drop `repr(C)` from types with no remaining C user.
+- **Not allowed:** behavior changes, edits outside the claimed group, interface changes visible to the group's outer callers, or weaker tests.
+
+The candidate runs the same regression tier. A failure leaves the previous accepted state in place. When a collapse is accepted, the group displays as one node, expandable to its children. Provenance keeps the original nodes, C source and reports.
+
+The swarm can clean up and collapse disjoint groups concurrently. Parallelism narrows near shared interfaces and the root. Serialize conflicting edits. Use normal source integration plus tests, not model-based conflict resolution, as the default. Adjacency on the canvas is not a merge criterion; graph edges and the hierarchy are.
+
+### 5.11 Root, export and modernization (step 8)
+
+Collapse recurses: regions into functions, items into modules (5.5), and modules into the program. When the program node collapses, the result is one ordinary Rust project with no original C linkage and no internal C ABI. Two things may remain:
+
+- **Legitimate external FFI:** host libraries such as SDL, or libc where the original used OS interfaces. This is disclosed and isn't migration scaffolding.
+- **C-shaped architecture:** unsafe code, global state, pointer-heavy structures and manual memory management. This is modernization input, not a failed migration.
+
+C-free export is a separate checked stage, not implied by green node badges. Treat evaluation order, errors and destruction timing as semantics. Rerun the declared tests and a clean source/link inventory.
+
+**Modernization** hill-climbs the working Rust through accepted, behavior-preserving improvements. Inside an owned region, interfaces may evolve; outside it, the declared behavioral contract holds unless the migration explicitly includes the affected callers.
+
+1. Claim a connected group of accepted Rust regions at an exact base manifest. Call cycles, shared state, callbacks and ownership may require a cluster.
+2. Propose one bounded improvement: introduce a native interface, consolidate a type, clarify ownership, replace a dependency or restructure a small behavior. Use staged compatibility changes when one safe edit can't span the necessary callers.
+3. Materialize an isolated candidate, run the regression gate, and inspect the intended quality improvement. Moving unsafe code around or reducing line counts isn't modernization evidence.
+4. Atomically accept the tested full manifest and the new composition/provenance mapping. If the accepted base has moved, integrate and retest first.
+
+Source and target need not stay one-to-one. A missing or incompatible Rust library means implementing the needed behavior, adapting a demonstrated alternative, or explicitly negotiating a scope change. A similarly named crate isn't evidence of equivalence. Introduce native types only with their semantic requirements accounted for; for example, replacing arbitrary bytes with `String` adds a UTF-8 constraint. Some global changes may stay out of reach of the selected model, because hierarchical bookkeeping doesn't guarantee that every change is locally solvable.
+
+### 5.12 Continuous correctness and capability evidence
+
+A fixed regression suite is the backbone of translation, merging and modernization. Use two tiers: a quick tier (focused unit, instruction and device cases) on every candidate, and a full tier (the pinned whole-program workload) at checkpoints and before export. Once a Rust workspace exists, `cargo test` should exercise the relevant paths and invoke the harness through an agreed entrypoint. No such command exists yet. Candidate agents may not silently weaken tests, golden outputs, supported domains or performance budgets to make a patch pass. Changes to that contract need separately reviewed, versioned evidence.
+
+Keep evidence levels distinct: lossless source reconstruction; outlined original-language checks; actual C → Rust → C execution; C-free Rust behavior; and modernized full-program behavior. A C wrapper calling renamed C isn't Rust ABI validation. Count unsupported heads, opaque nodes, variants and skipped tests; never treat them as covered silently.
+
+For TinyEMU, a controlled desktop workload is the primary end-to-end oracle: pinned guest and configuration, repeatable time and events, scripted interaction, and meaningful state/device/log checkpoints plus visual evidence. A final screenshot alone can hide divergence. Coverage and repeatability must be measured, not assumed. G0 sets the quick and full tier budgets, and each accepted artifact records the exact suite it passed.
+
+Compare original C, faithful Rust and modernized Rust on the same declared workload. To support the product thesis, record the small model and serving hardware, context/concurrency limits, success rate, retries, test time, human or strong-model intervention, and total cost. A useful experiment compares a small model working directly with the same model using Argo. A strong-model port is an optional baseline. Fewer parameters don't by themselves prove lower total cost or an in-house deployment.
 
 ## 6. GUI: a UE5 Blueprints-like control plane
 
@@ -297,13 +442,13 @@ The panel's overlapping iced preference is not a benchmark, launch result, final
 
 | Gate | Deliverable and acceptance | Parallel handoff |
 | --- | --- | --- |
-| **G0: contract and baselines** | Agree source/configured-instance identities, fixture/ABI/domain, import/claim/reclaim/modernize transcript and harness interface; investigate/pin original RV64 X11 baseline; test selected private-model endpoint/tool access | S owns protocol + harness; W owns importer/model and bounded-interpreter feasibility; U owns toolkit launch |
-| **G1: visible shared state** | Claimed import/decomposition produces live explanations through real SDK bindings; reconnect restores state | S/W/U first vertical slice; inventory is not a migration claim |
+| **G0: contract and baselines** | Agree source/configured-instance identities, fixture/ABI/domain, parser choice (5.2) with a span-mapping spike, template catalog v1 and work-unit floor, import/claim/reclaim/modernize transcript and harness interface; investigate/pin original RV64 X11 baseline; test selected private-model endpoint/tool access | S owns protocol + harness; W owns importer/model and bounded-interpreter feasibility; U owns toolkit launch |
+| **G1: visible shared state** | Claimed import produces the template-derived hierarchical graph and live explanations through real SDK bindings; function bodies open as subgraphs; reconnect restores state | S/W/U first vertical slice; Appendix A BM1–BM6 feed this gate; inventory is not a migration claim |
 | **G1s: swarm ownership** | Two workers compete safely; duplicate task creation, lease expiry/reclaim, stale publication, overlapping edits and combined-manifest acceptance are tested | Can use two processes on one host; required before concurrent mutation, not after G6 |
-| **G2: same-language baseline** | Original C and graph-organized C match on the fixture domain; expose exact report and skipped/unsupported cases | W invokes S's runner; S enforces evidence prerequisites |
+| **G2: same-language baseline** | Original C and the fully outlined graph-organized C (5.6) match on the fixture domain; Appendix A's identity swap (BT5) passes on TinyEMU; expose exact report and skipped/unsupported cases | W invokes S's runner; S enforces evidence prerequisites |
 | **G3: one Rust replacement** | Selected model produces Rust in real C → Rust → C execution; local/mixed cases pass and a bad candidate is rejected | Minimum honest migration demo; record actual model/interventions |
-| **G4: fixture Rust checkpoint** | All toy units are Rust; clean C-free project matches the fixed tests | Faithful port complete, not yet the full first slice or golden acceptance |
-| **G4m: recursive fixture modernization** | Compose accepted Rust children, remove an unnecessary internal ABI boundary through bounded changes, preserve external behavior and provenance; stale/failed refactors cannot advance state | Completes the first slice; demonstrate separate jobs rather than one large parent rewrite |
+| **G4: fixture Rust checkpoint** | All toy work units are Rust, scheduled leaves-first by S; clean C-free build matches the fixed tests; internal C-shaped interfaces may remain | Faithful port complete, not yet the full first slice or golden acceptance |
+| **G4m: merge to root and modernize** | S detects cleanup/collapse opportunities on acceptance; scoped jobs re-inline the outlined region, remove internal `extern "C"` boundaries and collapse groups up to one Rust program node; then one bounded modernization is accepted. External behavior and provenance are preserved; stale or failed jobs cannot advance state | Completes the first slice; demonstrate separate jobs rather than one large parent rewrite |
 | **G4b: TinyEMU leaf replacement** | A bounded helper is Rust; focused comparisons and the selected mixed emulator's pinned desktop workload pass | First TinyEMU-native result; preserve SoftFP flags where applicable |
 | **G5a: shared-state/devices** | Layout-checked state/callback ABI; required device/storage/input paths migrate with bounded traces and desktop checks | W translation plus S harness; U shows state/callback/evidence |
 | **G5b: bounded interpreter migration** | Supported chunks/staged edits preserve shared frame state and exits with usable budgets; demonstrate work within the selected small model's limits | Whole-function one-shot output from a stronger model does not establish this capability |
@@ -345,4 +490,431 @@ Primary references checked during drafting; repository links below are pinned do
 - [Nemotron Ultra model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16): original optional architect candidate, not a selected hosting configuration. Lightning/Nano worker variants, local serving requirements and endpoint access still need to be pinned and tested; no capability/cost claim is verified here.
 - [TinyEMU upstream](https://bellard.org/tinyemu/), [technical README](https://bellard.org/tinyemu/readme.txt), and [JSLinux guest list](https://bellard.org/jslinux/): RV64, VirtIO devices, SDL graphics, MIT licensing, and available RISC-V X Window configurations. A listed web guest is evidence of availability, not proof of this project's native baseline boot.
 
-Open at implementation start: U ownership, toolkit/revision and demo OS; integration of the block-generator draft with source/configured-instance identities; canonical task keys, claim scopes, lease/renewal parameters and conflict behavior; concrete SDK/schema/transcript and native harness interface; supported boundary/interpreter extraction or staged-edit rules; ABI/layout v1; private model variants/serving hardware and context/tool budgets; fixed regression domains, acceptance cadence and modernization objectives; TinyEMU source closure, guest/configuration hashes, offline storage/network/display choices and measured golden budget. W and S can start independently against the agreed transcript; full backend completion is not a prerequisite. G0 resolves or records blockers rather than silently broadening or shrinking acceptance.
+Open at implementation start: U ownership, toolkit/revision and demo OS; configured-AST parser (5.2 recommends Clang; tree-sitter-c is the main alternative); template catalog v1 coverage and whether `goto` gets a template; work-unit floor threshold (5.3); grouping above the function level (5.5 defaults to original source files as modules, with architect regrouping as the alternative); Appendix A's open questions; canonical task keys, claim scopes, lease/renewal parameters and conflict behavior; concrete SDK/schema/transcript and native harness interface; supported boundary/interpreter extraction or staged-edit rules; ABI/layout v1; private model variants/serving hardware and context/tool budgets; fixed regression domains, acceptance cadence and modernization objectives; TinyEMU source closure, guest/configuration hashes, offline storage/network/display choices and measured golden budget. W and S can start independently against the agreed transcript; full backend completion is not a prerequisite. G0 resolves or records blockers rather than silently broadening or shrinking acceptance.
+
+## Appendix A. Source inventory: block generator specification
+
+Status: draft 1, 2026-11-07; merged into this document from `docs/BLOCK_GENERATOR_SPEC.md` on the same date.
+Target codebase: TinyEMU 2019-12-21 (tarball SHA-256 `be8351f2121819b3172fcedce5cb1826fa12c87da1b7ed98f269d3e802a05555`)
+Current implementation: `src/split.rs` (`swapctl split`), which covers sections A.6.1 to A.6.3 and part of A.6.5. That code, `swap_harness/` and `kernelish.c` live outside this checkout.
+
+**How this appendix fits the architecture.** This layer is step 0 of the pipeline in section 5. It owns lossless text, top-level blocks and edit points. It doesn't own statement-level nodes, interfaces, scheduling or acceptance. When merging it in, the following IDs were renamed to avoid clashing with the integration gates in section 7: guarantees G1–G8 → **B1–B8**, tests T1–T5 → **BT1–BT5**, milestones M1–M6 → **BM1–BM6**. These reconciliations with the rest of the document take precedence over the text below:
+
+- **Identity:** a block ID (A.6.10) is unique within one source snapshot. Persistent node identity is project + snapshot + configured instance + block ID, with provenance carried across edits (section 4).
+- **Storage:** the tables in A.7 are the storage form of the `SourceFile`, `SourceBlock` and `ConfiguredInstance` records in section 4, not a separate schema.
+- **Large functions:** question 2 in A.12 is answered by the template layer (5.3–5.6). Large functions are split by statement templates with derived interfaces and control exits, not by cutting text at `case` labels.
+- **Clang:** the no-Clang rule applies to `crates/blocks`. The configured AST (5.2) is a separate stage in the worker.
+- **References:** lexical references (A.6.9) are context for models and the UI. Node pins and edges come from the configured AST's resolved declarations.
+
+### A.1 Purpose
+
+The block generator turns a C codebase into **blocks**: exact pieces of source text that a person or model can rewrite one at a time, and that the swap tool can replace with Rust while the rest of the C program still compiles and runs.
+
+It is written in Rust, with no Clang dependency and no preprocessing step. It works on the source text exactly as written.
+
+#### Non-goals
+
+- **Type checking:** Types are kept as text. No C type system is implemented.
+- **Full preprocessing:** Macros are only expanded in the limited cases in section A.6.6, to find names.
+- **Rust generation:** Writing Rust is the model's job. This crate only provides the blocks, their context and the edit points.
+- **Build system parsing:** Programs and compile units come from a manifest (section A.5), not from Makefiles.
+
+### A.2 Terms
+
+| Term | Meaning |
+|---|---|
+| Source file | A `.c` or `.h` file in the project |
+| Segment | A contiguous byte range of one file. A file's segments cover it exactly. |
+| Block | A segment containing code, with an ID |
+| Text segment | Whitespace and comments between blocks. Not a block. |
+| Compile unit | One compilation of one `.c` file with a set of defines, such as `riscv_cpu.c` with `MAX_XLEN=64` |
+| Program | A linked output, such as `temu`, made of compile units |
+| Template file | A file included more than once with different parameter macros, such as `riscv_cpu_template.h` with `XLEN` |
+| Instantiation | One `#include` of a template file, with its parameter values |
+| Fragment file | A file that is only valid inside a function body, such as `riscv_cpu_fp_template.h` |
+| Paste macro | A function-like macro that joins tokens, such as `glue` and `xglue` |
+| Symbol | A name the compiler or linker sees, such as `divu64`, after templates and macros are applied |
+
+### A.3 Guarantees
+
+Every guarantee has a test in section 10.
+
+| ID | Guarantee |
+|---|---|
+| B1 | **Exact rebuild:** Joining a file's segments in order reproduces the file byte for byte. Output that fails this check is an error, never written. |
+| B2 | **Full coverage:** Segments are in order, with no gaps or overlaps, from byte 0 to the end of the file. |
+| B3 | **Fail closed:** Code that can't be split safely becomes an `Unparsed` block with a diagnostic. It's never guessed. |
+| B4 | **Deterministic:** The same input always gives the same blocks, IDs and order. |
+| B5 | **Stable IDs:** Editing one block doesn't change any other block's ID. |
+| B6 | **No panics:** Any valid UTF-8 input produces a result. Invalid UTF-8 produces error `E001`. |
+| B7 | **Exact edit points:** Every range reported inside a block, such as a function's name or parameters, points to exactly that text. |
+| B8 | **Safe Rust:** The crate uses `#![forbid(unsafe_code)]`. |
+
+### A.4 Data model
+
+All offsets are byte offsets. Ranges are half-open (`start..end`). Ranges inside a block are relative to the start of that block's text.
+
+```rust
+pub struct Project {
+    pub files: Vec<SourceFile>,
+    pub blocks: Vec<Block>,
+    pub symbols: Vec<Symbol>,
+    pub references: Vec<Reference>,
+    pub instantiations: Vec<Instantiation>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+pub struct SourceFile {
+    pub path: String,               // relative to the project root, using `/`
+    pub hash: String,               // SHA-256 of the file
+    pub role: FileRole,
+    pub segments: Vec<Segment>,     // in file order, covering the file (B1, B2)
+}
+
+pub enum FileRole {
+    Normal,
+    Template { params: Vec<String> },      // e.g. ["XLEN"]
+    Fragment { included_by: Vec<BlockId> },
+}
+
+pub struct Segment {
+    pub range: Range<usize>,
+    pub content: SegmentContent,
+}
+
+pub enum SegmentContent {
+    Text,              // whitespace and comments
+    Block(BlockId),
+}
+
+pub struct Block {
+    pub id: BlockId,
+    pub file: String,
+    pub kind: BlockKind,
+    pub name: Option<BlockName>,
+    pub text: String,                // exactly the file's bytes in this range
+    pub hash: String,                // SHA-256 of `text`
+    pub conditions: Vec<Condition>,  // enclosing #if branches, outermost first
+    pub linkage: Linkage,
+    pub head: Option<FunctionHead>,  // for Function blocks, section 6.8
+    pub identifiers: Vec<String>,    // section 6.9
+}
+
+pub enum BlockKind {
+    Function,
+    Declaration,  // globals, prototypes, top-level macro calls
+    Type,         // struct, union, enum, typedef
+    Macro,        // #define
+    Directive,    // other preprocessor lines, and `extern "C" {` / `}`
+    MacroCall,    // a top-level macro call that generates code, section 6.6
+    Fragment,     // the whole body of a fragment file
+    Unparsed,
+}
+
+pub enum BlockName {
+    Plain(String),                                      // helper
+    Templated { pattern: String, params: Vec<String> }, // "divu{XLEN}", ["XLEN"]
+    MacroCall { macro_name: String, first_arg: Option<String> }, // TARGET_READ_WRITE(8)
+}
+
+pub struct Condition {
+    pub directive: String,  // the opening line, e.g. "#ifdef WORDS_BIGENDIAN"
+    pub branch: u32,        // 0 for the #if part, then 1, 2, ... for each #elif or #else
+    pub branch_text: String,// the #elif or #else line, or the opening line for branch 0
+}
+
+pub enum Linkage { Static, External, Unknown }
+
+pub struct Symbol {
+    pub name: String,                   // e.g. "divu64"
+    pub block: BlockId,
+    pub instantiation: Option<InstantiationId>,
+    pub linkage: Linkage,
+}
+
+pub struct Instantiation {
+    pub id: InstantiationId,
+    pub template_file: String,
+    pub included_from: String,           // the including file
+    pub include_block: BlockId,          // the #include Directive block
+    pub bindings: BTreeMap<String, String>, // e.g. {"XLEN": "64"}
+    pub conditions: Vec<Condition>,      // around the #include, e.g. "#if MAX_XLEN >= 64"
+}
+
+pub struct Reference {
+    pub from: BlockId,
+    pub name: String,                    // the name as used, after paste-macro rendering
+    pub target: Target,
+    pub ranges: Vec<Range<usize>>,       // every use within `from`'s text
+}
+
+pub enum Target {
+    Unique(BlockId),
+    Ambiguous(Vec<BlockId>),  // e.g. alternatives under different #ifdef branches
+    External,                 // not defined in the project, e.g. printf
+}
+```
+
+### A.5 Input
+
+```toml
+# swap.toml
+root = "tinyemu-2019-12-21"
+
+[[program]]
+name = "temu"
+units = [
+  { file = "riscv_cpu.c", defines = { MAX_XLEN = "32" } },
+  { file = "riscv_cpu.c", defines = { MAX_XLEN = "64" } },
+  { file = "riscv_cpu.c", defines = { MAX_XLEN = "128" } },
+  { file = "virtio.c" },
+  # ...
+]
+```
+
+Version 1 splits every `.c` and `.h` file under `root`, with or without a manifest. The manifest only adds program and compile-unit information, which section A.6.7's instantiation records and the identity-swap test (BT5) use.
+
+### A.6 Pipeline
+
+The stages run in this order. Stages A.6.1 to A.6.3 run per file. Stage A.6.4 needs all files' directives first, so the generator makes two passes.
+
+#### A.6.1 Read
+- **Path order:** Read files sorted by path (B4).
+- **Encoding:** Reject invalid UTF-8 with `E001`, and skip that file.
+- **Hash:** Record the file's SHA-256.
+
+#### A.6.2 Lex (implemented)
+Produce tokens covering the file exactly:
+
+| Token | Rule |
+|---|---|
+| Whitespace | Spaces, tabs, newlines and `\` + newline |
+| Comment | `//` to the end of the line, or `/* ... */`. An unterminated `/*` is a lex error. |
+| Directive | A `#` that is the first token on its line, through the end of the line, following `\` continuations and block comments |
+| String | `"..."` with `\` escapes. A raw newline is a lex error. |
+| Char | `'...'`, same rules as String |
+| Identifier | `[A-Za-z_][A-Za-z0-9_]*` |
+| Number | C preprocessing numbers, including `1e+5` and `0x1p-3` |
+| Punct | Any other single byte |
+
+On a lex error, everything from that point to the end of the file becomes one `Unparsed` block with `W001`.
+
+#### A.6.3 Top-level scan (implemented, with new rules)
+Bracket depth counts `()`, `[]` and `{}` in significant tokens, meaning everything except whitespace, comments and directives.
+
+**Item boundaries:**
+1. A directive at depth 0 between items is its own segment (`Macro` for `#define NAME`, otherwise `Directive`).
+2. `extern "<string>" {` and its matching `}` are each `Directive` segments. The code between them is scanned as top-level.
+3. A `{` at depth 0 directly after `)` starts a function body, and the item ends at the matching `}`. Comments and directives between the `)` and the `{` are skipped.
+4. Otherwise the item ends at the first `;` at depth 0. This includes `struct`/`union`/`enum`/`typedef` definitions, which continue past their `}`.
+5. **New: self-terminating macro calls.** An item that so far is only `M(...)`, where `M` is in the macro table (A.6.4) and its body ends with `}` or `;`, ends at its closing `)`. It becomes a `MacroCall` block.
+6. A bare macro use (`M` or `M(...)` with no other tokens) ends before a following directive, before a closing `}` of an `extern` wrapper, or at the end of the file.
+7. Otherwise a bare macro use joins the following item, so attributes like `__printf(1, 2)` stay with their function.
+
+**Comments:** Comments directly above an item, with no blank line in between, belong to the item.
+
+**Failure:** If depth goes negative or the file ends inside an item, the code from the item's start to the next `}` at the start of a line becomes one `Unparsed` block with `W010`. Scanning then continues after it. Without such a `}`, the `Unparsed` block runs to the end of the file.
+
+**New: conditions.** While scanning, keep a stack of top-level `#if`/`#ifdef`/`#ifndef` groups, updated by `#elif`, `#else` and `#endif`. Each block records the stack at its start in `conditions`. An `#endif` with no open group, or a group still open at the end of the file, gives `W011`, but the scan continues. Directives inside a block don't change the stack.
+
+#### A.6.4 Macro table (new)
+Built from every `Macro` block in the project before any classification:
+
+```rust
+pub struct MacroDef {
+    pub name: String,
+    pub params: Option<Vec<String>>,  // None for object-like macros
+    pub body: Vec<Token>,             // tokens after the name and parameters
+    pub block: BlockId,
+}
+```
+
+From the table, mark these:
+- **Paste macros:** A function-like macro whose body is `a ## b` of its parameters, or a call to another paste macro with its parameters in order. In TinyEMU, `xglue` and `glue` (`cutils.h`).
+- **Alias macros:** An object-like macro whose body is a single paste-macro call, such as `#define add_sf glue(add_sf, F_SIZE)` in `softfp_template.h`.
+- **Code-generating macros:** A function-like macro whose expanded body, scanned as in A.6.3, contains at least one `Function` or `Declaration`, such as `TARGET_READ_WRITE` in `riscv_cpu_priv.h`.
+
+Macros defined more than once with different bodies are kept as alternatives, each with its own conditions.
+
+#### A.6.5 Classify and name
+Classification rules (implemented):
+
+| Rule | Kind |
+|---|---|
+| Item ended by rule 3 | `Function` |
+| First identifier is `typedef` | `Type` |
+| A leading `struct`/`union`/`enum` with a `{` body and no `=` | `Type` |
+| Item ended by rule 5 | `MacroCall` |
+| Anything else | `Declaration` |
+
+Name rules, in priority order:
+1. **Paste-macro name (new):** If a function's name position holds a paste-macro call, render it. Each argument is rendered recursively, a template parameter becomes `{PARAM}`, and the parts are joined. `glue(divu, XLEN)` → `divu{XLEN}`, and `glue(glue(cvt_sf, F_SIZE), _sf32)` → `cvt_sf{F_SIZE}_sf32`. The result is `BlockName::Templated`.
+2. **Alias name (new):** If the name is an alias macro, render the alias's body the same way. `add_sf` → `add_sf{F_SIZE}`.
+3. **Function name (implemented):** The identifier before the first depth-0 `(` that follows a return type (an identifier or `*`).
+4. **Macro-defined function (implemented):** If no `(` follows a return type, use `MACRO(first_arg)`, such as `SYSCALL_DEFINE2(add)`.
+5. **Declarations, types and macros (implemented):** As in the current implementation. These are a function pointer's `(*name)`, a struct tag, the `typedef` name, the last depth-0 identifier before `=`, `;`, `[` or `:`, and a `#define` name.
+
+**Linkage:** `Static` if `static` appears before the name at depth 0, `External` for functions and declarations without it, and `Unknown` when a macro hides the storage class.
+
+#### A.6.6 Code-generating macro calls (new)
+For each `MacroCall` block calling a code-generating macro:
+1. **Expand:** Substitute the arguments into the macro body and apply `##`, but don't expand other macros. Paste macros and `#` stringizing are the only exceptions.
+2. **Scan:** Run A.6.2 to A.6.5 on the expanded text.
+3. **Record:** Add each resulting function or declaration name as a `Symbol` of the `MacroCall` block.
+
+If expansion fails, record no symbols, add `W040`, and keep the block. Calls of `TARGET_READ_WRITE(8, uint8_t, 0)` must produce `target_read_u8` and `target_write_u8`.
+
+#### A.6.7 File roles (new)
+- **Fragment files:** A file is a fragment if it's included from inside a block in another file, or if its top level contains a statement keyword item (`case`, `default`, `if`, `else`, `for`, `while`, `do`, `switch`, `return`, `break`, `continue` or `goto`), or a `label:`. The whole file then becomes one `Fragment` block, plus leading and trailing `Text`, and gets `W020`. The block is attached to every block that includes it.
+- **Template files:** A file is a template if it's included more than once from the same file, and at least one macro defined just before each `#include` is used in the template. Those macros are the template's parameters.
+- **Instantiations:** Each `#include` of a template becomes an `Instantiation`. Its `bindings` are the parameter values defined just before it, and its `conditions` are the `#if` groups around it.
+- **Template symbols:** Each `Templated` block in a template produces one `Symbol` per instantiation, with the bindings substituted. `divu{XLEN}` produces `divu32`, `divu64` and `divu128`.
+
+Templates nested inside templates combine both files' bindings. For example, `softfp_template_icvt.h` is included three times by `softfp_template.h` with `ICVT_SIZE`, and `softfp_template.h` is included three times by `softfp.c` with `F_SIZE`, giving up to nine instantiations.
+
+A file can meet both the fragment and template rules. `riscv_cpu_fp_template.h` is included three times with `F_SIZE`, but from inside a function. In that case the file is a `Fragment`, and its instantiations are still recorded so the including block knows which widths it contains.
+
+#### A.6.8 Function heads (new)
+For each `Function` block, find these ranges, relative to the block text:
+
+```rust
+pub struct FunctionHead {
+    pub leading_comment: Option<Range<usize>>,
+    pub prefix: Range<usize>,   // storage class, attributes, return type
+    pub name: Range<usize>,     // the name as written, e.g. `glue(divu, XLEN)`
+    pub params: Range<usize>,   // between the parameter list's parentheses
+    pub suffix: Range<usize>,   // anything between `)` and `{`, such as attributes
+    pub body: Range<usize>,     // from `{` to `}` inclusive
+    pub param_list: Vec<Param>,
+    pub variadic: bool,
+}
+
+pub struct Param {
+    pub range: Range<usize>,      // one parameter's text
+    pub name: Option<String>,     // None for unnamed or function-pointer parameters
+}
+```
+
+- **Splitting parameters:** Split the parameter list at depth-0 commas. A parameter's name is its last identifier, unless it contains `(*`. `void` alone means no parameters.
+- **When to leave it out:** If the head can't be found, for example in K&R-style definitions or macro-defined functions, `head` is `None` and the block gets `W050`.
+
+These ranges replace the regular expression in `swap_harness/apply_swap.py`. Renaming a function to `<name>_c` becomes an exact replacement of the `name` range.
+
+#### A.6.9 Identifiers and references
+- **Identifiers (implemented):** Identifier tokens in the block, excluding C keywords, sorted and deduplicated.
+- **Paste-macro calls (new):** Before collecting, render each paste-macro call to its pattern, so a call `glue(divu, XLEN)(a, b)` records `divu{XLEN}` instead of `glue`, `divu` and `XLEN`.
+- **Resolution (new):** For each identifier, find matching block names or symbols, in this order:
+  1. A `static` block in the same file, or in a template or fragment file included by the same file
+  2. Any block in a header the file includes, directly or indirectly
+  3. Any `External` block in the project
+  4. Otherwise `Target::External`
+
+  If several blocks match at the same level, for example alternatives under different `#ifdef` branches, the result is `Target::Ambiguous`.
+
+References are candidates, not proven uses. A local variable with the same name as a global still produces a reference.
+
+#### A.6.10 IDs
+A block ID has the form `{path}:{kind}:{name}`, with `kind` as `fn`, `decl`, `type`, `macro`, `call`, `dir` or `frag`, and `name` as the rendered pattern.
+
+Duplicates within the same file are resolved in this order:
+1. Add `@` followed by the first 8 hex characters of the SHA-256 of the block's conditions. This separates the two `cpu_to_be32` blocks in `cutils.h`.
+2. If two blocks still collide, add `~2`, `~3` and so on, in file order, and add `W030`.
+
+Directive and `Unparsed` blocks have no name, so their ID is `{path}:{kind}:{hash8}`, using the first 8 hex characters of the SHA-256 of their text. A fragment file's block is `{path}:frag`.
+
+### A.7 Output
+
+- **JSON Lines export:** `swapctl blocks [--manifest swap.toml] <root>` writes one record per file, block, symbol, instantiation, reference and diagnostic.
+- **SpacetimeDB tables:** `file`, `file_segment`, `block`, `symbol`, `instantiation`, `reference` and `diagnostic`, with one column per field in section 4. `file_segment` stores `Text` content inline and a `BlockId` for blocks, so a file can be rebuilt from the database alone.
+- **Rebuild:** `swapctl rebuild <file>` joins the stored segments. It's also how swapped code reaches the compiler.
+
+### A.8 Diagnostics
+
+| Code | Severity | Meaning |
+|---|---|---|
+| E001 | Error | File is not valid UTF-8 |
+| W001 | Warning | Lex error, rest of file is `Unparsed` |
+| W010 | Warning | Unbalanced brackets or unterminated item, `Unparsed` block created |
+| W011 | Warning | Unbalanced `#if`/`#endif` |
+| W020 | Info | Fragment file detected |
+| W030 | Warning | ID collision resolved by ordinal |
+| W040 | Warning | Code-generating macro couldn't be expanded |
+| W050 | Info | Function head not found |
+
+Each diagnostic records its code, file, range, block ID if any, and a message.
+
+### A.9 Code layout
+
+```text
+crates/blocks/src/
+  lib.rs           # generate(root, manifest) -> Project
+  model.rs         # section 4
+  lex.rs           # 6.2 (from split.rs)
+  scan.rs          # 6.3 (from split.rs)
+  conditions.rs    # 6.3 condition stack
+  macros.rs        # 6.4 and 6.6
+  classify.rs      # 6.5 (from split.rs)
+  roles.rs         # 6.7
+  head.rs          # 6.8
+  refs.rs          # 6.9
+  ids.rs           # 6.10
+  diagnostics.rs   # section 8
+```
+
+The crate has no dependencies beyond `serde`, `sha2` and `toml`.
+
+### A.10 Tests
+
+| ID | Test | Passes when |
+|---|---|---|
+| BT1 | Unit tests per rule in section A.6 | Every rule has a passing and a failing example |
+| BT2 | Fixtures in `tests/fixtures/`, each with an `.expected.json` | Output matches exactly |
+| BT3 | TinyEMU corpus, from the pinned tarball | The criteria below are all met |
+| BT4 | Property and fuzz tests | No panics, and B1 holds for arbitrary UTF-8 input and for edited fixtures |
+| BT5 | Identity swap on TinyEMU | The program builds and the boot output is identical |
+
+**Fixtures (BT2):** At least one each for strings and comments containing braces, `extern "C"`, a leading comment, `SYSCALL_DEFINE`-style functions, the current `kernelish.c`, and these cut-down TinyEMU cases:
+- Templated `glue(div, XLEN)` functions in a template included three times
+- A fragment file included inside a `switch`
+- `TARGET_READ_WRITE`-style code-generating macro calls
+- Alternative `cpu_to_be32` definitions under `#ifdef`/`#else`
+- Alias macros like `#define add_sf glue(add_sf, F_SIZE)`
+- A template nested in a template, like `softfp_template_icvt.h` inside `softfp_template.h`
+
+**TinyEMU corpus (BT3)** requires:
+1. All 88 `.c` and `.h` files, including `slirp/`, rebuild byte for byte.
+2. Zero `Unparsed` blocks.
+3. `riscv_cpu_fp_template.h` is one `Fragment` block, with no `Declaration` or `Function` blocks.
+4. `riscv_cpu_template.h` has a `Templated` block named `divu{XLEN}`. Its symbols across all instantiations are `divu32`, `divu64` and `divu128`.
+5. `riscv_cpu_priv.h`'s `TARGET_READ_WRITE` calls produce `target_read_u8` through `target_read_u64` and the matching write functions, plus the `u128` ones under their `#if` condition.
+6. The two `cpu_to_be32` blocks have different IDs and different conditions.
+7. No `W030` diagnostics.
+8. The output matches a reviewed snapshot, `tests/snapshots/tinyemu.jsonl`.
+
+**Identity swap (BT5):** For every `Function` block in `temu` that has a `head`:
+1. Rename it to `<name>__orig` using the `name` range.
+2. Add a wrapper with the original head that calls `<name>__orig` with the same arguments.
+3. Rebuild each file from its segments.
+4. Build `temu` and run `swap_harness/run_workloads.sh`. The output must match the unmodified build.
+
+Variadic functions are skipped and counted. Files are processed in batches, so a failure points to one file. This test checks block boundaries and function heads against a real compiler without using a model.
+
+**Other checks:** `cargo clippy` with no warnings, and the whole TinyEMU tree processed in under 1 second in a release build.
+
+### A.11 Milestones
+
+| # | Work | Done when |
+|---|---|---|
+| BM1 | Move `split.rs` into `crates/blocks` with the section A.4 model, IDs, diagnostics and condition tracking | Current tests pass, BT3 criteria 1 and 6 pass |
+| BM2 | Macro table, self-terminating macro calls, paste-macro and alias names | BT3 criteria 2 and 5 pass |
+| BM3 | File roles and instantiations | BT3 criteria 3 and 4 pass |
+| BM4 | Function heads and the identity swap | BT5 passes |
+| BM5 | Reference resolution and the JSON Lines export | BT3 criteria 7 and 8 pass |
+| BM6 | SpacetimeDB tables and `swapctl rebuild` | A file rebuilt from the database matches the original |
+
+### A.12 Open questions
+
+1. **Evaluating `#if`:** Conditions are stored as text. Evaluating them against a compile unit's defines would show which blocks are actually built, but needs a C constant-expression evaluator. This is planned after BM6.
+2. **Splitting very large functions:** `riscv_cpu_interp_x` is 57 KB, too large for one model rewrite. Splitting it at `case` labels into sub-blocks is planned as a separate design.
+3. **Non-UTF-8 files:** These are rejected for now. Storing them as bytes would need a different SpacetimeDB column type.
+4. **Inlining across C and Rust:** Swapped `static inline` helpers lose inlining unless link-time optimization spans both languages. This belongs to the swap tool, not the block generator, but affects which blocks are worth swapping first.
