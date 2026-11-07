@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# Rune UI (github.com/anomalyco/rune), not the unrelated `rune` scripting-language crate on
+# crates.io. Rune is pre-release: pin a revision of `dev` (never rewritten) and bump deliberately.
+rune-ui = { package = "rune", git = "https://github.com/anomalyco/rune", rev = "c762af1427930c90c845c260ef551397529c5eee" }
