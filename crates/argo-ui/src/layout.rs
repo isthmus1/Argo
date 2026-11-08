@@ -1,0 +1,574 @@
+//! Automatic layered layout. Flow runs left to right; each expanded group is laid out on its own
+//! and then placed as one block. Positions are view state, never semantic data.
+
+use crate::model::{self, Evidence, Graph, Kind, Lang, Node, Pin, Ty, Wire};
+
+pub struct Placed {
+    pub pos: Vec<[f32; 2]>,
+    pub size: Vec<[f32; 2]>,
+    /// Frame rectangles per group: x, y, w, h.
+    pub frames: Vec<[f32; 4]>,
+    /// x, y, w, h of everything.
+    pub bounds: [f32; 4],
+}
+
+const COL_GAP: f32 = 80.0;
+/// Exec wires dominate placement so the execution path stays straight.
+const EXEC_WEIGHT: f32 = 30.0;
+/// A function input feeding at least this many pins gets a getter per consumer instead.
+const GETTER_FANOUT: usize = 4;
+const ROW_GAP: f32 = 28.0;
+const FRAME_PAD: f32 = 18.0;
+const FRAME_TITLE: f32 = 34.0;
+/// Dummy nodes stand in for long edges crossing a layer; they only reserve a thin lane.
+const DUMMY_H: f32 = 4.0;
+const DUMMY_GAP: f32 = 10.0;
+/// Crossing-minimisation sweeps (alternating direction) and transposition rounds per sweep.
+const SWEEPS: usize = 24;
+const TRANSPOSE_ROUNDS: usize = 8;
+/// Crossing weight of an exec segment relative to a data segment.
+const EXEC_CROSS: f32 = 6.0;
+/// Priority-method coordinate passes.
+const PLACE_PASSES: usize = 10;
+
+/// A layout unit: one free node or one whole group.
+struct Unit {
+    size: [f32; 2],
+    /// Member nodes and their offsets inside the unit.
+    members: Vec<(usize, [f32; 2])>,
+}
+
+struct Edge {
+    from: usize,
+    to: usize,
+    /// Socket offsets from each unit's top.
+    from_y: f32,
+    to_y: f32,
+    weight: f32,
+}
+
+pub fn layout(g: &Graph) -> Placed {
+    let n = g.nodes.len();
+    let size: Vec<[f32; 2]> = g.nodes.iter().map(model::size).collect();
+    let mut pos = vec![[0.0, 0.0]; n];
+    let mut frames = Vec::new();
+
+    // Lay out each group's members on their own.
+    let mut units: Vec<Unit> = Vec::new();
+    let mut unit_of = vec![usize::MAX; n];
+    for gi in 0..g.groups.len() {
+        let members: Vec<usize> = (0..n).filter(|&i| g.nodes[i].group == Some(gi)).collect();
+        if members.is_empty() {
+            continue; // collapsed: drawn as a single node
+        }
+        let (offs, w, h) = arrange(g, &size, &members);
+        let ui = units.len();
+        for &m in &members {
+            unit_of[m] = ui;
+        }
+        let members = members.iter().zip(offs).map(|(&m, [x, y])| (m, [x + FRAME_PAD, y + FRAME_TITLE])).collect();
+        units.push(Unit { size: [w + FRAME_PAD * 2.0, h + FRAME_TITLE + FRAME_PAD], members });
+    }
+    for i in 0..n {
+        if g.nodes[i].group.is_none() {
+            unit_of[i] = units.len();
+            units.push(Unit { size: size[i], members: vec![(i, [0.0, 0.0])] });
+        }
+    }
+
+    // Outer layout over units.
+    let mut offset_in_unit = vec![[0.0, 0.0]; n];
+    for u in &units {
+        for &(m, o) in &u.members {
+            offset_in_unit[m] = o;
+        }
+    }
+    let edges: Vec<Edge> = g.wires.iter().filter(|w| unit_of[w.from.0] != unit_of[w.to.0]).map(|w| {
+        let a = w.from.0;
+        let b = w.to.0;
+        let ay = offset_in_unit[a][1] + model::socket_local(&g.nodes[a], size[a][0], true, w.from.1)[1];
+        let by = offset_in_unit[b][1] + model::socket_local(&g.nodes[b], size[b][0], false, w.to.1)[1];
+        let weight = if g.wire_ty(w) == Ty::Exec { EXEC_WEIGHT } else { 1.0 };
+        Edge { from: unit_of[a], to: unit_of[b], from_y: ay, to_y: by, weight }
+    }).collect();
+    let pure: Vec<bool> = units.iter().map(|u| u.members.iter().all(|&(m, _)| {
+        let nd = &g.nodes[m];
+        !nd.ins.iter().chain(&nd.outs).any(|p| p.ty == Ty::Exec)
+    })).collect();
+    let sizes: Vec<[f32; 2]> = units.iter().map(|u| u.size).collect();
+    let (upos, _, _) = layered(&sizes, &edges, &pure);
+
+    for (ui, u) in units.iter().enumerate() {
+        let [ux, uy] = upos[ui];
+        for &(m, [ox, oy]) in &u.members {
+            pos[m] = [ux + ox, uy + oy];
+        }
+    }
+    for gi in 0..g.groups.len() {
+        let Some(first) = (0..n).find(|&i| g.nodes[i].group == Some(gi)) else {
+            frames.push([0.0; 4]);
+            continue;
+        };
+        let ui = unit_of[first];
+        frames.push([upos[ui][0], upos[ui][1], units[ui].size[0], units[ui].size[1]]);
+    }
+
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for (ui, u) in units.iter().enumerate() {
+        b[0] = b[0].min(upos[ui][0]);
+        b[1] = b[1].min(upos[ui][1]);
+        b[2] = b[2].max(upos[ui][0] + u.size[0]);
+        b[3] = b[3].max(upos[ui][1] + u.size[1]);
+    }
+    Placed { pos, size, frames, bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]] }
+}
+
+/// Lays out a subset of nodes (one group's members) by themselves; returns their offsets
+/// relative to the subset's top-left, and its width and height.
+fn arrange(g: &Graph, size: &[[f32; 2]], members: &[usize]) -> (Vec<[f32; 2]>, f32, f32) {
+    let local = |i: usize| members.iter().position(|&m| m == i);
+    let edges: Vec<Edge> = g.wires.iter().filter_map(|w| {
+        let (a, b) = (local(w.from.0)?, local(w.to.0)?);
+        let ay = model::socket_local(&g.nodes[w.from.0], size[w.from.0][0], true, w.from.1)[1];
+        let by = model::socket_local(&g.nodes[w.to.0], size[w.to.0][0], false, w.to.1)[1];
+        Some(Edge { from: a, to: b, from_y: ay, to_y: by, weight: if g.wire_ty(w) == Ty::Exec { EXEC_WEIGHT } else { 1.0 } })
+    }).collect();
+    let sizes: Vec<[f32; 2]> = members.iter().map(|&m| size[m]).collect();
+    let pure: Vec<bool> = members.iter().map(|&m| {
+        let nd = &g.nodes[m];
+        !nd.ins.iter().chain(&nd.outs).any(|p| p.ty == Ty::Exec)
+    }).collect();
+    layered(&sizes, &edges, &pure)
+}
+
+/// Sugiyama layered placement of boxes connected by weighted port-to-port edges: ranks, dummy
+/// nodes on long edges, port-aware crossing minimisation, then priority-method coordinates.
+fn layered(sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool]) -> (Vec<[f32; 2]>, f32, f32) {
+    let n = sizes.len();
+    if n == 0 {
+        return (vec![], 0.0, 0.0);
+    }
+    let (rank, topo) = ranks(n, edges, pure);
+    let lg = split(sizes, edges, &rank);
+    let layers = order(&lg, &topo);
+    let y = place(&lg, &layers);
+
+    // Column x positions from real nodes only; dummies just reserve vertical room.
+    let cols = layers.len();
+    let mut col_w = vec![0.0f32; cols];
+    for v in 0..n {
+        col_w[rank[v]] = col_w[rank[v]].max(sizes[v][0]);
+    }
+    let mut col_x = vec![0.0f32; cols];
+    for r in 1..cols {
+        col_x[r] = col_x[r - 1] + col_w[r - 1] + COL_GAP;
+    }
+    let min_y = (0..n).map(|v| y[v]).fold(f32::MAX, f32::min);
+    let pos: Vec<[f32; 2]> = (0..n).map(|v| [col_x[rank[v]], y[v] - min_y]).collect();
+    let w = (0..n).map(|v| pos[v][0] + sizes[v][0]).fold(0.0, f32::max);
+    let h = (0..n).map(|v| pos[v][1] + sizes[v][1]).fold(0.0, f32::max);
+    (pos, w, h)
+}
+
+/// Longest-path ranks with pure producers pulled one column left of their earliest consumer.
+/// Also returns a topological order (any cycle remainder appended in index order).
+fn ranks(n: usize, edges: &[Edge], pure: &[bool]) -> (Vec<usize>, Vec<usize>) {
+    let mut indeg = vec![0usize; n];
+    for e in edges {
+        indeg[e.to] += 1;
+    }
+    let mut topo: Vec<usize> = (0..n).filter(|&v| indeg[v] == 0).collect();
+    let mut head = 0;
+    while head < topo.len() {
+        let v = topo[head];
+        head += 1;
+        for e in edges.iter().filter(|e| e.from == v) {
+            indeg[e.to] -= 1;
+            if indeg[e.to] == 0 {
+                topo.push(e.to);
+            }
+        }
+    }
+    let mut seen = vec![false; n];
+    topo.iter().for_each(|&v| seen[v] = true);
+    topo.extend((0..n).filter(|&v| !seen[v]));
+
+    let mut rank = vec![0usize; n];
+    for &v in &topo {
+        for e in edges.iter().filter(|e| e.to == v) {
+            rank[v] = rank[v].max(rank[e.from] + 1);
+        }
+    }
+    for &v in topo.iter().rev() {
+        let min_succ = edges.iter().filter(|e| e.from == v).map(|e| rank[e.to]).min();
+        if let (true, Some(m)) = (pure[v], min_succ) {
+            rank[v] = rank[v].max(m.saturating_sub(1));
+        }
+    }
+    (rank, topo)
+}
+
+/// One edge segment between adjacent layers: `a` in layer r, `b` in layer r + 1.
+struct Seg {
+    a: usize,
+    b: usize,
+    ay: f32,
+    by: f32,
+    w: f32,
+}
+
+/// The proper layered graph: real nodes first, then dummies.
+struct Lg {
+    h: Vec<f32>,
+    rank: Vec<usize>,
+    dummy: Vec<bool>,
+    segs: Vec<Seg>,
+    /// Segment indices entering (from the left) and leaving (to the right) each node.
+    left: Vec<Vec<usize>>,
+    right: Vec<Vec<usize>>,
+}
+
+/// Splits every edge spanning several layers into a chain of dummy nodes.
+fn split(sizes: &[[f32; 2]], edges: &[Edge], rank: &[usize]) -> Lg {
+    let mut lg = Lg {
+        h: sizes.iter().map(|s| s[1]).collect(),
+        rank: rank.to_vec(),
+        dummy: vec![false; sizes.len()],
+        segs: vec![],
+        left: vec![],
+        right: vec![],
+    };
+    for e in edges.iter().filter(|e| rank[e.to] > rank[e.from]) {
+        let (mut a, mut ay) = (e.from, e.from_y);
+        for r in rank[e.from] + 1..rank[e.to] {
+            let d = lg.h.len();
+            lg.h.push(DUMMY_H);
+            lg.rank.push(r);
+            lg.dummy.push(true);
+            lg.segs.push(Seg { a, b: d, ay, by: DUMMY_H / 2.0, w: e.weight });
+            (a, ay) = (d, DUMMY_H / 2.0);
+        }
+        lg.segs.push(Seg { a, b: e.to, ay, by: e.to_y, w: e.weight });
+    }
+    let m = lg.h.len();
+    lg.left = vec![vec![]; m];
+    lg.right = vec![vec![]; m];
+    for (i, s) in lg.segs.iter().enumerate() {
+        lg.right[s.a].push(i);
+        lg.left[s.b].push(i);
+    }
+    lg
+}
+
+/// Port key used for ordering: the node's index in its layer plus the port's relative height.
+fn key(lg: &Lg, idx: &[usize], v: usize, port: f32) -> f32 {
+    idx[v] as f32 + (port / lg.h[v].max(1.0)).clamp(0.0, 0.99)
+}
+
+/// Orders every layer, starting once from the topological order and once from a depth-first
+/// walk (which keeps each branch's nodes together); keeps the fewest weighted crossings.
+fn order(lg: &Lg, topo: &[usize]) -> Vec<Vec<usize>> {
+    let cols = lg.rank.iter().copied().max().unwrap_or(0) + 1;
+    let m = lg.h.len();
+    let mut seen = vec![false; m];
+    let mut walk = vec![];
+    for &v in topo {
+        dfs(lg, v, &mut seen, &mut walk);
+    }
+    let starts = [topo.iter().copied().chain(topo.len()..m).collect::<Vec<_>>(), walk];
+    let mut best: Option<(f32, Vec<Vec<usize>>)> = None;
+    for start in starts {
+        let mut layers: Vec<Vec<usize>> = vec![vec![]; cols];
+        for v in start {
+            layers[lg.rank[v]].push(v);
+        }
+        let run = sweep(lg, layers);
+        if best.as_ref().is_none_or(|b| run.0 < b.0) {
+            best = Some(run);
+        }
+    }
+    best.expect("two starts").1
+}
+
+/// Depth-first discovery order: outputs top to bottom, then inputs top to bottom.
+fn dfs(lg: &Lg, v: usize, seen: &mut [bool], out: &mut Vec<usize>) {
+    if seen[v] {
+        return;
+    }
+    seen[v] = true;
+    out.push(v);
+    let mut right: Vec<&Seg> = lg.right[v].iter().map(|&s| &lg.segs[s]).collect();
+    right.sort_by(|a, b| a.ay.total_cmp(&b.ay));
+    let mut left: Vec<&Seg> = lg.left[v].iter().map(|&s| &lg.segs[s]).collect();
+    left.sort_by(|a, b| a.by.total_cmp(&b.by));
+    let next: Vec<usize> = right.iter().map(|s| s.b).chain(left.iter().map(|s| s.a)).collect();
+    for u in next {
+        dfs(lg, u, seen, out);
+    }
+}
+
+/// Weighted-median sweeps with adjacent transposition; returns the best ordering seen.
+fn sweep(lg: &Lg, mut layers: Vec<Vec<usize>>) -> (f32, Vec<Vec<usize>>) {
+    let cols = layers.len();
+    let mut idx = vec![0usize; lg.h.len()];
+    for l in &layers {
+        for (i, &v) in l.iter().enumerate() {
+            idx[v] = i;
+        }
+    }
+    let mut best = (crossings(lg, &idx), layers.clone());
+    for it in 0..SWEEPS {
+        let down = it % 2 == 0;
+        let rs: Vec<usize> = if down { (1..cols).collect() } else { (0..cols.saturating_sub(1)).rev().collect() };
+        for r in rs {
+            median_sort(lg, &mut layers[r], &idx, down);
+            for (i, &v) in layers[r].iter().enumerate() {
+                idx[v] = i;
+            }
+        }
+        transpose(lg, &mut layers, &mut idx);
+        let c = crossings(lg, &idx);
+        if c < best.0 {
+            best = (c, layers.clone());
+        }
+        if best.0 == 0.0 {
+            break;
+        }
+    }
+    best
+}
+
+/// Sorts one layer by the weighted median port key of each node's neighbours on one side.
+/// Nodes without neighbours on that side keep their slot.
+fn median_sort(lg: &Lg, layer: &mut [usize], idx: &[usize], from_left: bool) {
+    let mut keyed: Vec<(f32, usize)> = vec![];
+    let mut slots = vec![];
+    for (slot, &v) in layer.iter().enumerate() {
+        let segs = if from_left { &lg.left[v] } else { &lg.right[v] };
+        let ks: Vec<(f32, f32)> = segs.iter().map(|&s| {
+            let sg = &lg.segs[s];
+            if from_left { (key(lg, idx, sg.a, sg.ay), sg.w) } else { (key(lg, idx, sg.b, sg.by), sg.w) }
+        }).collect();
+        if let Some(m) = weighted_median(ks) {
+            keyed.push((m, v));
+            slots.push(slot);
+        }
+    }
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (slot, (_, v)) in slots.into_iter().zip(keyed) {
+        layer[slot] = v;
+    }
+}
+
+/// Upper weighted median: on an even split it picks the upper value, so a node lines up with
+/// one neighbour (straight wire) instead of sitting between two.
+fn weighted_median(mut ks: Vec<(f32, f32)>) -> Option<f32> {
+    ks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f32 = ks.iter().map(|k| k.1).sum();
+    let mut acc = 0.0;
+    for &(k, w) in &ks {
+        acc += w;
+        if acc * 2.0 >= total - 1e-3 {
+            return Some(k);
+        }
+    }
+    None
+}
+
+/// Swaps adjacent nodes while that lowers the weighted crossings around them.
+fn transpose(lg: &Lg, layers: &mut [Vec<usize>], idx: &mut [usize]) {
+    for _ in 0..TRANSPOSE_ROUNDS {
+        let mut improved = false;
+        for l in layers.iter_mut() {
+            for i in 0..l.len().saturating_sub(1) {
+                let (u, v) = (l[i], l[i + 1]);
+                if pair_crossings(lg, idx, v, u) < pair_crossings(lg, idx, u, v) {
+                    l.swap(i, i + 1);
+                    (idx[u], idx[v]) = (i + 1, i);
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+}
+
+/// Weighted crossings between the segments of `u` and `v` if `u` sits above `v`.
+fn pair_crossings(lg: &Lg, idx: &[usize], u: usize, v: usize) -> f32 {
+    let side = |segs: &[usize], left: bool| -> Vec<(f32, f32)> {
+        segs.iter().map(|&s| {
+            let sg = &lg.segs[s];
+            if left { (key(lg, idx, sg.a, sg.ay), cross_w(sg)) } else { (key(lg, idx, sg.b, sg.by), cross_w(sg)) }
+        }).collect()
+    };
+    let mut c = 0.0;
+    for left in [true, false] {
+        let (su, sv) = if left { (&lg.left[u], &lg.left[v]) } else { (&lg.right[u], &lg.right[v]) };
+        for &(ku, wu) in &side(su, left) {
+            for &(kv, wv) in &side(sv, left) {
+                if ku > kv {
+                    c += wu * wv;
+                }
+            }
+        }
+    }
+    c
+}
+
+/// Crossing weight of a segment: exec wires matter more, but not so much that data lanes get
+/// pushed away from the exec path to avoid crossing it.
+fn cross_w(s: &Seg) -> f32 {
+    if s.w >= EXEC_WEIGHT { EXEC_CROSS } else { 1.0 }
+}
+
+/// Total weighted crossings over all adjacent layer pairs.
+fn crossings(lg: &Lg, idx: &[usize]) -> f32 {
+    let cols = lg.rank.iter().copied().max().unwrap_or(0) + 1;
+    let mut gaps: Vec<Vec<(f32, f32, f32)>> = vec![vec![]; cols];
+    for s in &lg.segs {
+        gaps[lg.rank[s.a]].push((key(lg, idx, s.a, s.ay), key(lg, idx, s.b, s.by), cross_w(s)));
+    }
+    let mut c = 0.0;
+    for g in &gaps {
+        for (i, x) in g.iter().enumerate() {
+            for y in &g[i + 1..] {
+                if (x.0 - y.0) * (x.1 - y.1) < 0.0 {
+                    c += x.2 * y.2;
+                }
+            }
+        }
+    }
+    c
+}
+
+/// Priority-method vertical coordinates: layer by layer, each node moves toward its neighbours'
+/// ports, highest priority first; lower-priority nodes are pushed aside, higher ones block.
+fn place(lg: &Lg, layers: &[Vec<usize>]) -> Vec<f32> {
+    let m = lg.h.len();
+    let exec = |v: usize| lg.left[v].iter().chain(&lg.right[v]).any(|&s| lg.segs[s].w >= EXEC_WEIGHT);
+    let prio: Vec<f32> = (0..m).map(|v| {
+        let deg = (lg.left[v].len() + lg.right[v].len()) as f32 / 100.0;
+        deg + match (lg.dummy[v], exec(v)) {
+            (true, true) => 4.0,
+            (false, true) => 3.0,
+            (true, false) => 2.0,
+            (false, false) => 1.0,
+        }
+    }).collect();
+    let mut y = vec![0.0f32; m];
+    for l in layers {
+        let mut acc = 0.0;
+        for (i, &v) in l.iter().enumerate() {
+            y[v] = acc;
+            acc += lg.h[v] + gap(lg, l, i);
+        }
+    }
+    let cols = layers.len();
+    for pass in 0..PLACE_PASSES {
+        // Alternate left-to-right and right-to-left, ending right-to-left. In the last pass the
+        // exec path (already straightened by the preceding left-to-right pass) stays put and
+        // only pure producers move toward their consumers.
+        let down = pass % 2 == PLACE_PASSES % 2;
+        let last = pass + 1 == PLACE_PASSES;
+        let rs: Vec<usize> = if down { (0..cols).collect() } else { (0..cols).rev().collect() };
+        for r in rs {
+            let desired: Vec<Option<f32>> = layers[r].iter().map(|&v| {
+                if last && exec(v) {
+                    return None;
+                }
+                let segs = if down { &lg.left[v] } else { &lg.right[v] };
+                weighted_median(segs.iter().map(|&s| {
+                    let sg = &lg.segs[s];
+                    if down { (y[sg.a] + sg.ay - sg.by, sg.w) } else { (y[sg.b] + sg.by - sg.ay, sg.w) }
+                }).collect())
+            }).collect();
+            place_layer(lg, &layers[r], &mut y, &prio, &desired);
+        }
+    }
+    y
+}
+
+/// Vertical gap below the `i`th node of a layer.
+fn gap(lg: &Lg, layer: &[usize], i: usize) -> f32 {
+    let next_dummy = layer.get(i + 1).is_some_and(|&v| lg.dummy[v]);
+    if lg.dummy[layer[i]] || next_dummy { DUMMY_GAP } else { ROW_GAP }
+}
+
+fn place_layer(lg: &Lg, layer: &[usize], y: &mut [f32], prio: &[f32], desired: &[Option<f32>]) {
+    let k = layer.len();
+    let h = |i: usize| lg.h[layer[i]];
+    let sp = |i: usize| h(i) + gap(lg, layer, i);
+    let mut by_prio: Vec<usize> = (0..k).collect();
+    by_prio.sort_by(|&a, &b| prio[layer[b]].total_cmp(&prio[layer[a]]));
+    let mut fixed = vec![false; k];
+    for i in by_prio {
+        let cur = y[layer[i]];
+        match desired[i] {
+            Some(d) if d < cur => {
+                let (mut need, mut bound) = (0.0, f32::MIN);
+                for j in (0..i).rev() {
+                    need += sp(j);
+                    if fixed[j] {
+                        bound = y[layer[j]] + need;
+                        break;
+                    }
+                }
+                y[layer[i]] = d.max(bound);
+                for j in (0..i).rev() {
+                    let lim = y[layer[j + 1]] - sp(j);
+                    if y[layer[j]] <= lim {
+                        break;
+                    }
+                    y[layer[j]] = lim;
+                }
+            }
+            Some(d) if d > cur => {
+                let (mut need, mut bound) = (0.0, f32::MAX);
+                for j in i + 1..k {
+                    need += sp(j - 1);
+                    if fixed[j] {
+                        bound = y[layer[j]] - need;
+                        break;
+                    }
+                }
+                y[layer[i]] = d.min(bound);
+                for j in i + 1..k {
+                    let lim = y[layer[j - 1]] + sp(j - 1);
+                    if y[layer[j]] >= lim {
+                        break;
+                    }
+                    y[layer[j]] = lim;
+                }
+            }
+            _ => {}
+        }
+        fixed[i] = true;
+    }
+}
+
+/// View transform: a function input pin feeding many consumers is drawn as a small getter next
+/// to each consumer (UE's "Get" nodes) rather than one long fan of wires.
+pub fn with_getters(mut g: Graph) -> Graph {
+    let mut fanout = std::collections::HashMap::<(usize, usize), usize>::new();
+    for w in &g.wires {
+        *fanout.entry(w.from).or_default() += 1;
+    }
+    let wires = std::mem::take(&mut g.wires);
+    for w in wires {
+        let src = &g.nodes[w.from.0];
+        let pin = &src.outs[w.from.1];
+        if src.kind == Kind::GroupIn && pin.ty != Ty::Exec && fanout[&w.from] >= GETTER_FANOUT {
+            let getter = Node {
+                kind: Kind::Get, title: pin.label.clone(), lang: Lang::None, evidence: Evidence::None, claim: None,
+                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty }], group: g.nodes[w.to.0].group, members: 0,
+            };
+            g.nodes.push(getter);
+            g.wires.push(Wire { from: (g.nodes.len() - 1, 0), to: w.to });
+        } else {
+            g.wires.push(w);
+        }
+    }
+    g
+}

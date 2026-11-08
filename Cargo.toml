@@ -3,13 +3,40 @@ name = "Argo"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = ["iterator"]
-resolver = "3"
+# The parser's library and binary keep the `main` crate name its tests and CLI
+# were written against; the package was renamed to `Argo` afterwards.
+[lib]
+name = "main"
+path = "src/lib.rs"
 
-[dependencies]
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[workspace]
+resolver = "3"
+members = ["iterator", "crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Rune UI (github.com/anomalyco/rune), not the unrelated `rune` scripting-language crate on
+# crates.io. Rune is pre-release with an unstable API: its README says to pin a revision of `dev`
+# (never rewritten). Pinned to dev@c762af1 (2026-11-07); bump deliberately, never to a branch.
+rune-ui = { package = "rune", git = "https://github.com/anomalyco/rune", rev = "c762af1427930c90c845c260ef551397529c5eee" }
+
+# The C front end is rucc's, pinned exactly. rucc's AST and parser crates are
+# tier 3: their Rust API is documented as changing without a major version bump,
+# so a caret range would break this crate on a patch release. The graph records
+# are the stable thing here; the parser is an implementation detail behind them.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
 rucc-ast = "=0.30.15"
 rucc-base = "=0.30.15"
 rucc-diag = "=0.30.15"
