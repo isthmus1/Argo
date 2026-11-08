@@ -84,6 +84,7 @@ mod tests {
             prompt: 10,
             completion: 5,
             total: 15,
+            cost: 0.5,
         };
         assert_eq!(ws.record(&a, true, Some(t)).unwrap().usage.requests, 1);
         ws.record(&b, false, None);

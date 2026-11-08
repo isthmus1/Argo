@@ -12,9 +12,9 @@
 //! claims) and its own clone (`--workdir DIR` becomes `DIR/0`, `DIR/1`, ...).
 //!
 //! The model is reached through `argo-server`'s model proxy (beside the database, port + 1, or
-//! `--proxy URL`): each worker attaches for a key of its own, so no provider key is needed here.
-//! `--direct` talks to the provider with `OPENAI_API_KEY` and `OPENAI_BASE_URL` instead, for a
-//! database without a proxy (`argo-server --server ...`).
+//! `--proxy URL`): each worker attaches for a key of its own and is told the model, so neither a
+//! provider key nor a model is configured here. `--direct --model M` talks to OpenRouter with
+//! `OPENROUTER_API_KEY` instead, for a database without a proxy (`argo-server --server ...`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -46,14 +46,16 @@ struct Args {
     /// reused. By default, a free slot under `$XDG_CACHE_HOME/argo-worker/<module>/`.
     #[arg(long)]
     workdir: Option<PathBuf>,
-    /// Model for every attempt until escalation.
-    #[arg(long, env = "OPENAI_MODEL", value_parser = model_name)]
-    model: String,
+    /// With `--direct`, the OpenRouter model for every attempt until escalation. Through the
+    /// proxy, `argo-server --model` decides it instead.
+    #[arg(long, value_parser = model_name, requires = "direct")]
+    model: Option<String>,
     /// Generations per chunk before giving up with `fail_chunk`.
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
     max_attempts: u32,
-    /// A stronger model to switch to after `--escalate-after` failed attempts.
-    #[arg(long, value_parser = model_name)]
+    /// A stronger model to switch to after `--escalate-after` failed attempts (`--direct` only:
+    /// the proxy sends everything as its own model).
+    #[arg(long, value_parser = model_name, requires = "direct")]
     escalation_model: Option<String>,
     /// Failed attempts before escalating; fewer than `--max-attempts`, or it never happens.
     #[arg(long, default_value_t = 2, requires = "escalation_model")]
@@ -68,8 +70,8 @@ struct Args {
     /// `argo-server`'s model proxy (default: the `--db` host at its port + 1).
     #[arg(long, value_name = "URL")]
     proxy: Option<String>,
-    /// Reach the provider directly with `OPENAI_API_KEY` and `OPENAI_BASE_URL`, not the proxy.
-    #[arg(long, conflicts_with = "proxy")]
+    /// Reach OpenRouter directly with `OPENROUTER_API_KEY` and `--model`, not the proxy.
+    #[arg(long, conflicts_with = "proxy", requires = "model")]
     direct: bool,
 }
 
@@ -120,10 +122,10 @@ async fn run(args: Args) -> Result<(), String> {
         model,
         after: args.escalate_after,
     });
-    let budget = Budget {
+    let budget = |model: String| Budget {
         max_attempts: args.max_attempts,
-        model: args.model.clone(),
-        escalation,
+        model,
+        escalation: escalation.clone(),
         backoff: BACKOFF,
     };
     // Each worker's clone directory and connection first, here on the multi-threaded runtime:
@@ -142,12 +144,19 @@ async fn run(args: Args) -> Result<(), String> {
             Some(url) => Access::Proxy(Proxy::attach(url, job, &db.me.to_hex()).await?),
             None => Access::Direct,
         };
-        let model = match &access {
-            Access::Proxy(p) => format!("model proxy {} as {}", p.url(), p.name()),
-            Access::Direct => "the provider directly".into(),
+        let (model, via) = match &access {
+            Access::Proxy(p) => (
+                model_name(p.model())?,
+                format!("model proxy {} as {}", p.url(), p.name()),
+            ),
+            // `--direct` requires `--model`.
+            Access::Direct => (
+                args.model.clone().unwrap_or_default(),
+                "OpenRouter directly".into(),
+            ),
         };
         eprintln!(
-            "argo-worker: worker {job} connected as {} (clone in {}; {model})",
+            "argo-worker: worker {job} connected as {} (clone in {}; {model} through {via})",
             db.me.to_hex(),
             workdir.dir.display()
         );
@@ -158,7 +167,7 @@ async fn run(args: Args) -> Result<(), String> {
                 access,
             },
             validator: CompileCheck,
-            budget: budget.clone(),
+            budget: budget(model),
             checkout: Checkout::new(workdir),
         });
     }

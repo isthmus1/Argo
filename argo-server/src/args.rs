@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use argo_c::project::git::GitRef;
 use clap::Parser;
 
+/// The OpenRouter model workers use unless `--model` says otherwise: free, rate-limited.
+const MODEL: &str = "nvidia/nemotron-3.5-lightning:free";
+
 /// Where `argo-db` lives in this checkout; the default module project to build and publish.
 const MODULE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../argo-db");
 
@@ -31,9 +34,21 @@ pub struct Args {
     /// Port for the model proxy on the `--listen` address (default: `--port` + 1, where workers
     /// look for it). Workers attach there for a key of their own; it forwards their completions to
     /// `OPENAI_BASE_URL` with this machine's `OPENAI_API_KEY`, so workers hold neither, and logs
-    /// usage per worker to `usage.log` in the data dir. Off when either variable is unset.
+    /// usage per worker to `usage.log` in the data dir. Off when `OPENROUTER_API_KEY` is unset.
     #[arg(long, conflicts_with = "server")]
     pub proxy_port: Option<u16>,
+    /// The OpenRouter model every worker uses: workers are told it when they attach, and the
+    /// proxy sends every request as it. For speed, the paid `nvidia/nemotron-3.5-lightning` with
+    /// `--model-provider fireworks`.
+    #[arg(long, default_value = MODEL, value_parser = model_name, conflicts_with = "server")]
+    pub model: String,
+    /// Pin every request to this OpenRouter provider (a slug, e.g. `fireworks`), with no fallback
+    /// to others; by default OpenRouter picks.
+    #[arg(long, value_name = "SLUG", conflicts_with = "server")]
+    pub model_provider: Option<String>,
+    /// The OpenAI-compatible API the proxy forwards to with `OPENROUTER_API_KEY`.
+    #[arg(long, value_name = "URL", default_value = iterator::nemo::OPENROUTER, conflicts_with = "server")]
+    pub model_url: String,
     /// SpacetimeDB data directory, kept across runs so a restart resumes instead of re-ingesting;
     /// it also holds a full checkout of the repository, which is parsed. Must be outside the
     /// repository (default: `$XDG_STATE_HOME/argo-server/<port>`, `~/.local/state/...` without
@@ -74,6 +89,15 @@ pub enum Repo {
     Dir(PathBuf),
     /// Anything else: fetched (a URL, or a path with `#ref`) into the checkout under the data dir.
     Git(GitRef),
+}
+
+/// Workers record the model with each result, and the module rejects a longer name.
+fn model_name(name: &str) -> Result<String, String> {
+    let max = argo_db_client::MAX_MODEL_BYTES;
+    match name.len() {
+        n if (1..=max).contains(&n) => Ok(name.to_string()),
+        n => Err(format!("model names are 1 to {max} bytes, not {n}")),
+    }
 }
 
 impl Args {
@@ -183,6 +207,26 @@ mod tests {
         assert!(!a.loader, "hidden");
         assert_eq!(a.checkout_dir(), a.data_dir().join("checkout"));
         assert_eq!(a.proxy_port(), Ok(3101));
+        assert_eq!(a.model, "nvidia/nemotron-3.5-lightning:free");
+        assert_eq!(
+            (a.model_provider, a.model_url.as_str()),
+            (None, "https://openrouter.ai/api")
+        );
+        let demo = parse(&[
+            "r",
+            "--model",
+            "nvidia/nemotron-3.5-lightning",
+            "--model-provider",
+            "fireworks",
+        ]);
+        assert_eq!(demo.model_provider.as_deref(), Some("fireworks"));
+        assert!(Args::try_parse_from(["argo-server", "r", "--model", ""]).is_err());
+        assert!(
+            parse(&["r", "--server", "maincloud"])
+                .model_provider
+                .is_none(),
+            "defaults don't conflict"
+        );
         let p = parse(&["r", "--port", "4000", "--proxy-port", "5000"]);
         assert_eq!(p.proxy_port(), Ok(5000));
         assert!(parse(&["r", "--port", "65535"]).proxy_port().is_err());

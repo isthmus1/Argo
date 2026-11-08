@@ -118,7 +118,8 @@ async fn run(args: Args) -> ExitCode {
 
 /// The model proxy, bound, when this machine has the provider's endpoint and key to give it.
 fn proxy(args: &Args, data_dir: &std::path::Path) -> Result<Option<Proxy>, String> {
-    let upstream = match Upstream::from_env() {
+    let upstream = Upstream::from_env(&args.model_url, &args.model, args.model_provider.as_deref());
+    let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(why) => {
             eprintln!(
@@ -131,8 +132,9 @@ fn proxy(args: &Args, data_dir: &std::path::Path) -> Result<Option<Proxy>, Strin
     let log = data_dir.join("usage.log");
     let proxy = Proxy::bind(std::net::SocketAddr::new(args.listen, port), upstream, &log)?;
     eprintln!(
-        "argo-server: model proxy on {} for workers; usage in {}",
+        "argo-server: model proxy on {} for workers, forwarding to {}; usage in {}",
         endpoint::advertised("http", args.listen, port),
+        proxy.upstream(),
         log.display()
     );
     Ok(Some(proxy))

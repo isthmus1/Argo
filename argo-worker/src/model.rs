@@ -28,8 +28,8 @@ pub trait Model {
     ) -> impl Future<Output = Result<String, ModelError>>;
 }
 
-/// The environment iterator's client reads in `--direct` mode.
-const ENV: [&str; 2] = ["OPENAI_API_KEY", "OPENAI_BASE_URL"];
+/// The OpenRouter key `--direct` mode reads.
+const KEY_VAR: &str = "OPENROUTER_API_KEY";
 
 /// Nemotron through iterator's OpenAI-compatible client.
 pub struct Nemotron {
@@ -41,7 +41,7 @@ pub struct Nemotron {
 
 /// How the worker reaches the model.
 pub enum Access {
-    /// The provider itself, with `OPENAI_API_KEY` and `OPENAI_BASE_URL` from the environment.
+    /// OpenRouter itself, with `OPENROUTER_API_KEY` from the environment.
     Direct,
     /// `argo-server`'s model proxy, with the key it minted for this worker.
     Proxy(Proxy),
@@ -49,16 +49,16 @@ pub enum Access {
 
 impl Nemotron {
     /// Whether the direct endpoint is configured, checked before claiming anything.
-    pub fn configured() -> Result<(), String> {
-        match ENV.into_iter().find(|var| std::env::var(var).is_err()) {
-            Some(var) => Err(format!("{var} is not set")),
-            None => Ok(()),
-        }
+    pub fn configured() -> Result<String, String> {
+        std::env::var(KEY_VAR).map_err(|_| format!("{KEY_VAR} is not set"))
     }
 
     async fn ask(&self, model: &str, prompt: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
         match &self.access {
-            Access::Direct => iterator::nemo::complete(model, prompt).await,
+            Access::Direct => {
+                let key = Nemotron::configured()?;
+                iterator::nemo::complete_at(iterator::nemo::OPENROUTER, &key, model, prompt).await
+            }
             Access::Proxy(p) => iterator::nemo::complete_at(p.url(), &p.key(), model, prompt).await,
         }
     }

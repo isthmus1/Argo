@@ -23,7 +23,7 @@ async fn fake_proxy() -> String {
                 assert!(request.contains(r#""job":3"#), "{request}");
                 (
                     "200 OK",
-                    format!(r#"{{"key":"k{minted}","worker":"w{minted}"}}"#),
+                    format!(r#"{{"key":"k{minted}","worker":"w{minted}","model":"nvidia/m"}}"#),
                 )
             } else if request.contains("authorization: Bearer k1\r\n") {
                 (
@@ -73,6 +73,7 @@ async fn a_refused_worker_key_attaches_again_without_spending_an_attempt() {
     let url = fake_proxy().await;
     let proxy = Proxy::attach(&url, 3, "c200ab").await.unwrap();
     assert_eq!((proxy.name(), proxy.key()), ("w1".into(), "k1".into()));
+    assert_eq!(proxy.model(), "nvidia/m");
     let model = Nemotron {
         timeout: Duration::from_secs(10),
         access: Access::Proxy(proxy),

@@ -1,11 +1,12 @@
 //! The proxy end to end against a fake provider: attach, forward with the provider key, refuse
-//! unknown keys, and log usage per worker and overall without ever logging a key.
+//! unknown keys, send every request as the server's model and provider, and log usage per worker
+//! and overall without ever logging a key.
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::header::AUTHORIZATION;
 use hyper::server::conn::http1;
@@ -16,9 +17,11 @@ use serde_json::{Value, json};
 
 use super::{Proxy, Upstream};
 
-const REAL_KEY: &str = "nvapi-real-provider-key";
+const REAL_KEY: &str = "sk-or-real-provider-key";
+const MODEL: &str = "nvidia/nemotron-test";
 
-/// A provider that answers only `REAL_KEY`, with fixed usage.
+/// A provider that answers only `REAL_KEY`, and only for `MODEL` pinned to `fireworks`, with
+/// fixed usage and cost.
 async fn provider() -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -28,14 +31,19 @@ async fn provider() -> SocketAddr {
             let service = service_fn(|req: Request<Incoming>| async move {
                 let auth = req.headers().get(AUTHORIZATION).cloned();
                 let ok = auth.is_some_and(|v| v == format!("Bearer {REAL_KEY}").as_str());
-                let (status, body) = if ok {
-                    let usage =
-                        json!({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120});
-                    let reply =
-                        json!({"choices": [{"message": {"content": "fn f() {}"}}], "usage": usage});
-                    (StatusCode::OK, reply.to_string())
-                } else {
+                let body = req.into_body().collect().await.unwrap().to_bytes();
+                let sent: Value = serde_json::from_slice(&body).unwrap();
+                let pinned = json!({"order": ["fireworks"], "allow_fallbacks": false});
+                let (status, body) = if !ok {
                     (StatusCode::UNAUTHORIZED, "{}".into())
+                } else if sent["model"] != MODEL || sent["provider"] != pinned {
+                    (StatusCode::BAD_REQUEST, sent.to_string())
+                } else {
+                    let usage = json!({"prompt_tokens": 100, "completion_tokens": 20,
+                        "total_tokens": 120, "cost": 0.0001});
+                    let reply = json!({"choices": [{"message": {"content": "fn f() {}"}}],
+                        "usage": usage, "provider": "Fireworks"});
+                    (StatusCode::OK, reply.to_string())
                 };
                 let mut reply = Response::new(Full::new(Bytes::from(body)));
                 *reply.status_mut() = status;
@@ -48,7 +56,8 @@ async fn provider() -> SocketAddr {
 }
 
 async fn proxy(provider: SocketAddr, key: &str, log: &std::path::Path) -> String {
-    let upstream = Upstream::new(&format!("http://{provider}/"), key).unwrap();
+    let base = format!("http://{provider}/");
+    let upstream = Upstream::new(&base, key, MODEL, Some("fireworks")).unwrap();
     let proxy = Proxy::bind("127.0.0.1:0".parse().unwrap(), upstream, log).unwrap();
     let url = format!("http://{}", proxy.addr());
     tokio::spawn(proxy.serve());
@@ -96,6 +105,10 @@ async fn workers_attach_and_complete_through_the_provider_key() {
     let (status, attached) = post(&format!("{url}/attach"), None, label).await;
     assert_eq!(status, 200);
     assert_eq!(attached["worker"], "w1");
+    assert_eq!(
+        attached["model"], MODEL,
+        "workers learn the model when they attach"
+    );
     let key = attached["key"].as_str().unwrap().to_string();
     let (_, other) = post(&format!("{url}/attach"), None, json!({})).await;
     let other = other["key"].as_str().unwrap().to_string();
@@ -113,12 +126,17 @@ async fn workers_attach_and_complete_through_the_provider_key() {
     );
     assert!(text.contains("attach w2 unlabelled"), "{text}");
     assert!(
-        text.contains("w1 model=nemotron-x status=200 ")
-            && text.contains("tokens=100+20=120 | w1: 2 requests (0 failed), tokens 200+40=240"),
+        text.contains("forwarding to http://127.0.0.1:")
+            && text.contains(" as nvidia/nemotron-test via provider fireworks only"),
         "{text}"
     );
     assert!(
-        text.contains("| all: 3 requests (0 failed), tokens 300+60=360"),
+        text.contains("w1 status=200 ")
+            && text.contains(" via=Fireworks tokens=100+20=120 $0.000100 | w1: 2 requests (0 failed), tokens 200+40=240 $0.000200"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| all: 3 requests (0 failed), tokens 300+60=360 $0.000300"),
         "{text}"
     );
     assert_eq!(text.lines().count(), 6, "{text}");
@@ -140,7 +158,7 @@ async fn a_refused_provider_key_is_a_gateway_error_not_a_dead_worker_key() {
     .await;
     assert_eq!(status, 502, "{reply}");
     let text = std::fs::read_to_string(&log).unwrap();
-    assert!(text.contains("w1 model=nemotron-x status=401 "), "{text}");
+    assert!(text.contains("w1 status=401 "), "{text}");
     assert!(
         text.contains("tokens=? | w1: 1 requests (1 failed)"),
         "{text}"
@@ -161,4 +179,6 @@ async fn an_unreachable_provider_is_a_gateway_error() {
     assert_eq!(post(&completions, Some(key), completion()).await.0, 502);
     let (status, _) = post(&format!("{url}/v1/models"), Some(key), json!({})).await;
     assert_eq!(status, 404, "only chat completions are forwarded");
+    let (status, _) = post(&completions, Some(key), json!(["not", "a", "request"])).await;
+    assert_eq!(status, 400);
 }

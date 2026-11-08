@@ -1,14 +1,17 @@
-//! The worker's side of `argo-server`'s model proxy: attach for a key of its own, then send
+//! The worker's side of `argo-server`'s model proxy: attach for a key of its own and the model
+//! the server uses, then send
 //! completions there instead of to the provider. The key lives only in this process's memory,
 //! never in its environment, so nothing the worker runs inherits it; and outside that proxy, or
 //! once the server restarts, it is worth nothing.
 
 use std::cell::RefCell;
 
-/// One worker's attachment: where the proxy is, what this worker told it, and the key it got.
+/// One worker's attachment: where the proxy is, what this worker told it, the model the server
+/// uses, and the key it got.
 pub struct Proxy {
     url: String,
     label: serde_json::Value,
+    model: String,
     /// The key and the worker name the proxy logs under, replaced on [`Proxy::reattach`].
     held: RefCell<(String, String)>,
 }
@@ -18,20 +21,30 @@ impl Proxy {
     pub async fn attach(url: &str, job: u32, identity: &str) -> Result<Proxy, String> {
         let label = serde_json::json!({ "host": hostname(), "job": job, "identity": identity });
         let url = url.trim_end_matches('/').to_string();
-        let held = RefCell::new(mint(&url, &label).await?);
-        Ok(Proxy { url, label, held })
+        let (key, name, model) = mint(&url, &label).await?;
+        let held = RefCell::new((key, name));
+        Ok(Proxy {
+            url,
+            label,
+            model,
+            held,
+        })
     }
 
     /// A fresh key, after the proxy refused the old one (the server restarted).
     pub async fn reattach(&self) -> Result<String, String> {
-        let held = mint(&self.url, &self.label).await?;
-        let name = held.1.clone();
-        *self.held.borrow_mut() = held;
+        let (key, name, _) = mint(&self.url, &self.label).await?;
+        *self.held.borrow_mut() = (key, name.clone());
         Ok(name)
     }
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The model the server sends every request as.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 
     pub fn key(&self) -> String {
@@ -44,12 +57,12 @@ impl Proxy {
     }
 }
 
-/// `POST /attach`: the key and worker name the proxy minted.
-async fn mint(url: &str, label: &serde_json::Value) -> Result<(String, String), String> {
+/// `POST /attach`: the key and worker name the proxy minted, and the server's model.
+async fn mint(url: &str, label: &serde_json::Value) -> Result<(String, String, String), String> {
     let at = format!("{url}/attach");
     let fail = |why: String| {
         format!(
-            "cannot attach to the model proxy at {url}: {why} (is argo-server running with OPENAI_API_KEY and OPENAI_BASE_URL set? Or pass --direct)"
+            "cannot attach to the model proxy at {url}: {why} (is argo-server running with OPENROUTER_API_KEY set? Or pass --direct --model M)"
         )
     };
     let reply = reqwest::Client::new()
@@ -67,8 +80,13 @@ async fn mint(url: &str, label: &serde_json::Value) -> Result<(String, String), 
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
     };
-    match (status.is_success(), field("key"), field("worker")) {
-        (true, Some(key), Some(worker)) => Ok((key, worker)),
+    match (
+        status.is_success(),
+        field("key"),
+        field("worker"),
+        field("model"),
+    ) {
+        (true, Some(key), Some(worker), Some(model)) => Ok((key, worker, model)),
         _ => Err(fail(format!(
             "{status}: {}",
             String::from_utf8_lossy(&body)

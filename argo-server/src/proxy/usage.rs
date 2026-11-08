@@ -1,6 +1,7 @@
 //! Token usage, as the provider reports it in each completion's `usage`, and the usage log: one
 //! line per attach and per forwarded request, each with that worker's and the overall totals so
-//! far, so the latest line for a worker is its current tally.
+//! far, so the latest line for a worker is its current tally. Cost is OpenRouter's `usage.cost`
+//! (USD; zero on free models).
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -8,11 +9,12 @@ use std::io::Write;
 use std::path::Path;
 use std::time::SystemTime;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Tokens {
     pub prompt: u64,
     pub completion: u64,
     pub total: u64,
+    pub cost: f64,
 }
 
 impl Tokens {
@@ -23,10 +25,12 @@ impl Tokens {
         let field = |name| usage.get(name).and_then(serde_json::Value::as_u64);
         let (prompt, completion) = (field("prompt_tokens")?, field("completion_tokens")?);
         let total = field("total_tokens").unwrap_or(prompt + completion);
+        let cost = usage.get("cost").and_then(serde_json::Value::as_f64);
         Some(Tokens {
             prompt,
             completion,
             total,
+            cost: cost.unwrap_or_default(),
         })
     }
 
@@ -34,17 +38,19 @@ impl Tokens {
         self.prompt += other.prompt;
         self.completion += other.completion;
         self.total += other.total;
+        self.cost += other.cost;
     }
 }
 
 impl fmt::Display for Tokens {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}+{}={}", self.prompt, self.completion, self.total)
+        let (p, c, t) = (self.prompt, self.completion, self.total);
+        write!(f, "{p}+{c}={t} ${:.6}", self.cost)
     }
 }
 
 /// Requests forwarded, how many the provider didn't answer with success, and the tokens spent.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Usage {
     pub requests: u64,
     pub failed: u64,
@@ -105,9 +111,9 @@ mod tests {
 
     #[test]
     fn usage_comes_from_the_completion_body() {
-        let body = br#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":30,"total_tokens":42}}"#;
+        let body = br#"{"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":30,"total_tokens":42,"cost":0.0000125}}"#;
         let t = Tokens::of(body).unwrap();
-        assert_eq!(t.to_string(), "12+30=42");
+        assert_eq!(t.to_string(), "12+30=42 $0.000013");
         let no_total = br#"{"usage":{"prompt_tokens":2,"completion_tokens":3}}"#;
         assert_eq!(Tokens::of(no_total).unwrap().total, 5);
         assert_eq!(Tokens::of(br#"{"choices":[]}"#), None);
@@ -122,6 +128,9 @@ mod tests {
             Tokens::of(br#"{"usage":{"prompt_tokens":2,"completion_tokens":3}}"#),
         );
         u.add(false, None);
-        assert_eq!(u.to_string(), "2 requests (1 failed), tokens 2+3=5");
+        assert_eq!(
+            u.to_string(),
+            "2 requests (1 failed), tokens 2+3=5 $0.000000"
+        );
     }
 }

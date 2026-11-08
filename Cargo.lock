@@ -308,6 +308,7 @@ dependencies = [
  "humantime",
  "hyper",
  "hyper-util",
+ "iterator",
  "libc",
  "reqwest",
  "serde_json",

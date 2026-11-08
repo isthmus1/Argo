@@ -1,5 +1,8 @@
 use serde_json::Value;
 const CONTEXT_LINES: u32 = 10;
+/// OpenRouter's OpenAI-compatible API, as a base for [`complete_at`] (which appends
+/// `/v1/chat/completions`).
+pub const OPENROUTER: &str = "https://openrouter.ai/api";
 //const testCode: &str = include_str!("../examples/internet_example.c");
 
 pub fn getLines(code: &str, startLine: u32, endLine: u32) -> String {

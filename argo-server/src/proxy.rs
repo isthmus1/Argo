@@ -1,7 +1,8 @@
-//! The model proxy. A worker attaches (`POST /attach`) and gets a key of its own, then sends its
-//! chat completions here (`POST /v1/chat/completions`, `Authorization: Bearer <key>`) instead of
-//! to the provider. The proxy checks the key, forwards the request with the provider key from this
-//! server's environment, and logs each request's tokens per worker and overall (`usage.log` in
+//! The model proxy. A worker attaches (`POST /attach`) and gets a key of its own and the model to
+//! ask for, then sends its chat completions here (`POST /v1/chat/completions`, `Authorization:
+//! Bearer <key>`) instead of to the provider. The proxy checks the key, forwards the request with
+//! the server's model and provider pin and the provider key from this server's environment
+//! ([`upstream`]), and logs each request's tokens and cost per worker and overall (`usage.log` in
 //! the data dir, see [`usage`]).
 //!
 //! Workers never hold the provider key, so nothing a worker runs, or a model talks it into
@@ -72,14 +73,19 @@ impl Proxy {
             .and_then(|l| l.set_nonblocking(true).map(|()| l))
             .map_err(|e| format!("model proxy on {addr}: {e}"))?;
         let mut log = Log::open(log)?;
-        let base = upstream.base();
+        let to = upstream.describe();
         log.line(&format!(
-            "proxy started, forwarding to {base}; totals start at zero"
+            "proxy started, forwarding to {to}; totals start at zero"
         ));
         let workers = Workers::default();
         let ledger = Mutex::new(Ledger { workers, log });
         let state = Arc::new(State { upstream, ledger });
         Ok(Proxy { listener, state })
+    }
+
+    /// Where requests go and as what.
+    pub fn upstream(&self) -> String {
+        self.state.upstream.describe()
     }
 
     #[cfg(test)]
@@ -136,7 +142,8 @@ async fn attach(state: &State, req: Request<Incoming>) -> Reply {
     match workers.attach(label(&body)) {
         Ok((key, worker)) => {
             log.line(&format!("attach {} {}", worker.name(), worker.label));
-            let json = serde_json::json!({ "worker": worker.name(), "key": key });
+            let model = state.upstream.model();
+            let json = serde_json::json!({ "worker": worker.name(), "key": key, "model": model });
             respond(StatusCode::OK, json.to_string().into())
         }
         Err(e) => text(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -159,10 +166,14 @@ async fn complete(state: &State, req: Request<Incoming>) -> Reply {
         Ok(body) => body,
         Err(reply) => return reply,
     };
-    let model = model_of(&body);
+    let body = match state.upstream.rewrite(&body) {
+        Ok(body) => body,
+        Err(why) => return text(StatusCode::BAD_REQUEST, &why),
+    };
     let started = Instant::now();
     let forwarded = state.upstream.complete(body).await;
     let ms = started.elapsed().as_millis();
+    let mut via = "?".to_string();
     let (reply, status, tokens) = match forwarded {
         Err(why) => (
             text(StatusCode::BAD_GATEWAY, &why),
@@ -176,6 +187,7 @@ async fn complete(state: &State, req: Request<Incoming>) -> Reply {
         }
         Ok((s, body)) => {
             let tokens = Tokens::of(&body);
+            via = served_by(&body);
             let status = StatusCode::from_u16(s).unwrap_or(StatusCode::BAD_GATEWAY);
             (respond(status, body), s.to_string(), tokens)
         }
@@ -187,7 +199,7 @@ async fn complete(state: &State, req: Request<Incoming>) -> Reply {
         let spent = tokens.map_or("?".into(), |t| t.to_string());
         let (name, usage) = (worker.name(), worker.usage);
         log.line(&format!(
-            "{name} model={model} status={status} {ms}ms tokens={spent} | {name}: {usage} | all: {}",
+            "{name} status={status} {ms}ms via={via} tokens={spent} | {name}: {usage} | all: {}",
             workers.total
         ));
     }
@@ -226,10 +238,10 @@ fn label(body: &[u8]) -> String {
     }
 }
 
-/// The request's `model`, for the log.
-fn model_of(body: &[u8]) -> String {
+/// Which provider OpenRouter routed the request to (its reply's `provider`), for the log.
+fn served_by(body: &[u8]) -> String {
     let json: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
-    json.get("model")
+    json.get("provider")
         .and_then(serde_json::Value::as_str)
         .map_or("?".into(), clean)
 }
