@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use super::{Access, Model, ModelError, Nemotron};
+use super::{Access, Message, Model, ModelError, Nemotron, Reply, classify};
 use crate::proxy::Proxy;
 
 /// Mints `k1`, `k2`, ...; refuses `k1` (as a restarted server would) and answers any other key.
@@ -74,15 +74,17 @@ async fn a_refused_worker_key_attaches_again_without_spending_an_attempt() {
     let proxy = Proxy::attach(&url, 3, "c200ab").await.unwrap();
     assert_eq!((proxy.name(), proxy.key()), ("w1".into(), "k1".into()));
     assert_eq!(proxy.model(), "nvidia/m");
-    let model = Nemotron {
-        timeout: Duration::from_secs(10),
-        access: Access::Proxy(proxy),
-    };
-    match model.complete("m", "prompt").await {
+    let model = Nemotron::new(Duration::from_secs(10), Access::Proxy(proxy));
+    let ask = [Message::User("prompt".into())];
+    match model.chat("m", &ask, &[]).await {
         Err(ModelError::Unavailable(why)) => assert!(why.contains("attached again as w2"), "{why}"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(model.complete("m", "prompt").await, Ok("fn ok() {}".into()));
+    let reply = Reply {
+        content: Some("fn ok() {}".into()),
+        calls: vec![],
+    };
+    assert_eq!(model.chat("m", &ask, &[]).await, Ok(reply));
 }
 
 #[tokio::test]
@@ -95,4 +97,23 @@ async fn an_absent_proxy_says_how_to_go_without_it() {
         why.contains("cannot attach to the model proxy") && why.contains("--direct"),
         "{why}"
     );
+}
+
+#[test]
+fn rejected_requests_count_and_endpoint_failures_wait() {
+    assert!(
+        matches!(classify(400, "context too long"), ModelError::Reply(w) if w.contains("context too long"))
+    );
+    assert!(matches!(classify(413, ""), ModelError::Reply(_)));
+    assert!(matches!(classify(429, ""), ModelError::Unavailable(_)));
+    assert!(matches!(classify(503, ""), ModelError::Unavailable(_)));
+    assert!(matches!(classify(401, ""), ModelError::Unavailable(_)));
+    // A provider pinned without fallbacks that can't call tools: no wait will fix it.
+    let no_tools =
+        r#"{"error":{"message":"No endpoints found that support tool use.","code":404}}"#;
+    assert!(matches!(classify(404, no_tools), ModelError::Reply(_)));
+    assert!(matches!(
+        classify(404, "not found"),
+        ModelError::Unavailable(_)
+    ));
 }

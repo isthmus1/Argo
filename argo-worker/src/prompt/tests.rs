@@ -6,7 +6,19 @@ use std::path::PathBuf;
 use argo_db_client::{CChunk, ChunkKind};
 use tempfile::TempDir;
 
-use super::build;
+use super::brief;
+use crate::agent::Task;
+
+/// The task message for `chunk` with the clone at `root`.
+fn build(chunk: &CChunk, root: Option<&std::path::Path>, _: Option<&str>) -> String {
+    let session = tempfile::tempdir().unwrap();
+    brief(&Task {
+        chunk,
+        checkout: root,
+        session: session.path(),
+        program: None,
+    })
+}
 
 const SECRET: &str = "OUTSIDE-THE-CLONE";
 

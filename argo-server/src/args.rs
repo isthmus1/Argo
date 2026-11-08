@@ -8,8 +8,9 @@ use clap::Parser;
 /// The OpenRouter model workers use unless `--model` says otherwise: free, rate-limited.
 /// Nemotron 3.5 Lightning, the paid endpoint: the free one can't be pinned to a provider.
 const MODEL: &str = "nvidia/nemotron-3.5-lightning";
-/// Fireworks serves Lightning fastest on OpenRouter (about 358 tokens/s median vs 222 next).
-const PROVIDER: &str = "fireworks";
+/// The fastest OpenRouter provider for Lightning that supports tool calls, which the worker's
+/// agent needs (Fireworks is faster but OpenRouter lists its endpoint without tools).
+const PROVIDER: &str = "deepinfra";
 
 /// Where `argo-db` lives in this checkout; the default module project to build and publish.
 const MODULE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../argo-db");
@@ -217,7 +218,7 @@ mod tests {
         assert_eq!(a.model, "nvidia/nemotron-3.5-lightning");
         assert_eq!(
             (a.provider(), a.model_url.as_str()),
-            (Some("fireworks"), "https://openrouter.ai/api")
+            (Some("deepinfra"), "https://openrouter.ai/api")
         );
         assert_eq!(parse(&["r", "--model-provider", "any"]).provider(), None);
         let demo = parse(&[

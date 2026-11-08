@@ -1,11 +1,15 @@
-//! `argo-worker`: translates claimed C chunks to Rust.
+//! `argo-worker`: translates claimed C chunks to Rust with a tool-using agent.
 //!
 //! Connects to SpacetimeDB, subscribes to `c_chunk` and `rust_chunk`, clones the repository at
 //! the commit the project row records, then loops: `claim_next`, wait for its own placeholder,
-//! prompt nemotron with the chunk's C and surrounding context, compile the candidate with
-//! `rustc` (`CompileCheck`; rustc's errors go back into the next prompt), retry or escalate, then
-//! `submit_rust` or `fail_chunk`, heartbeating while it works. Linking into the C program and
-//! testing come later, so a result that compiles is still recorded `Unvalidated`.
+//! build the C program (one object per ingested unit), and run the agent on the chunk while
+//! heartbeating. The agent (see `agent`) reads the clone with `read`, `grep` and `glob` (no write
+//! or shell access: the clone is shared and must stay the ingested commit) and calls
+//! `submit_rewrite` with a complete Rust file, which is compiled with `rustc`, checked against
+//! the C program's symbols, linked into it in place of the C definition and ABI-compared with
+//! the C function. A rejection goes back to the agent with the reasons and log paths; an
+//! acceptance ends with `submit_rust`, and running out of budget with `fail_chunk`. Nothing runs
+//! the program yet, so an accepted result is still recorded `Unvalidated`.
 //!
 //! `--jobs N` runs N such workers side by side, each claiming one chunk at a time; together they
 //! drain the open chunks like a pool. Each has its own connection (so its own identity and
@@ -23,12 +27,12 @@ use std::time::Duration;
 use argo_db_client::MAX_MODEL_BYTES;
 use clap::Parser;
 
-use argo_worker::attempt::{Budget, Escalation};
+use argo_worker::agent::{Budget, Escalation};
 use argo_worker::checkout::Checkout;
 use argo_worker::db::Db;
-use argo_worker::model::{Access, Nemotron};
+use argo_worker::model::{Access, ModelError, Nemotron};
 use argo_worker::proxy::{self, Proxy};
-use argo_worker::validate::CompileCheck;
+use argo_worker::validate::BuildCheck;
 use argo_worker::work::Worker;
 use argo_worker::workdir;
 
@@ -46,18 +50,22 @@ struct Args {
     /// reused. By default, a free slot under `$XDG_CACHE_HOME/argo-worker/<module>/`.
     #[arg(long)]
     workdir: Option<PathBuf>,
-    /// With `--direct`, the OpenRouter model for every attempt until escalation. Through the
+    /// With `--direct`, the OpenRouter model for every turn until escalation. Through the
     /// proxy, `argo-server --model` decides it instead.
     #[arg(long, value_parser = model_name, requires = "direct")]
     model: Option<String>,
-    /// Generations per chunk before giving up with `fail_chunk`.
-    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..))]
+    /// Rejected submissions (and failed model requests) per chunk before giving up with
+    /// `fail_chunk`.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..))]
     max_attempts: u32,
-    /// A stronger model to switch to after `--escalate-after` failed attempts (`--direct` only:
-    /// the proxy sends everything as its own model).
+    /// Model turns (each a reply that reads, searches or submits) per chunk before giving up.
+    #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..))]
+    max_turns: u32,
+    /// A stronger model to take over the conversation after `--escalate-after` rejections
+    /// (`--direct` only: the proxy sends everything as its own model).
     #[arg(long, value_parser = model_name, requires = "direct")]
     escalation_model: Option<String>,
-    /// Failed attempts before escalating; fewer than `--max-attempts`, or it never happens.
+    /// Rejections before escalating; fewer than `--max-attempts`, or it never happens.
     #[arg(long, default_value_t = 2, requires = "escalation_model")]
     escalate_after: u32,
     /// Translate one chunk, then exit.
@@ -85,7 +93,22 @@ fn model_name(name: &str) -> Result<String, String> {
     }
 }
 
-/// A model request that takes longer is an attempt failure, not a stuck claim.
+/// Refuse a model whose endpoint rejects a tool-calling request; only warn if it can't be
+/// reached now (an outage is waited out per chunk, as ever).
+async fn tools_supported(nemotron: &Nemotron, model: &str) -> Result<(), String> {
+    match nemotron.supports_tools(model).await {
+        Ok(()) => Ok(()),
+        Err(ModelError::Reply(why)) => Err(format!(
+            "{model} rejected a tool-calling request, so it can't run the agent: {why}"
+        )),
+        Err(ModelError::Unavailable(why)) => {
+            eprintln!("argo-worker: could not check {model} for tool calls: {why}");
+            Ok(())
+        }
+    }
+}
+
+/// A model request that takes longer is a failed request, not a stuck claim.
 const MODEL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// The first pause when the model endpoint is unavailable.
 const BACKOFF: Duration = Duration::from_secs(1);
@@ -111,7 +134,10 @@ async fn run(args: Args) -> Result<(), String> {
         (Some(url), false) => Some(url.clone()),
         (None, false) => Some(proxy::beside(&args.db)?),
     };
-    CompileCheck::available()?;
+    let (validator, warning) = BuildCheck::detect()?;
+    if let Some(warning) = warning {
+        eprintln!("argo-worker: {warning}");
+    }
     if args.escalation_model.is_some() && args.escalate_after >= args.max_attempts {
         return Err(format!(
             "--escalate-after {} never escalates within --max-attempts {}",
@@ -124,6 +150,7 @@ async fn run(args: Args) -> Result<(), String> {
     });
     let budget = |model: String| Budget {
         max_attempts: args.max_attempts,
+        max_turns: args.max_turns,
         model,
         escalation: escalation.clone(),
         backoff: BACKOFF,
@@ -160,19 +187,26 @@ async fn run(args: Args) -> Result<(), String> {
             db.me.to_hex(),
             workdir.dir.display()
         );
+        let nemotron = Nemotron::new(MODEL_TIMEOUT, access);
+        if job == 0 {
+            // An endpoint that rejects tool calls would fail every chunk it is given (a
+            // rejected request counts against the chunk), so it is caught before any claim.
+            let models = std::iter::once(&model).chain(&args.escalation_model);
+            for m in models {
+                tools_supported(&nemotron, m).await?;
+            }
+        }
         workers.push(Worker {
             db,
-            model: Nemotron {
-                timeout: MODEL_TIMEOUT,
-                access,
-            },
-            validator: CompileCheck,
+            model: nemotron,
+            validator: validator.clone(),
             budget: budget(model),
             checkout: Checkout::new(workdir),
         });
     }
     // Workers' futures aren't `Send` (see `Worker`), so they share one local task set; the slow
-    // parts (model requests, rustc on a blocking thread) wait without holding it. An error ends
+    // parts (model requests; tools, compilers and linker on blocking threads) wait without
+    // holding it. An error ends
     // only its own worker; the others keep going.
     let local = tokio::task::LocalSet::new();
     let once = args.once;

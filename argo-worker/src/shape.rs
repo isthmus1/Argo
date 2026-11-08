@@ -1,24 +1,35 @@
-//! A cheap structural check on a reply before validation. It proves nothing about behavior; it
-//! only rejects replies that cannot be what was asked for, so the model is told why and retries.
+//! A cheap structural check on a submission before it is built. It proves nothing about
+//! behavior; it only rejects source that cannot be what was asked for, so the agent is told why
+//! and resubmits.
 
 use argo_db_client::{CChunk, ChunkKind, MAX_RUST_BYTES};
 
-/// `symbol`: the function the Rust must export (the C function's name, or a piece's).
-pub fn check(chunk: &CChunk, symbol: &str, source: &str) -> Result<(), String> {
-    if source.is_empty() {
-        return Err("the reply contained no code".into());
+pub fn check(chunk: &CChunk, source: &str) -> Result<(), String> {
+    if source.trim().is_empty() {
+        return Err("`rust_source` is empty".into());
+    }
+    // `submit_rewrite` takes the file's raw text; markdown is refused, never stripped.
+    if source.lines().any(|l| l.trim_start().starts_with("```")) {
+        return Err(
+            "`rust_source` must be raw Rust exactly as saved in a .rs file, not markdown: \
+             remove the ``` fence lines (and any prose that isn't a // comment)"
+                .into(),
+        );
     }
     if source.len() > MAX_RUST_BYTES {
         return Err(format!(
-            "the reply is {} bytes; limit {MAX_RUST_BYTES}",
+            "the source is {} bytes; limit {MAX_RUST_BYTES}",
             source.len()
         ));
     }
     if !source.contains("extern \"C\"") || !source.contains("no_mangle") {
         return Err("no exported function: write it as `#[no_mangle] pub extern \"C\" fn`".into());
     }
-    if matches!(chunk.kind, ChunkKind::Function | ChunkKind::Region) && !declares(source, symbol) {
-        return Err(format!("no `fn {symbol}(`: export the function under exactly that name"));
+    if chunk.kind == ChunkKind::Function && !declares(source, &chunk.name) {
+        return Err(format!(
+            "no `fn {}(`: keep the C function's exact name",
+            chunk.name
+        ));
     }
     Ok(())
 }

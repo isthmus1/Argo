@@ -7,7 +7,7 @@ use argo_db_client::LEASE_MICROS;
 use argo_db_client::bindings::{RemoteReducers, fail_chunk, heartbeat, submit_rust};
 use tokio::time::{Instant, sleep};
 
-use crate::attempt::Outcome;
+use crate::agent::Outcome;
 use crate::db::{CallError, Db};
 use crate::log::{MAX_LOG_BYTES, tail};
 use crate::resend::deliver;
@@ -55,22 +55,22 @@ impl Claim<'_> {
     /// for an unavailable endpoint (the claim lapses with its lease).
     pub async fn finish(&self, outcome: Outcome) -> Result<(), String> {
         let (id, generation) = (self.chunk, self.generation);
-        let (source, c, model, attempts, validation, log) = match outcome {
+        let (source, model, attempts, validation, log) = match outcome {
             Outcome::Failed { attempts, log } => return self.fail(attempts, log).await,
             Outcome::Unavailable { .. } => return Ok(()),
             Outcome::Done {
                 source,
-                c,
                 model,
                 attempts,
                 validation,
                 log,
-            } => (source, c.unwrap_or_default(), model, attempts, validation, log),
+            } => (source, model, attempts, validation, log),
         };
         let submit = async || {
-            let (source, c, model, log) = (source.clone(), c.clone(), model.clone(), log.clone());
+            let (source, model, log) = (source.clone(), model.clone(), log.clone());
+            // `c_call` is for a piece of a function; the agent translates whole functions.
             let submit = |r: &RemoteReducers, f| {
-                r.submit_rust_then(id, generation, source, c, model, attempts, validation, log, f)
+                r.submit_rust_then(id, generation, source, String::new(), model, attempts, validation, log, f)
             };
             self.db.call(submit).await
         };
