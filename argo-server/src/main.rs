@@ -1,7 +1,12 @@
-//! `argo-server`: owns a local SpacetimeDB for one repository.
+//! `argo-server`: puts one repository into a SpacetimeDB database that workers and the GUI
+//! connect to, from this machine or any other.
 //!
-//! Starts `spacetime start` on 127.0.0.1:PORT with its own data directory (a child process,
-//! stopped on exit, SIGINT or SIGTERM), publishes `argo-db`, has the publishing CLI identity
+//! By default it starts `spacetime start` on `--listen`:PORT (127.0.0.1 unless told otherwise)
+//! with its own data directory (a child process, stopped on exit, SIGINT or SIGTERM) and keeps
+//! serving it. With `--server URL` it uses a host that is already running instead (another
+//! machine's, or `maincloud`), sets the database up there, and exits.
+//!
+//! Either way it publishes `argo-db`, has the publishing CLI identity
 //! `grant_ownership` to its SDK identity, opens the repository with the C front end (in a loader
 //! child process, see [`loader`]), records its locator and exact commit, ingests it as `c_chunk`
 //! rows through `argo-db-client` (located in the original files through `Opened::places`), then
@@ -13,6 +18,7 @@ mod checkout;
 mod cli;
 mod commit;
 mod conn;
+mod endpoint;
 mod flags;
 mod group;
 mod host;
@@ -28,6 +34,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use args::Args;
+use endpoint::Endpoint;
 use host::Host;
 use interrupts::Interrupts;
 
@@ -54,8 +61,22 @@ async fn run(args: Args) -> ExitCode {
     if let Err(e) = args.check_data_dir() {
         return fail(&e);
     }
+    if let Some(server) = &args.server {
+        let outcome = match Endpoint::remote(server) {
+            // Nothing to stop afterwards: the host isn't ours.
+            Ok(at) => tokio::select! {
+                r = setup(&args, &at, async { Ok(()) }) => r,
+                why = interrupts.recv() => Err(format!("{why}; stopped")),
+            },
+            Err(e) => Err(e),
+        };
+        return match outcome {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        };
+    }
     let data_dir = args.data_dir();
-    let host = match Host::spawn(args.port, &data_dir) {
+    let host = match Host::spawn(args.listen, args.port, &data_dir) {
         Ok(host) => host,
         Err(e) => return fail(&e),
     };
@@ -80,34 +101,48 @@ async fn run(args: Args) -> ExitCode {
 /// Bring the host up while the repository loads, ingest, then keep serving. Never returns
 /// `Ok`: a running server ends by being interrupted or by its host exiting.
 async fn serve(args: &Args, host: &Host) -> Result<(), String> {
-    let server = format!("http://127.0.0.1:{}", args.port);
-    let up = async {
-        host.ready().await?;
-        cli::publish(&server, &args.module_path, &args.module, args.delete_data).await
-    };
-    let (loaded, ()) = tokio::try_join!(loader::load(), up)?;
-
-    let uri = format!("ws://127.0.0.1:{}", args.port);
-    let (conn, me) = conn::connect(&uri, &args.module).await?;
-    let outcome = async {
-        cli::grant(&server, &args.module, me).await?;
-        ingest::ingest(&conn, &loaded, args.fresh).await
-    }
-    .await;
-    // The server has nothing more to say to the database; it only keeps the host alive.
-    conn.close();
-    ingest::report(&loaded, &outcome?);
+    setup(args, &Endpoint::local(args.port), host.ready()).await?;
     eprintln!(
-        "argo-server: serving {uri} database {}; Ctrl-C to stop",
-        args.module
-    );
-    // The owner identity was this run's anonymous connection, now closed; say how to get it back.
-    eprintln!(
-        "argo-server: for requeue, first `spacetime call --server {server} {} grant_ownership \
-         '{{\"__identity__\": \"0x<your CLI identity>\"}}'`",
+        "argo-server: serving {} database {}; Ctrl-C to stop",
+        endpoint::advertised(args.listen, args.port),
         args.module
     );
     std::future::pending().await
+}
+
+/// Publish the module to `at` once `ready`, loading the repository meanwhile, then take
+/// ownership and ingest it.
+async fn setup(
+    args: &Args,
+    at: &Endpoint,
+    ready: impl Future<Output = Result<(), String>>,
+) -> Result<(), String> {
+    let up = async {
+        ready.await?;
+        cli::publish(&at.cli, &args.module_path, &args.module, args.delete_data).await
+    };
+    let (loaded, ()) = tokio::try_join!(loader::load(), up)?;
+
+    let (conn, me) = conn::connect(&at.ws, &args.module).await?;
+    let outcome = async {
+        cli::grant(&at.cli, &args.module, me).await?;
+        ingest::ingest(&conn, &loaded, args.fresh).await
+    }
+    .await;
+    // The server has nothing more to say to the database.
+    conn.close();
+    ingest::report(&loaded, &outcome?);
+    eprintln!(
+        "argo-server: workers and the GUI connect to {} database {}",
+        at.ws, args.module
+    );
+    // The owner identity was this run's anonymous connection, now closed; say how to get it back.
+    eprintln!(
+        "argo-server: for requeue, first `spacetime call --server {} {} grant_ownership \
+         '{{\"__identity__\": \"0x<your CLI identity>\"}}'`",
+        at.cli, args.module
+    );
+    Ok(())
 }
 
 fn fail(e: &str) -> ExitCode {

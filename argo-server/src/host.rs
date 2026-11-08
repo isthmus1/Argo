@@ -1,5 +1,6 @@
 //! The local SpacetimeDB host: a `spacetime start` child (which execs the standalone host in
-//! place) on 127.0.0.1 with its own data directory.
+//! place) on `--listen` (127.0.0.1 by default) with its own data directory. This server always
+//! reaches it through 127.0.0.1 when it listens on every address.
 //!
 //! It runs [`isolate`]d, and `argo-server` stops it deliberately: SIGINT (the host's clean
 //! shutdown), then SIGKILL if it lingers or a second stop signal arrives. A task owns the child
@@ -7,6 +8,7 @@
 //! `kill_on_drop` covers a panic.
 
 use std::fs::File;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -24,7 +26,8 @@ const STOP_WITHIN: Duration = Duration::from_secs(10);
 
 pub struct Host {
     pid: u32,
-    port: u16,
+    /// Where this server reaches the host.
+    addr: SocketAddr,
     /// How the host exited, once it has.
     exit: watch::Receiver<Option<String>>,
     /// The host's own output, kept out of the server's.
@@ -34,9 +37,14 @@ pub struct Host {
 impl Host {
     /// Spawn the host. The port is checked first, so readiness can't be mistaken for another
     /// process already answering there.
-    pub fn spawn(port: u16, data_dir: &Path) -> Result<Host, String> {
-        std::net::TcpListener::bind(("127.0.0.1", port))
-            .map_err(|e| format!("127.0.0.1:{port} is not free: {e}"))?;
+    pub fn spawn(listen: IpAddr, port: u16, data_dir: &Path) -> Result<Host, String> {
+        let bind = SocketAddr::new(listen, port);
+        std::net::TcpListener::bind(bind).map_err(|e| format!("{bind} is not free: {e}"))?;
+        let local = if listen.is_unspecified() {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        } else {
+            listen
+        };
         std::fs::create_dir_all(data_dir)
             .map_err(|e| format!("cannot create {}: {e}", data_dir.display()))?;
         let log = data_dir.join("host.log");
@@ -44,7 +52,7 @@ impl Host {
         let err = out.try_clone().map_err(|e| e.to_string())?;
         let mut cmd = Command::new("spacetime");
         cmd.args(["start", "--non-interactive", "--listen-addr"])
-            .arg(format!("127.0.0.1:{port}"))
+            .arg(bind.to_string())
             .arg("--data-dir")
             .arg(data_dir)
             .stdin(Stdio::null())
@@ -63,7 +71,7 @@ impl Host {
         });
         Ok(Host {
             pid,
-            port,
+            addr: SocketAddr::new(local, port),
             exit,
             log,
         })
@@ -76,7 +84,7 @@ impl Host {
             if self.exit.borrow().is_some() {
                 return Err(self.exited().await);
             }
-            if ping(self.port).await {
+            if ping(self.addr).await {
                 return Ok(());
             }
             if Instant::now() > deadline {
@@ -120,11 +128,11 @@ impl Host {
     }
 }
 
-async fn ping(port: u16) -> bool {
+async fn ping(addr: SocketAddr) -> bool {
     let probe = async {
-        let mut s = TcpStream::connect(("127.0.0.1", port)).await?;
-        s.write_all(b"GET /v1/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
-            .await?;
+        let mut s = TcpStream::connect(addr).await?;
+        let request = format!("GET /v1/ping HTTP/1.0\r\nHost: {addr}\r\n\r\n");
+        s.write_all(request.as_bytes()).await?;
         let mut head = [0; 12];
         s.read_exact(&mut head).await?;
         std::io::Result::Ok(head.ends_with(b" 200"))

@@ -14,9 +14,20 @@ const MODULE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../argo-db");
 pub struct Args {
     /// A local directory, or a git URL or path optionally followed by `#ref`.
     pub repo: String,
+    /// Use an already-running SpacetimeDB instead of starting one: `http://host:port`,
+    /// `https://host`, or `maincloud` (SpacetimeDB's cloud; `spacetime login` first). The module
+    /// is published there and the repository ingested, then `argo-server` exits; the database
+    /// keeps serving workers and the GUI. Publish and grant use this machine's `spacetime` CLI
+    /// identity, which must be the database's publisher.
+    #[arg(long, value_name = "URL")]
+    pub server: Option<String>,
     /// Port for the local SpacetimeDB host. Not 3000, which a system host may already use.
     #[arg(long, default_value_t = 3100)]
     pub port: u16,
+    /// Address the local host listens on. `0.0.0.0` accepts workers and the GUI from other
+    /// machines; put it behind a TLS proxy before exposing it to a network you don't trust.
+    #[arg(long, default_value = "127.0.0.1", conflicts_with = "server")]
+    pub listen: std::net::IpAddr,
     /// SpacetimeDB data directory, kept across runs so a restart resumes instead of re-ingesting;
     /// it also holds a full checkout of the repository, which is parsed. Must be outside the
     /// repository (default: `$XDG_STATE_HOME/argo-server/<port>`, `~/.local/state/...` without
@@ -144,6 +155,7 @@ mod tests {
     fn defaults() {
         let a = parse(&["https://example.com/r.git"]);
         assert_eq!((a.port, a.module.as_str(), a.fresh), (3100, "argo", false));
+        assert_eq!((a.server.as_deref(), a.listen), (None, "127.0.0.1".parse().unwrap()));
         assert!(!a.delete_data && !a.allow_dirty);
         assert!(
             a.module_path.join("Cargo.toml").is_file(),
@@ -200,6 +212,25 @@ mod tests {
         assert!(a.delete_data && a.allow_dirty);
         assert_eq!(a.data_dir(), PathBuf::from("/tmp/d"));
         assert_eq!(a.flags(), ["-DFOO", "-DBAR=2", "-Iinc", "-I/abs"]);
+    }
+
+    #[test]
+    fn a_server_or_a_listen_address_but_not_both() {
+        let a = parse(&["repo", "--server", "maincloud", "--module", "mine"]);
+        assert_eq!(a.server.as_deref(), Some("maincloud"));
+        assert_eq!(
+            parse(&["repo", "--listen", "0.0.0.0"]).listen.to_string(),
+            "0.0.0.0"
+        );
+        let both = [
+            "argo-server",
+            "repo",
+            "--server",
+            "maincloud",
+            "--listen",
+            "0.0.0.0",
+        ];
+        assert!(Args::try_parse_from(both).is_err());
     }
 
     #[test]
