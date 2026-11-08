@@ -133,12 +133,35 @@ fn git(dir: &Path, args: &[&str], timeout: Duration, cancel: &AtomicBool) -> Res
     if out.status.success() {
         Ok(())
     } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        Err(format!(
-            "git {}: {}",
-            args[0],
-            err.lines().last().unwrap_or("failed").trim()
-        ))
+        Err(failure(args[0], &String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+/// A failed `git <what>`'s error: `git <what>: <summary>` on the first line, then the whole of
+/// its stderr when that says more than the summary does (`Show all` and `Copy diagnostics` read
+/// it). The summary is the first `fatal:` or `error:` line without its prefix, since git ends a
+/// failure with advice ("…and the repository exists.") that names no cause; else the last line.
+fn failure(what: &str, stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let cause = lines.iter().find_map(|l| {
+        ["fatal:", "error:"].iter().find_map(|p| {
+            l.get(..p.len())
+                .filter(|head| head.eq_ignore_ascii_case(p))
+                .map(|_| l[p.len()..].trim())
+        })
+    });
+    let summary = cause
+        .or(lines.last().copied())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("failed");
+    if lines.len() > 1 {
+        format!("git {what}: {summary}\n{}", stderr.trim())
+    } else {
+        format!("git {what}: {summary}")
     }
 }
 
@@ -288,6 +311,59 @@ mod tests {
         let r = run(stuck_ls_remote(), "fetch", FETCH_TIMEOUT, &cancel);
         assert_eq!(r.err().as_deref(), Some(CANCELLED));
         assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_failure_names_its_cause_and_keeps_the_whole_stderr() {
+        // A missing repository over https.
+        let https = "remote: Repository not found.\nfatal: repository 'https://github.com/a/missing.git/' not found\n";
+        assert_eq!(
+            failure("fetch", https),
+            "git fetch: repository 'https://github.com/a/missing.git/' not found\n\
+             remote: Repository not found.\n\
+             fatal: repository 'https://github.com/a/missing.git/' not found"
+        );
+        // A missing repository over ssh: the server's `ERROR:` comes first, and git's closing
+        // advice is kept in the details but never the summary.
+        let ssh = "ERROR: Repository not found.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n";
+        let e = failure("fetch", ssh);
+        assert_eq!(e.lines().next(), Some("git fetch: Repository not found."));
+        assert!(e.contains("fatal: Could not read from remote repository."), "{e}");
+        assert!(e.ends_with("and the repository exists."), "{e}");
+        // An unknown revision: one line, so nothing is repeated under it.
+        assert_eq!(
+            failure("fetch", "fatal: couldn't find remote ref nope\n"),
+            "git fetch: couldn't find remote ref nope"
+        );
+        assert_eq!(
+            failure("checkout", "error: pathspec 'nope' did not match any file(s) known to git\n"),
+            "git checkout: pathspec 'nope' did not match any file(s) known to git"
+        );
+        // No fatal or error line: the last line; nothing at all: `failed`.
+        assert_eq!(
+            failure("fetch", "warning: x\nsomething broke\n"),
+            "git fetch: something broke\nwarning: x\nsomething broke"
+        );
+        assert_eq!(failure("init", "  \n"), "git init: failed");
+    }
+
+    #[test]
+    fn a_missing_local_repository_reports_git_s_cause() {
+        let dir = std::env::temp_dir().join(format!("argo-git-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel = AtomicBool::new(false);
+        git(&dir, &["init", "-q"], LOCAL_TIMEOUT, &cancel).unwrap();
+        let e = git(
+            &dir,
+            &["fetch", "-q", "/argo/definitely/not/a/repo"],
+            LOCAL_TIMEOUT,
+            &cancel,
+        )
+        .unwrap_err();
+        let head = e.lines().next().unwrap();
+        assert!(head.starts_with("git fetch: "), "{e}");
+        assert!(head.contains("/argo/definitely/not/a/repo"), "{e}");
+        assert!(!head.contains("repository exists"), "{e}");
     }
 
     #[test]

@@ -78,7 +78,7 @@ impl Default for Forms {
 }
 
 impl Forms {
-    fn set_error(&mut self, e: Option<String>) {
+    pub(crate) fn set_error(&mut self, e: Option<String>) {
         self.error = e;
         self.error_open = false;
     }
@@ -108,21 +108,67 @@ enum Msg {
     Done(Box<Result<Opened, String>>, String),
 }
 
-/// What to open: a local directory, or a git reference (with the revision field overriding one
-/// written into the URL).
-fn target(spec: &str, rev: &str) -> Result<(Option<PathBuf>, GitRef), String> {
+/// What a spec opens.
+#[derive(Debug, PartialEq, Eq)]
+enum Target {
+    Local(PathBuf),
+    Git(GitRef),
+}
+
+/// `spec` with a leading `~` or `~/` replaced by `$HOME`.
+fn expand_home(spec: &str) -> PathBuf {
+    let rest = if spec == "~" { Some("") } else { spec.strip_prefix("~/") };
+    match (rest, std::env::var("HOME")) {
+        (Some(rest), Ok(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(spec),
+    }
+}
+
+/// Whether `spec` names a local folder rather than a git remote: it starts like a path (`/`,
+/// `~`, `./`, `../`), or it is no URL (`://`, `git@`) and something by that name exists.
+pub fn path_shaped(spec: &str) -> bool {
+    let spec = spec.trim();
+    if ["/", "~", "./", "../"].iter().any(|p| spec.starts_with(p)) {
+        return true;
+    }
+    !spec.is_empty()
+        && !spec.contains("://")
+        && !spec.contains("git@")
+        && std::fs::symlink_metadata(expand_home(spec)).is_ok()
+}
+
+/// What to open: a local folder, or a git reference (with the revision field overriding one
+/// written into the URL). A path-shaped spec that names no readable folder fails here, before
+/// any git work, saying why; one with a revision after it (`~/src/repo#v1`) is a local
+/// repository at that revision.
+fn target(spec: &str, rev: &str) -> Result<Target, String> {
     let spec = spec.trim();
     if spec.is_empty() {
         return Err("Enter a git URL or a local directory.".into());
     }
-    let path = PathBuf::from(spec.strip_prefix("~/").map_or(spec.to_string(), |rest| {
-        std::env::var("HOME").map_or(spec.to_string(), |h| format!("{h}/{rest}"))
-    }));
     let mut r = GitRef::parse(spec);
     if !rev.trim().is_empty() {
         r.rev = Some(rev.trim().to_string());
     }
-    Ok((path.is_dir().then_some(path), r))
+    if !path_shaped(spec) {
+        return Ok(Target::Git(r));
+    }
+    let path = expand_home(spec);
+    match std::fs::metadata(&path) {
+        Ok(m) if m.is_dir() => match std::fs::read_dir(&path) {
+            Ok(_) => Ok(Target::Local(path)),
+            Err(e) => Err(format!("Can't read {spec}: {e}")),
+        },
+        Ok(_) => Err(format!("Not a folder: {spec}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if r.url != spec && expand_home(&r.url).is_dir() {
+                Ok(Target::Git(GitRef { url: expand_home(&r.url).display().to_string(), ..r }))
+            } else {
+                Err(format!("No such folder: {spec}"))
+            }
+        }
+        Err(e) => Err(format!("Can't read {spec}: {e}")),
+    }
 }
 
 fn options(flags: &str, cancel: Arc<AtomicBool>) -> Options {
@@ -140,17 +186,16 @@ fn run(
     cancel: Arc<AtomicBool>,
     progress: &(dyn Fn(Step) + Sync),
 ) -> Result<Opened, String> {
-    let (local, r) = target(spec, rev)?;
     let opts = options(flags, cancel);
-    match local {
-        Some(dir) => {
+    match target(spec, rev)? {
+        Target::Local(dir) => {
             let name = std::fs::canonicalize(&dir)
                 .ok()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "project".into());
             cproj::open(&dir, &name, &opts, progress)
         }
-        None => cproj::open_git(&r, &opts, progress),
+        Target::Git(r) => cproj::open_git(&r, &opts, progress),
     }
 }
 
@@ -365,6 +410,18 @@ pub fn error_row(line: &str) -> (&str, &str) {
     (file, rest)
 }
 
+/// An error row's reason split at its first `: ` into what it is about and what is wrong with
+/// it (`argo_absent/slirp_config.h`, `No such file or directory`), so the dialog can cut a long
+/// subject and keep the message whole. A reason with no `: ` is all subject.
+pub fn reason_parts(why: &str) -> (&str, Option<&str>) {
+    match why.split_once(": ") {
+        Some((subject, message)) if !subject.is_empty() && !message.trim().is_empty() => {
+            (subject, Some(message))
+        }
+        _ => (why, None),
+    }
+}
+
 /// What a project with no function definitions holds, for the `project-empty` review scene.
 const SAMPLE_EMPTY: &str = "int verbose = 0;\nstruct options { int level; const char *name; };\nextern int limit;\n";
 
@@ -489,7 +546,7 @@ pub fn current(s: &State) -> Option<(NodeId, String)> {
 /// The open dialog's fields, prefilled from a command line `spec`.
 pub fn prefill(forms: &mut Forms, spec: &str, flags: &[String]) {
     let r = GitRef::parse(spec);
-    let local = PathBuf::from(spec).is_dir();
+    let local = path_shaped(spec) && expand_home(spec.trim()).is_dir();
     forms.url = TextEdit::new(if local {
         spec.to_string()
     } else {
@@ -675,6 +732,93 @@ mod tests {
             assert!(l.starts_with(at.split(':').next().unwrap()) && !at.is_empty(), "{l}");
             assert!(!why.ends_with(')'), "{l}");
         }
+    }
+
+    #[test]
+    fn a_reason_splits_into_a_subject_and_a_whole_message() {
+        let (_, files, _) = error_parts(SAMPLE_ERROR, usize::MAX);
+        let slirp = files.iter().find(|l| l.starts_with("slirp/")).unwrap();
+        let (at, why) = error_row(slirp);
+        assert_eq!(at, "slirp/slirp.c:1");
+        assert_eq!(
+            reason_parts(why),
+            ("argo_absent/slirp_config.h", Some("No such file or directory"))
+        );
+        // Every missing header in the sample keeps its message whole.
+        for l in files.iter().filter(|l| l.contains("No such file")) {
+            let (_, why) = error_row(l);
+            assert_eq!(reason_parts(why).1, Some("No such file or directory"), "{l}");
+        }
+        assert_eq!(
+            reason_parts("expected `;`, found `CONFIG_VERSION`"),
+            ("expected `;`, found `CONFIG_VERSION`", None)
+        );
+        assert_eq!(reason_parts("#error MAX_XLEN must be defined").1, None);
+        assert_eq!(reason_parts("trailing: ").1, None);
+    }
+
+    #[test]
+    fn path_shaped_specs_fail_on_the_folder_before_any_git_work() {
+        let base = std::env::temp_dir().join(format!("argo-ui-target-{}", std::process::id()));
+        let dir = base.join("proj");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = base.join("notes.txt");
+        std::fs::write(&file, "x").unwrap();
+        let d = dir.display().to_string();
+
+        assert_eq!(target(&d, ""), Ok(Target::Local(dir.clone())));
+        // A folder ignores the revision field.
+        assert_eq!(target(&format!("  {d}  "), "v1"), Ok(Target::Local(dir.clone())));
+        assert_eq!(
+            target("/argo/nonexistent/dir", ""),
+            Err("No such folder: /argo/nonexistent/dir".into())
+        );
+        assert_eq!(
+            target("./argo-definitely-missing", "main"),
+            Err("No such folder: ./argo-definitely-missing".into())
+        );
+        assert_eq!(
+            target("~/argo-definitely-missing", ""),
+            Err("No such folder: ~/argo-definitely-missing".into())
+        );
+        assert_eq!(
+            target(&file.display().to_string(), ""),
+            Err(format!("Not a folder: {}", file.display()))
+        );
+        // Below a file: not a missing folder, an error reading the path.
+        let under = format!("{}/x", file.display());
+        assert!(
+            target(&under, "").is_err_and(|e| e.starts_with(&format!("Can't read {under}: "))),
+            "{:?}",
+            target(&under, "")
+        );
+        // A local repository with a revision after it is fetched at that revision.
+        assert_eq!(
+            target(&format!("{d}#v1"), ""),
+            Ok(Target::Git(GitRef::new(&d, Some("v1"))))
+        );
+
+        // Remotes stay git references, the revision field overriding one in the URL.
+        assert_eq!(
+            target("https://github.com/a/b.git#v1", "main"),
+            Ok(Target::Git(GitRef::new("https://github.com/a/b.git", Some("main"))))
+        );
+        assert_eq!(
+            target("git@github.com:a/b.git", ""),
+            Ok(Target::Git(GitRef::new("git@github.com:a/b.git", None)))
+        );
+        assert_eq!(
+            target("file:///argo/x", ""),
+            Ok(Target::Git(GitRef::new("file:///argo/x", None)))
+        );
+        assert!(target("   ", "").is_err());
+
+        // What the dialog asks to style the revision field.
+        assert!(path_shaped("/x") && path_shaped("~") && path_shaped("~/x") && path_shaped("../x"));
+        assert!(!path_shaped("https://github.com/a/b") && !path_shaped("git@host:a/b"));
+        assert!(!path_shaped("github.com/a/b") && !path_shaped(""));
+        // A bare relative name is a folder when it exists (tests run in the crate's folder).
+        assert!(path_shaped("src") && target("src", "").is_ok_and(|t| t == Target::Local("src".into())));
     }
 
     #[test]

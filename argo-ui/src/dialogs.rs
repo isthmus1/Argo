@@ -1,7 +1,10 @@
 //! Project chrome: the toolbar, the file/function explorer, and the open and progress dialogs.
 //! These open projects and navigate them; nothing here edits the graph or starts work.
 
-use rune_ui::{Color, Cursor, El, LoopSpec, ScrollSpec, TextStyle, Tx, col, el, row, text, text_input};
+use rune_ui::{
+    Color, Cursor, El, FileDialogOptions, LoopSpec, ScrollSpec, TextEdit, TextStyle, Tx, col, el, row, text,
+    text_input,
+};
 
 use crate::app::State;
 use crate::palette::Pal;
@@ -358,6 +361,53 @@ fn actions(left: El, right: Vec<El>) -> El {
     r
 }
 
+/// The open dialog's folder picker button.
+const BROWSE: &str = "Browse…";
+/// What the revision field says while the repository field names a local folder.
+const REV_LOCAL: &str = "Only for git repositories";
+
+/// Pick a local folder with the system's dialog and put it in the repository field.
+fn browse(_: &mut State, tx: &mut Tx) {
+    let options = FileDialogOptions {
+        title: "Open C project folder".into(),
+        ..Default::default()
+    };
+    tx.open_folder(options, |s: &mut State, result, _| match result {
+        Ok(Some(path)) => {
+            s.forms.url = TextEdit::new(path.display().to_string());
+            s.forms.set_error(None);
+        }
+        Ok(None) => {}
+        Err(e) => s.forms.set_error(Some(format!("Can't show a folder picker: {e}"))),
+    });
+}
+
+/// The branch, tag or commit field; muted and inert while the repository field names a local
+/// folder, which has no revisions to pick.
+fn rev_field(p: &Pal, rev: &TextEdit, local: bool) -> El {
+    if local {
+        return col()
+            .gap(6.0)
+            .key("open-rev-local")
+            .help(REV_LOCAL)
+            .child(text("Branch, tag or commit".to_uppercase()).font(LABEL).color(p.muted.alpha(0.45)))
+            .child(
+                el().h(34.0)
+                    .px(10.0)
+                    .radius(8.0)
+                    .border(1.0, p.panel_border)
+                    .items_center()
+                    .disabled(true)
+                    .child(text(hint(REV_LOCAL)).font(FIELD).color(p.faint).single_line().truncate()),
+            );
+    }
+    col().gap(6.0).child(field_label(p, "Branch, tag or commit"))
+        .child(field(p, text_input(rev, FIELD).single_line()
+            .placeholder(hint("default branch"), p.faint)
+            .on_edit(|s: &mut State| &mut s.forms.rev)
+            .on_submit(|s: &mut State, _| project::start(s))))
+}
+
 fn open_dialog(p: &Pal, s: &State) -> El {
     let f = &s.forms;
     // Once a load has failed the error says what matters; the explanation gives it the room.
@@ -366,18 +416,17 @@ fn open_dialog(p: &Pal, s: &State) -> El {
     } else {
         "Clone a git repository into a temporary folder, or open a local directory. Every .c file is run through the C preprocessor and combined into one graph."
     };
+    let url = field(p, text_input(&f.url, FIELD).single_line()
+        .placeholder(hint("https://github.com/user/project.git   or   ~/src/project"), p.faint)
+        .on_edit(|s: &mut State| &mut s.forms.url)
+        .on_submit(|s: &mut State, _| project::start(s)));
     let mut c = col().gap(16.0)
         .child(heading(p, "Open a C project", sub))
-        .child(col().gap(6.0).child(field_label(p, "Repository"))
-            .child(field(p, text_input(&f.url, FIELD).single_line()
-                .placeholder(hint("https://github.com/user/project.git   or   ~/src/project"), p.faint)
-                .on_edit(|s: &mut State| &mut s.forms.url)
-                .on_submit(|s: &mut State, _| project::start(s)))))
-        .child(col().gap(6.0).child(field_label(p, "Branch, tag or commit"))
-            .child(field(p, text_input(&f.rev, FIELD).single_line()
-                .placeholder(hint("default branch"), p.faint)
-                .on_edit(|s: &mut State| &mut s.forms.rev)
-                .on_submit(|s: &mut State, _| project::start(s)))))
+        .child(col().gap(6.0).child(field_label(p, "Repository or folder"))
+            .child(row().gap(8.0).items_center()
+                .child(url.grow(1.0).min_w(0.0))
+                .child(button(p, BROWSE, false).key("open-browse").on_press_tx(browse))))
+        .child(rev_field(p, &f.rev, project::path_shaped(&f.url.text)))
         .child(col().gap(6.0).child(field_label(p, "Preprocessor flags"))
             .child(field(p, text_input(&f.flags, FIELD).single_line()
                 .placeholder(hint("-DNAME=value -Iinclude"), p.faint)
@@ -427,21 +476,29 @@ fn error_lines_shown(window_h: f32) -> usize {
     ERROR_LINES.min((error_list_room(window_h) / ERROR_LINE_H) as usize)
 }
 
-/// One file of a load error: its `path:line` in full, then the reason cut in the middle so its
-/// start and its end both show. The whole line is on hover.
+/// One file of a load error: its `path:line` in full, then the reason. A reason's subject (the
+/// header before `: No such file or directory`) is cut in the middle when the line runs out of
+/// room; its message is always shown whole. The whole line is on hover.
 fn error_line(p: &Pal, line: &str) -> El {
     let (at, why) = project::error_row(line);
+    let (subject, message) = project::reason_parts(why);
     let mut r = row().h(ERROR_LINE_H).gap(8.0).items_center().help(line.to_string());
     if !at.is_empty() {
         r = r.child(text(at.to_string()).font(MONO).color(p.muted).single_line());
     }
+    let cut = |s: String| text(s).font(MONO).color(p.text).truncate_middle().min_w(0.0);
+    let Some(message) = message else {
+        return r.child(cut(why.to_string()).grow(1.0));
+    };
+    // The subject carries the colon: a cut keeps both ends, and the room it leaves short of a
+    // whole glyph then falls after `:`, not before it. The message never shrinks.
     r.child(
-        text(why.to_string())
-            .font(MONO)
-            .color(p.text)
-            .truncate_middle()
+        row()
             .grow(1.0)
-            .min_w(0.0),
+            .min_w(0.0)
+            .items_center()
+            .child(cut(format!("{subject}:")).shrink())
+            .child(text(format!(" {message}")).font(MONO).color(p.text).single_line()),
     )
 }
 
@@ -606,6 +663,53 @@ mod tests {
             flags: vec![],
             modules: vec![],
         }
+    }
+
+    #[test]
+    fn browse_puts_the_picked_folder_in_the_field_and_mutes_the_revision() {
+        let mut s = State::load("fixture");
+        s.modal = Some(Modal::Open);
+        s.forms.url = TextEdit::new("https://github.com/a/b.git");
+        let mut rt = render(s);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains("REPOSITORY OR FOLDER") && tree.contains(BROWSE), "{tree}");
+        assert!(!tree.contains(REV_LOCAL), "a remote has revisions");
+
+        assert!(rt.accessibility_action("open-browse", accesskit::Action::Click, None));
+        rt.frame(2.0 / 60.0);
+        let (kind, options) = rt.file_dialog().expect("the folder picker shows");
+        assert_eq!(kind, rune_ui::FileDialogKind::Folder);
+        assert_eq!(options.title, "Open C project folder");
+        let dir = std::env::temp_dir();
+        rt.resolve_file_dialog(Some(dir.clone())).unwrap();
+        rt.frame(3.0 / 60.0);
+        assert_eq!(rt.state.forms.url.text, dir.display().to_string());
+
+        // A folder has no branches: the revision field says so and takes no input.
+        rt.frame(4.0 / 60.0);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains(REV_LOCAL), "{tree}");
+
+        // A cancelled picker leaves the field alone.
+        assert!(rt.accessibility_action("open-browse", accesskit::Action::Click, None));
+        rt.frame(5.0 / 60.0);
+        rt.resolve_file_dialog(None).unwrap();
+        rt.frame(6.0 / 60.0);
+        assert_eq!(rt.state.forms.url.text, dir.display().to_string());
+    }
+
+    #[test]
+    fn a_git_failure_leads_with_its_cause_and_lists_git_s_output() {
+        // What opening a missing GitHub repository reports.
+        let e = "git fetch: repository 'https://github.com/a/missing.git/' not found\nremote: Repository not found.\nfatal: repository 'https://github.com/a/missing.git/' not found";
+        let mut s = State::load("fixture");
+        s.modal = Some(Modal::Open);
+        s.forms.error = Some(e.into());
+        let rt = render(s);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains("git fetch: repository 'https://github.com/a/missing.git/' not found"), "{tree}");
+        assert!(tree.contains("Repository not found."), "{tree}");
+        assert!(tree.contains("Copy diagnostics"));
     }
 
     #[test]
