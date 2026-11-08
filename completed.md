@@ -3,7 +3,7 @@
 ## Parsing (`argo`)
 - Parses C into an owned AST (`CNode`). Every node records its exact byte range (`span`) in the parsed source.
 - `parser::CSnippet` (`argo/src/parser/model.rs`) holds a node's exact C text and its byte range.
-- Whole projects (a folder or a git/GitHub link) are preprocessed with `cc -E` and parsed into one graph.
+- Whole projects (a folder or a git/GitHub link) are preprocessed with `gcc -E` and parsed into one graph.
 - Test `prints_the_ast_of_a_small_c_snippet` (`argo/tests/integration.rs`) prints the AST of a small C function.
 
 ## Database (`argo-server`, `argo-db`)
@@ -22,7 +22,7 @@
 - **The agent** is a multi-turn tool-calling conversation (OpenAI-compatible chat completions) with exactly four tools:
   - `read`, `grep`, `glob`: read-only, over the worker's clone and the claim's session directory (the target's preprocessed translation unit, each submission and its logs). Paths can't leave those two places, symlinks included. There is no write or shell tool: the clone is shared and must stay the ingested commit.
   - `submit_rewrite(rust_source)`: takes the raw `.rs` text (markdown is rejected, not stripped). The submission is compiled with `rustc`, checked against the C program's symbols (not exported, redefines a C function, calls a `static` one), linked into the C program in place of the C definition (link errors the C program already has are ignored), and its exported signature is compared with the C function's ABI from both compilers' debug info. An accepted submission ends the agent. A rejected one gets back each failing check, why, and the paths of the full rustc/linker/ABI logs, and the agent keeps going in the same conversation.
-- **Budgets:** `--max-attempts` rejected submissions (default 5) and `--max-turns` model turns (default 40) per row, then the row is marked `Failed`. `--escalation-model` takes over the same conversation after `--escalate-after` rejections.
+- **Budgets:** `--max-attempts` rejected submissions (default 5) and `--max-turns` model turns (default 40) per row, then the row is marked `Failed`. Every turn uses the same model: the strong one from the start.
 - At startup the worker checks that the endpoint accepts tool calls, so a server without them can't fail rows.
 - Rust that passes every check is saved as `Unvalidated`, because nothing runs the program or its tests yet.
 - **Model proxy:** only `argo-server` holds the OpenRouter key and picks the model. Each worker attaches to the server's proxy (port 3101) and gets its own key and the model; the proxy forwards its requests as that model (optionally pinned to one provider) with the real key and logs requests, tokens and cost per worker and overall to `usage.log` in the data dir.
@@ -86,8 +86,21 @@ cargo test --workspace
 ```
 
 ## Not done yet
-- On/off switch for the workers from the UI, and control over who may use it.
-- Changing the number of workers inside a process that's already running.
-- Handing a failed row to a different worker instead of marking it `Failed`.
-- Running the C program (or its tests) with each Rust result linked in.
-- Passing the byte-range struct to `iterator` in place of line numbers.
+- Running the C program (or its tests) with each Rust result linked in (in progress).
+
+A `Failed` row stays C, by design: the goal is a mostly-Rust program that may still call C
+where a part doesn't port easily.
+
+## Stretch goals
+- Worker orchestration: turning workers on and off from the UI and controlling who may use
+  them, resizing a running pool, and spawning containers load-balanced across connected
+  machines. For the demo, workers are started by hand.
+- Merging neighbouring Rust nodes upward, removing the C glue between them.
+- Cleaning up the resulting Rust.
+
+## Out of scope
+- C static analysis (name/type resolution, call/data/control edges, values flowing into and out
+  of a region). The agent looks these up itself with `read`, `grep` and `glob`.
+- An explanation stage (leaves, then parents, with an architect sending guidance down): a small
+  hallucination low down could steer the parents wrong, and unlike code there's no compiler to
+  catch it.

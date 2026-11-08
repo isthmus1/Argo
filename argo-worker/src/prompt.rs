@@ -7,7 +7,6 @@ use std::fmt::Write as _;
 use std::path::{Component, Path};
 
 use argo_db_client::CChunk;
-use iterator::nemo::getLines;
 
 use crate::agent::{Budget, Task};
 use crate::model::Message;
@@ -15,7 +14,7 @@ use crate::model::Message;
 /// Lines of the original file shown on each side of the chunk.
 const CONTEXT_LINES: u32 = 20;
 
-/// The rules, after iterator's prompt (code only, exact C semantics), plus the ABI contract.
+/// The rules: exact C semantics, plus the ABI contract.
 const RULES: &str = "\
 - Export it as `#[no_mangle] pub extern \"C\" fn` with the exact C symbol name and an \
 ABI-identical signature: `core::ffi` scalar types (`c_int`, `c_long`, `c_char`, ...), raw \
@@ -142,9 +141,21 @@ fn original(chunk: &CChunk, root: &Path) -> Option<String> {
     Some(format!(
         "CONTEXT ({path} lines {from}-{to}, before preprocessing; reference only; the target \
          is lines {start}-{end}):\n{}\n\n",
-        getLines(&file, from, to),
+        lines(&file, from, to),
         path = chunk.path,
     ))
+}
+
+/// 1-based inclusive lines `from..=to` of `text`.
+fn lines(text: &str, from: u32, to: u32) -> String {
+    let from = from.max(1);
+    let skip = (from - 1) as usize;
+    let take = (to + 1).saturating_sub(from) as usize;
+    text.lines()
+        .skip(skip)
+        .take(take)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

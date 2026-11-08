@@ -1,4 +1,4 @@
-use rucc_base::Interner;
+use rucc_base::{Interner, Symbol};
 use rucc_diag::Diagnostic;
 use rucc_lex::{Convert, Keywords, Options, Tokens, convert, tokenize};
 use rucc_session::Std;
@@ -49,6 +49,17 @@ impl Lexer {
 
     pub fn gnu(&self) -> bool {
         self.gnu
+    }
+
+    /// The names the target's compiler has as types before any header, such as `__float128` on
+    /// x86-64, that `interner` holds. rucc's driver gives the parser the same list; without it
+    /// those names are unknown types.
+    pub(crate) fn type_names(&self, interner: &Interner) -> Vec<Symbol> {
+        self.target
+            .type_names()
+            .iter()
+            .filter_map(|&(name, _)| interner.find(name))
+            .collect()
     }
 
     pub fn lex(&self, source: &[u8]) -> Lexed {

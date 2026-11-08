@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use argo_db_client::{CChunk, ChunkKind};
 use tempfile::TempDir;
 
-use super::brief;
+use super::{brief, lines};
 use crate::agent::Task;
 
 /// The task message for `chunk` with the clone at `root`.
@@ -89,4 +89,14 @@ fn nothing_outside_the_clone_reaches_the_prompt() {
         assert!(!prompt.contains(SECRET), "{path} leaked: {prompt}");
         assert!(!prompt.contains("CONTEXT"), "{path}");
     }
+}
+
+#[test]
+fn context_lines_are_one_based_inclusive_and_clipped() {
+    let text = "a\nb\nc\nd";
+    assert_eq!(lines(text, 2, 3), "b\nc");
+    assert_eq!(lines(text, 1, 1), "a");
+    assert_eq!(lines(text, 3, 99), "c\nd");
+    assert_eq!(lines(text, 0, 2), "a\nb");
+    assert_eq!(lines(text, 3, 2), "");
 }

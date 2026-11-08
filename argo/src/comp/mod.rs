@@ -55,7 +55,19 @@ pub fn run_with_c(c: &str, replacement: &Replacement) -> Result<(), String> {
             .arg(dir.join("snippet.rs")),
     )?;
 
-    let compiler = c_compiler()?;
+    let host = Command::new("rustc")
+        .args(["--print", "host-tuple"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let host = String::from_utf8_lossy(&host.stdout);
+    let compiler = cc::Build::new()
+        .compiler(crate::project::cpp::GCC)
+        .cargo_metadata(false)
+        .target(host.trim())
+        .host(host.trim())
+        .opt_level(0)
+        .try_get_compiler()
+        .map_err(|e| e.to_string())?;
     run(
         "the C compiler",
         compiler
@@ -80,6 +92,7 @@ fn c_compiler() -> Result<cc::Tool, String> {
         .map_err(|e| e.to_string())?;
     let host = String::from_utf8_lossy(&host.stdout);
     cc::Build::new()
+        .compiler(crate::project::cpp::GCC)
         .cargo_metadata(false)
         .target(host.trim())
         .host(host.trim())

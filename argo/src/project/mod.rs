@@ -1,6 +1,6 @@
 //! A whole C project as one protocol graph.
 //!
-//! Every `.c` file is its own translation unit, as a compiler sees it: preprocessed (`cc -E`, so
+//! Every `.c` file is its own translation unit, as a compiler sees it: preprocessed (`gcc -E`, so
 //! includes are pasted in and macros expanded), parsed and built on its own, in parallel. A file
 //! the parser can't read, or whose headers aren't installed, is reported and left out instead of
 //! failing the project. Files are never pasted together: a macro, typedef or `static` name one
@@ -19,7 +19,6 @@
 
 mod check;
 pub mod cpp;
-mod dialect;
 mod files;
 pub mod git;
 pub mod lines;
@@ -45,7 +44,8 @@ pub fn makefile_flags(root: &Path) -> Vec<String> {
 /// How to preprocess.
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// The C compiler driver used for `-E` (`cc` unless `$CC` says otherwise).
+    /// The C compiler driver used for `-E`: [`cpp::GCC`]. rucc follows gcc's dialect, so a clang
+    /// preprocessor would hand the parser clang-only spellings.
     pub cc: String,
     /// Extra preprocessor flags (`-DNAME=value`, `-Ipath`, `-UNAME`), after those read from the
     /// project's Makefile.
@@ -70,7 +70,7 @@ impl Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            cc: std::env::var("CC").unwrap_or_else(|_| "cc".into()),
+            cc: cpp::GCC.into(),
             flags: vec![],
             makefile_flags: true,
             cancel: Arc::default(),

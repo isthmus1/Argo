@@ -8,7 +8,7 @@ use argo_db_client::{CChunk, ChunkKind, Validation};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::{Budget, Escalation, OUTAGES, Outcome, Task, compact, escape_controls, translate};
+use super::{Budget, OUTAGES, Outcome, Task, compact, escape_controls, translate};
 use crate::model::{Message, Model, ModelError, Reply, ToolCall, ToolSpec};
 use crate::validate::{Candidate, Failure, Stage, Validator, Verdict};
 
@@ -74,10 +74,6 @@ impl Model for Script {
 }
 
 impl Script {
-    fn models(&self) -> Vec<String> {
-        self.seen.borrow().iter().map(|(m, _)| m.clone()).collect()
-    }
-
     /// The content of the last message the model saw on turn `n` (0-based).
     fn last_seen(&self, n: usize) -> String {
         match self.seen.borrow()[n].1.last() {
@@ -141,15 +137,11 @@ fn chunk() -> CChunk {
     }
 }
 
-fn budget(max_attempts: u32, escalation: Option<(&str, u32)>) -> Budget {
+fn budget(max_attempts: u32) -> Budget {
     Budget {
         max_attempts,
         max_turns: 20,
         model: "base".into(),
-        escalation: escalation.map(|(m, after)| Escalation {
-            model: m.into(),
-            after,
-        }),
         backoff: Duration::ZERO,
     }
 }
@@ -195,7 +187,7 @@ async fn the_agent_reads_then_an_accepted_submission_ends_the_loop() {
         submit("s1", GOOD),
     ]);
     let v = verdicts([Verdict::Unvalidated("compiled; linked".into())]);
-    let outcome = run(&model, &v, &budget(3, None), &d).await;
+    let outcome = run(&model, &v, &budget(3), &d).await;
     let Outcome::Done {
         source,
         model: used,
@@ -237,7 +229,7 @@ async fn a_rejection_is_answered_with_reasons_and_log_paths_and_the_agent_resubm
         submit("s2", GOOD),
     ]);
     let v = verdicts([link_failure(), Verdict::Unvalidated("ok".into())]);
-    let outcome = run(&model, &v, &budget(3, None), &d).await;
+    let outcome = run(&model, &v, &budget(3), &d).await;
     assert!(
         matches!(outcome, Outcome::Done { attempts: 2, .. }),
         "{outcome:?}"
@@ -278,7 +270,7 @@ async fn markdown_is_rejected_not_stripped() {
         attempts,
         log,
         ..
-    } = run(&model, &v, &budget(3, None), &d).await
+    } = run(&model, &v, &budget(3), &d).await
     else {
         panic!("expected Done");
     };
@@ -295,40 +287,11 @@ async fn markdown_is_rejected_not_stripped() {
 }
 
 #[tokio::test]
-async fn escalation_takes_over_the_same_conversation() {
-    let d = dirs();
-    let model = script([submit("s1", GOOD), submit("s2", GOOD), submit("s3", GOOD)]);
-    let v = verdicts([
-        link_failure(),
-        link_failure(),
-        Verdict::Passed("tested".into()),
-    ]);
-    let outcome = run(&model, &v, &budget(4, Some(("strong", 2))), &d).await;
-    assert_eq!(model.models(), ["base", "base", "strong"]);
-    let seen = model.seen.borrow();
-    assert!(
-        seen[2].1.len() > seen[1].1.len(),
-        "one growing conversation"
-    );
-    let Outcome::Done {
-        model: used,
-        validation,
-        log,
-        ..
-    } = outcome
-    else {
-        panic!("expected Done");
-    };
-    assert_eq!((used.as_str(), validation), ("strong", Validation::Passed));
-    assert!(log.contains("escalated from base to strong"), "{log}");
-}
-
-#[tokio::test]
 async fn running_out_of_rejections_fails_the_chunk() {
     let d = dirs();
     let model = script([submit("s1", GOOD), submit("s2", GOOD)]);
     let v = verdicts([link_failure(), link_failure()]);
-    let Outcome::Failed { attempts, log } = run(&model, &v, &budget(2, None), &d).await else {
+    let Outcome::Failed { attempts, log } = run(&model, &v, &budget(2), &d).await else {
         panic!("expected Failed");
     };
     assert_eq!(attempts, 2);
@@ -351,7 +314,7 @@ async fn text_replies_are_nudged_and_turns_are_bounded() {
     ]);
     let b = Budget {
         max_turns: 3,
-        ..budget(3, None)
+        ..budget(3)
     };
     let Outcome::Failed { attempts, log } = run(&model, &verdicts([]), &b, &d).await else {
         panic!("expected Failed");
@@ -380,7 +343,7 @@ async fn malformed_calls_and_unknown_tools_are_answered_not_submitted() {
         submit("s1", GOOD),
     ]);
     let v = verdicts([Verdict::Unvalidated("ok".into())]);
-    let outcome = run(&model, &v, &budget(3, None), &d).await;
+    let outcome = run(&model, &v, &budget(3), &d).await;
     assert!(
         matches!(outcome, Outcome::Done { attempts: 1, .. }),
         "{outcome:?}"
@@ -417,14 +380,14 @@ async fn outages_use_no_attempt_and_a_lasting_one_leaves_the_chunk_unfailed() {
         submit("s1", GOOD),
     ]);
     let v = verdicts([Verdict::Unvalidated("ok".into())]);
-    let Outcome::Done { attempts, log, .. } = run(&model, &v, &budget(1, None), &d).await else {
+    let Outcome::Done { attempts, log, .. } = run(&model, &v, &budget(1), &d).await else {
         panic!("expected Done");
     };
     assert_eq!(attempts, 1);
     assert!(log.contains("outage 2 (base): HTTP 429"), "{log}");
 
     let model = script((0..=OUTAGES).map(|_| down("OPENROUTER_API_KEY is not set")));
-    let outcome = run(&model, &verdicts([]), &budget(3, None), &d).await;
+    let outcome = run(&model, &verdicts([]), &budget(3), &d).await;
     assert!(
         matches!(outcome, Outcome::Unavailable { .. }),
         "{outcome:?}"
@@ -439,7 +402,7 @@ async fn failed_requests_count_against_the_chunk() {
         submit("s1", GOOD),
     ]);
     let v = verdicts([Verdict::Unvalidated("ok".into())]);
-    let Outcome::Done { log, .. } = run(&model, &v, &budget(2, None), &d).await else {
+    let Outcome::Done { log, .. } = run(&model, &v, &budget(2), &d).await else {
         panic!("expected Done");
     };
     assert!(log.starts_with("turn 1 (base): HTTP 400"), "{log}");

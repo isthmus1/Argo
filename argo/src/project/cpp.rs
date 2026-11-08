@@ -1,5 +1,8 @@
-//! The system C preprocessor: `cc -E` treats `#include` as copy-paste and expands every macro, so
+//! The C preprocessor, gcc's: `gcc -E` treats `#include` as copy-paste and expands every macro, so
 //! the parser only ever sees plain C. [`super::lines`] maps its output back to original files.
+//!
+//! Always gcc, never the host's `cc`: rucc reads gcc's dialect, and clang's output (macOS's `cc`)
+//! carries clang-only spellings such as nullability qualifiers and availability attributes.
 
 use std::io::Write;
 use std::path::Path;
@@ -10,15 +13,14 @@ use std::process::{Command, Stdio};
 /// `-std=gnu2x` is C23 with GNU extensions, the standard the parser reads
 /// ([`crate::lexer::DEFAULT_STD`]); without it the output depends on the host compiler's default
 /// (C23 from GCC 15, older before), and `bool` reaches the parser as a keyword on one host and
-/// as `_Bool` on another. `gnu2x` rather than `gnu23` so GCC 9-13 and Apple clang accept it;
-/// GCC 16 and Clang 22 treat the two the same.
-///
-/// Apple clang defines `__BLOCKS__`, which makes the macOS SDK headers declare block (`^`)
-/// parameters the parser can't read; without it they declare only the plain C versions. gcc
-/// ignores the flag.
-pub const DIALECT_FLAGS: [&str; 2] = ["-std=gnu2x", "-U__BLOCKS__"];
+/// as `_Bool` on another. `gnu2x` rather than `gnu23` so GCC 9-13 accept it; GCC 14 and later
+/// treat the two the same.
+pub const DIALECT_FLAGS: [&str; 1] = ["-std=gnu2x"];
 
-/// Run `cc -E` on `input` (a file path, or C text on stdin when `stdin` is given).
+/// The preprocessor's driver.
+pub const GCC: &str = "gcc";
+
+/// Run `<cc> -E` on `input` (a file path, or C text on stdin when `stdin` is given).
 pub fn preprocess(cc: &str, flags: &[String], input: Input<'_>) -> Result<Vec<u8>, Error> {
     let mut cmd = Command::new(cc);
     cmd.arg("-E").args(DIALECT_FLAGS).args(flags);
