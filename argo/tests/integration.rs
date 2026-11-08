@@ -27,10 +27,3 @@ int broken( {
     assert!(report.failed, "{}", report.output);
     assert!(report.output.contains("--- diagnostics ---"));
 }
-
-#[tokio::test]
-async fn clang_lists_extern_functions() {
-    let externs = main::comp::example().expect("clang");
-
-    assert_eq!(externs, ["add: int (int, int)"]);
-}

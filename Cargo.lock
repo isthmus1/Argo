@@ -7,6 +7,7 @@ name = "Argo"
 version = "0.1.0"
 dependencies = [
  "argo-protocol",
+ "cc",
  "clang",
  "rucc-ast",
  "rucc-base",

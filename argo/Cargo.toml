@@ -29,6 +29,7 @@ rucc-lex = "=0.30.15"
 rucc-parse = "=0.30.15"
 rucc-session = "=0.30.15"
 rucc-target = "=0.30.15"
+cc = "1.11.1"
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["macros", "rt"] }

@@ -5,8 +5,10 @@ use rucc_base::Interner;
 use rucc_diag::Diagnostic;
 use rucc_parse::{Context, parse};
 
+mod model;
 mod summary;
 
+pub use model::CSnippet;
 pub use summary::{Report, parse_source, run};
 
 use crate::ast::Ast;
