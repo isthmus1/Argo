@@ -1,6 +1,6 @@
 //! Framework-independent graph view model and node geometry.
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Ty {
     Exec,
     U32,
@@ -21,6 +21,34 @@ pub enum Kind {
     Set,
     /// View-only getter for a shared function input.
     Get,
+    /// A collapsed node group.
+    Group,
+}
+
+/// Header colour families, following the parser's template kinds: every control-flow template
+/// (if/else, switch/case/default, for/while/do, break/continue/return) shares one family.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Category {
+    /// Function entry and return interface.
+    Interface,
+    Control,
+    /// Function definitions and calls, including collapsed groups.
+    Function,
+    Expression,
+    /// Variables, declarations, assignments and getters.
+    Variable,
+}
+
+impl Kind {
+    pub fn category(self) -> Category {
+        match self {
+            Kind::GroupIn | Kind::GroupOut => Category::Interface,
+            Kind::Loop | Kind::Branch | Kind::Switch => Category::Control,
+            Kind::Call | Kind::Group => Category::Function,
+            Kind::Op => Category::Expression,
+            Kind::Local | Kind::Set | Kind::Get => Category::Variable,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,11 +74,13 @@ pub struct Claim {
     pub active: bool,
 }
 
+#[derive(Clone)]
 pub struct Pin {
     pub label: String,
     pub ty: Ty,
 }
 
+#[derive(Clone)]
 pub struct Node {
     pub kind: Kind,
     pub title: String,
@@ -61,6 +91,8 @@ pub struct Node {
     pub ins: Vec<Pin>,
     /// The expanded group this node is drawn inside, if any.
     pub group: Option<usize>,
+    /// For a collapsed group node: how many nodes it contains.
+    pub members: usize,
 }
 
 /// (from node, output index) → (to node, input index).
@@ -72,6 +104,7 @@ pub struct Wire {
 
 /// An expanded node group, drawn as a frame around its members. Frames exist only for expanded
 /// groups and carry no semantics; wires connect straight to the members' pins.
+#[derive(Clone)]
 pub struct Group {
     pub title: String,
     pub lang: Lang,
@@ -79,6 +112,7 @@ pub struct Group {
     pub claim: Option<Claim>,
 }
 
+#[derive(Clone)]
 pub struct Graph {
     pub crumbs: Vec<&'static str>,
     pub nodes: Vec<Node>,
@@ -88,6 +122,90 @@ pub struct Graph {
 }
 
 impl Graph {
+    /// The view graph: each collapsed group becomes one node whose pins are the wires that
+    /// cross its frame. View state only; the semantic graph is untouched.
+    pub fn collapse(&self, collapsed: &[bool]) -> (Graph, Vec<Option<usize>>) {
+        let n = self.nodes.len();
+        let mut map: Vec<Option<usize>> = vec![None; n];
+        let mut out = Graph { crumbs: self.crumbs.clone(), nodes: vec![], wires: vec![], groups: self.groups.clone(), selected_group: self.selected_group };
+        // view index -> original node (None for a collapsed group node)
+        let mut origin = vec![];
+        let mut group_node = vec![None; self.groups.len()];
+        for (i, node) in self.nodes.iter().enumerate() {
+            match node.group {
+                Some(g) if collapsed.get(g).copied().unwrap_or(false) => {
+                    let gi = *group_node[g].get_or_insert_with(|| {
+                        let grp = &self.groups[g];
+                        out.nodes.push(Node {
+                            kind: Kind::Group, title: grp.title.clone(), lang: grp.lang, evidence: grp.evidence,
+                            claim: grp.claim, outs: vec![], ins: vec![], group: None,
+                            members: self.nodes.iter().filter(|n| n.group == Some(g)).count(),
+                        });
+                        origin.push(None);
+                        out.nodes.len() - 1
+                    });
+                    map[i] = Some(gi);
+                }
+                _ => {
+                    out.nodes.push(node.clone());
+                    origin.push(Some(i));
+                    map[i] = Some(out.nodes.len() - 1);
+                }
+            }
+        }
+        let mut in_pins: Vec<Vec<(usize, usize)>> = vec![vec![]; out.nodes.len()];
+        let mut out_pins: Vec<Vec<(usize, usize)>> = vec![vec![]; out.nodes.len()];
+        for w in &self.wires {
+            let (a, b) = (map[w.from.0].expect("mapped"), map[w.to.0].expect("mapped"));
+            if a == b && origin[a].is_none() {
+                continue; // internal to a collapsed group
+            }
+            let from = if origin[a].is_none() {
+                let pins = &mut out_pins[a];
+                let idx = pins.iter().position(|&p| p == w.from).unwrap_or_else(|| {
+                    pins.push(w.from);
+                    let src = &self.nodes[w.from.0].outs[w.from.1];
+                    out.nodes[a].outs.push(src.clone());
+                    pins.len() - 1
+                });
+                (a, idx)
+            } else {
+                (a, w.from.1)
+            };
+            let to = if origin[b].is_none() {
+                // One group input per external source value, however many members read it.
+                let pins = &mut in_pins[b];
+                let idx = pins.iter().position(|&p| p == w.from).unwrap_or_else(|| {
+                    pins.push(w.from);
+                    let dst = &self.nodes[w.to.0].ins[w.to.1];
+                    out.nodes[b].ins.push(dst.clone());
+                    pins.len() - 1
+                });
+                (b, idx)
+            } else {
+                (b, w.to.1)
+            };
+            out.wires.push(Wire { from, to });
+        }
+        // Exec pins first on collapsed nodes, keeping wire indices consistent.
+        for (vi, node) in out.nodes.iter_mut().enumerate() {
+            if origin[vi].is_some() {
+                continue;
+            }
+            for (pins, output) in [(&mut node.ins, false), (&mut node.outs, true)] {
+                let mut order: Vec<usize> = (0..pins.len()).collect();
+                order.sort_by_key(|&i| pins[i].ty != Ty::Exec);
+                let remap: Vec<usize> = { let mut r = vec![0; order.len()]; for (new, &old) in order.iter().enumerate() { r[old] = new; } r };
+                *pins = order.iter().map(|&i| pins[i].clone()).collect();
+                for w in &mut out.wires {
+                    if output && w.from.0 == vi { w.from.1 = remap[w.from.1]; }
+                    if !output && w.to.0 == vi { w.to.1 = remap[w.to.1]; }
+                }
+            }
+        }
+        (out, origin)
+    }
+
     pub fn wire_ty(&self, w: &Wire) -> Ty {
         self.nodes[w.from.0].outs[w.from.1].ty
     }

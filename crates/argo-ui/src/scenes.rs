@@ -22,7 +22,7 @@ impl B {
         let pins = |ps: &[(&str, Ty)]| ps.iter().map(|&(l, ty)| Pin { label: l.into(), ty }).collect();
         self.g.nodes.push(Node {
             kind, title: title.into(), lang, evidence: Evidence::None, claim: None,
-            ins: pins(ins), outs: pins(outs), group: self.group,
+            ins: pins(ins), outs: pins(outs), group: self.group, members: 0,
         });
         self.g.nodes.len() - 1
     }

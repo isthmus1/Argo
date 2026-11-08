@@ -1,73 +1,130 @@
-//! Read-only node-graph canvas: grid, expanded-group frames, Bézier wires and nodes.
-//! State is shown with colour, badges and worker avatars, not labels.
+//! Read-only node-graph canvas: grid, expanded-group frames, Bézier wires and nodes, under a
+//! pan/zoom camera. State is shown with colour, chips, badges and worker avatars.
 
-use crate::layout::Placed;
-use crate::model::{self, Claim, Evidence, Graph, Kind, Node, Pin, ROW, Ty};
+use crate::app::{Item, MARGIN, State};
+use crate::model::{self, Claim, Evidence, Graph, Kind, Lang, Node, Pin, ROW, Ty};
 use crate::palette::Pal;
-use rune_ui::{Color, El, LineCap, Path, Shape, TextStyle, canvas, col, el, row, text};
+use rune_ui::{Color, Cursor, El, LineCap, Path, Phase, Shape, TextStyle, canvas, col, el, row, text};
 
 const SOCKET: TextStyle = TextStyle::new(11.0, 450.0);
-const RADIUS: f32 = 8.0;
-const MARGIN: f32 = 40.0;
+/// Matches the floating panels' corner radius.
+pub const RADIUS: f32 = 12.0;
+/// Below this zoom, pin labels are hidden: they would be unreadable noise.
+const LABEL_ZOOM: f32 = 0.55;
 
-/// The canvas, `w`×`h` points, with the graph framed to fit inside `view` (x, y, w, h).
-pub fn view(p: &Pal, g: &Graph, pl: &Placed, w: f32, h: f32, view: [f32; 4]) -> El {
+/// How an item is emphasised on the canvas.
+#[derive(Clone, Copy)]
+struct Look {
+    selected: bool,
+    hovered: bool,
+    /// Screen-size compensation for badges and avatars at low zoom.
+    badge_scale: f32,
+    labels: bool,
+}
+
+/// The canvas filling `w`×`h`, with the world under the camera.
+pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
+    let g = &s.view;
+    let pl = &s.placed;
     let [bx, by, bw, bh] = pl.bounds;
-    let k = ((view[2] - 2.0 * MARGIN) / bw).min((view[3] - 2.0 * MARGIN) / bh).min(1.0);
     let (ww, wh) = (bw + 2.0 * MARGIN, bh + 2.0 * MARGIN);
     let o = [MARGIN - bx, MARGIN - by];
+    let focus = s.hovered.or(s.selected);
+    let look = |item: Item| Look {
+        selected: s.selected == Some(item),
+        hovered: s.hovered == Some(item) && s.selected != Some(item),
+        badge_scale: (1.0 / s.cam.zoom).clamp(1.0, 2.2),
+        labels: s.cam.zoom >= LABEL_ZOOM,
+    };
 
     let mut world = vec![];
     for (i, f) in pl.frames.iter().enumerate() {
-        world.push(frame(p, &g.groups[i], f[2], f[3], g.selected_group == Some(i)).absolute(o[0] + f[0], o[1] + f[1]));
+        if s.collapsed.get(i).copied().unwrap_or(false) || f[2] <= 0.0 {
+            continue;
+        }
+        world.push(frame(p, &g.groups[i], i, f[2], f[3], look(Item::Group(i))).absolute(o[0] + f[0], o[1] + f[1]));
     }
-    world.push(canvas(wires(p, g, pl, o)).size(ww, wh).absolute(0.0, 0.0));
+    world.push(canvas(wires(p, g, pl, o, focus)).size(ww, wh).absolute(0.0, 0.0));
     for (i, n) in g.nodes.iter().enumerate() {
-        world.push(node(p, n, pl.size[i]).absolute(o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]));
+        world.push(node(p, n, i, pl.size[i], look(Item::Node(i))).absolute(o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]));
     }
-    let left = view[0] + (view[2] - ww * k) / 2.0;
-    let top = view[1] + (view[3] - wh * k) / 2.0;
-    let world = el().size(ww, wh).scale(k).origin(0.0, 0.0).children(world).absolute(left, top);
-    el().size(w, h).fill(p.canvas).clip_rounded(0.0)
-        .child(canvas(grid(p, w, h)).size(w, h).absolute(0.0, 0.0))
+    let world = el().size(ww, wh).scale(s.cam.zoom).origin(0.0, 0.0).children(world).absolute(s.cam.pan[0], s.cam.pan[1]);
+
+    let (sx, sy) = (s.cam.pan[0], s.cam.pan[1]);
+    let (ex, ey) = (sx + ww * s.cam.zoom, sy + wh * s.cam.zoom);
+    let fade = |more: bool| if more { 56.0 } else { 0.0 };
+    el().key("canvas").size(w, h).fill(p.canvas).clip_fade(fade(sx < 0.0), fade(sy < 0.0), fade(ex > w), fade(ey > h)).cursor(Cursor::Grab)
+        .on_drag(|s: &mut State, d, _| {
+            match d.phase {
+                Phase::Down => s.cam.drag_from = s.cam.pan,
+                Phase::Move | Phase::Up => s.cam.pan = [s.cam.drag_from[0] + d.dx, s.cam.drag_from[1] + d.dy],
+            }
+        })
+        .on_wheel(|s: &mut State, e, _| {
+            s.cam.zoom_about(e.x, e.y, (-e.dy * 0.0025).exp());
+            true
+        })
+        .on_magnify(|s: &mut State, e, _| {
+            s.cam.zoom_about(e.x, e.y, 1.0 + e.delta);
+            true
+        })
+        .on_press(|s: &mut State| s.selected = None)
+        .child(canvas(grid(p, s, w, h)).size(w, h).absolute(0.0, 0.0))
         .child(world)
 }
 
-fn grid(p: &Pal, w: f32, h: f32) -> Shape {
-    let mut s = Shape::new();
-    let step = 24.0;
-    for i in 0..=(w / step) as i32 + 1 {
-        let x = i as f32 * step;
-        s = s.line([x, 0.0], [x, h], 1.0, LineCap::Butt, if i % 5 == 0 { p.grid_major } else { p.grid_minor });
+/// Grid lines that move with the camera; minor lines fade out when they get dense.
+fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
+    let mut sh = Shape::new();
+    let step = 24.0 * s.cam.zoom;
+    let minor = if step < 8.0 { None } else if step < 12.0 { Some(p.grid_minor.mix(p.canvas, 0.5)) } else { Some(p.grid_minor) };
+    let (ox, oy) = (s.cam.pan[0].rem_euclid(step * 5.0), s.cam.pan[1].rem_euclid(step * 5.0));
+    for (along, extent, origin, horizontal) in [(w, h, ox, false), (h, w, oy, true)] {
+        let mut i: i32 = -5;
+        while origin + i as f32 * step <= along {
+            let v = origin + i as f32 * step;
+            let major = i.rem_euclid(5) == 0;
+            if let Some(c) = if major { Some(p.grid_major) } else { minor } {
+                let (a, b) = if horizontal { ([0.0, v], [extent, v]) } else { ([v, 0.0], [v, extent]) };
+                sh = sh.line(a, b, 1.0, LineCap::Butt, c);
+            }
+            i += 1;
+        }
     }
-    for j in 0..=(h / step) as i32 + 1 {
-        let y = j as f32 * step;
-        s = s.line([0.0, y], [w, y], 1.0, LineCap::Butt, if j % 5 == 0 { p.grid_major } else { p.grid_minor });
-    }
-    s
+    sh
 }
 
-fn frame(p: &Pal, f: &model::Group, w: f32, h: f32, selected: bool) -> El {
-    let c = p.lang(f.lang);
-    let title = row().h(30.0).px(12.0).gap(8.0).items_center()
-        .child(el().size(8.0, 8.0).radius(4.0).fill(c))
-        .child(text(f.title.clone()).font(TextStyle::new(12.0, 600.0)).color(p.frame_text));
-    let fr = el().size(w, h).fill(p.frame_fill).radius(12.0)
-        .border(if selected { 2.0 } else { 1.0 }, if selected { p.accent } else { c.alpha(0.35) })
-        .child(title.absolute(0.0, 0.0));
-    decorate(p, fr, w, f.evidence, f.claim)
+fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
+    let title = row().h(32.0).w(w).px(14.0).gap(8.0).items_center()
+        .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
+        .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().grow(1.0))
+        .child(lang_chip(p, f.lang));
+    let border = if look.selected { (2.0, p.accent) } else if look.hovered { (1.5, p.muted) } else { (1.5, p.frame_text.alpha(0.22)) };
+    let fr = el().size(w, h).fill(p.frame_fill).radius(RADIUS + 4.0)
+        .border(border.0, border.1)
+        .child(title.absolute(0.0, 0.0))
+        .on_press(move |s: &mut State| s.select(Item::Group(gi)))
+        .on_double_press(move |s: &mut State| s.toggle_group(gi))
+        .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Group(gi), on))
+        .help("Double-click to collapse");
+    decorate(p, fr, [w, h], RADIUS + 4.0, f.evidence, f.claim, look)
 }
 
-fn socket_world(g: &Graph, pl: &Placed, i: usize, output: bool, idx: usize) -> [f32; 2] {
+fn socket_world(g: &Graph, pl: &crate::layout::Placed, i: usize, output: bool, idx: usize) -> [f32; 2] {
     let [x, y] = model::socket_local(&g.nodes[i], pl.size[i][0], output, idx);
     [pl.pos[i][0] + x, pl.pos[i][1] + y]
 }
 
-fn wires(p: &Pal, g: &Graph, pl: &Placed, o: [f32; 2]) -> Shape {
+fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
     let mut s = Shape::new();
-    // Data first, exec on top.
+    let touches = |w: &model::Wire| match focus {
+        Some(Item::Node(i)) => w.from.0 == i || w.to.0 == i,
+        Some(Item::Group(gi)) => g.nodes[w.from.0].group == Some(gi) || g.nodes[w.to.0].group == Some(gi),
+        None => true,
+    };
+    // Faded wires first, then data, exec on top.
     let mut order: Vec<_> = g.wires.iter().collect();
-    order.sort_by_key(|w| g.wire_ty(w) == Ty::Exec);
+    order.sort_by_key(|w| (touches(w), g.wire_ty(w) == Ty::Exec));
     for w in order {
         let a = socket_world(g, pl, w.from.0, true, w.from.1);
         let b = socket_world(g, pl, w.to.0, false, w.to.1);
@@ -75,17 +132,25 @@ fn wires(p: &Pal, g: &Graph, pl: &Placed, o: [f32; 2]) -> Shape {
         let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
         let path = Path::new().move_to(a).cubic_to([a[0] + dx, a[1]], [b[0] - dx, b[1]], b);
         let ty = g.wire_ty(w);
-        let width = if ty == Ty::Exec { 2.6 } else { 1.7 };
-        let color = if ty == Ty::Exec { p.exec.alpha(0.9) } else { p.ty(ty) };
-        if p.dark {
-            s = s.stroke_path(&path, width + 1.6, LineCap::Round, Color::BLACK.alpha(0.35));
+        let exec = ty == Ty::Exec;
+        let lit = touches(w);
+        let emphasised = focus.is_some() && lit;
+        let width = if exec { 2.8 } else { 1.8 } + if emphasised { 0.8 } else { 0.0 };
+        // Fade by mixing toward the canvas (opaque), never by alpha: translucent polylines
+        // double-blend at their joints and read as dotted.
+        let fade = |c: Color| if lit { c } else { c.mix(p.canvas, 0.6) };
+        let core = fade(p.ty(ty));
+        if exec {
+            s = s.stroke_path(&path, width + 2.0, LineCap::Round, fade(p.exec_casing));
+        } else if p.dark && lit {
+            s = s.stroke_path(&path, width + 1.6, LineCap::Round, p.canvas.mix(Color::BLACK, 0.4));
         }
-        s = s.stroke_path(&path, width, LineCap::Round, color);
+        s = s.stroke_path(&path, width, LineCap::Round, core);
     }
     s
 }
 
-fn kind_glyph(kind: Kind) -> &'static str {
+pub fn kind_glyph(kind: Kind) -> &'static str {
     match kind {
         Kind::GroupIn => "⇥",
         Kind::GroupOut => "⇤",
@@ -93,64 +158,116 @@ fn kind_glyph(kind: Kind) -> &'static str {
         Kind::Loop => "↻",
         Kind::Branch => "⑂",
         Kind::Switch => "☰",
-        Kind::Op => "+",
+        Kind::Op => "ƒx",
         Kind::Call => "ƒ",
         Kind::Set => "←",
         Kind::Get => "↦",
+        Kind::Group => "▣",
     }
 }
 
-fn node(p: &Pal, n: &Node, [w, _]: [f32; 2]) -> El {
-    let stripe = p.lang(n.lang);
-    let header = col()
-        .child(el().h(3.0).w_full().fill(stripe).corners([RADIUS, RADIUS, 0.0, 0.0]))
-        .child(row().h(model::HEADER - 3.0).px(10.0).gap(7.0).items_center()
-            .child(text(kind_glyph(n.kind)).font(TextStyle::new(12.0, 600.0)).color(p.node_muted))
-            .child(text(n.title.clone()).font(TextStyle::new(11.5, 600.0)).color(p.node_text).single_line()));
+/// Implementation language as a compact chip on a neutral (C) or rust (Rust) fill, legible on
+/// any header colour; structural nodes have none.
+pub fn lang_chip(p: &Pal, lang: Lang) -> El {
+    let t = match lang {
+        Lang::None => return el(),
+        Lang::C => "C",
+        Lang::Rust => "RS",
+    };
+    let (fill, fg) = p.chip(lang);
+    row().h(16.0).px(5.0).radius(4.0).fill(fill).border(1.0, Color::BLACK.alpha(0.2)).items_center()
+        .child(text(t).font(TextStyle::new(9.5, 750.0).tracking(0.3)).color(fg))
+}
 
-    if n.ins.is_empty() && n.outs.len() == 1 && n.outs[0].label.is_empty() {
-        let h = model::HEADER + 2.0;
-        let card = row().size(w, h).px(10.0).gap(7.0).items_center().fill(p.node_body).radius(h / 2.0)
-            .border(1.0, p.node_border)
-            .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.0, 600.0)).color(p.node_muted))
-            .child(text(n.title.clone()).font(TextStyle::new(11.5, 600.0)).color(p.node_text).single_line())
-            .child(socket(p, n.outs[0].ty, model::socket_local(n, w, true, 0)));
-        return decorate(p, card, w, n.evidence, n.claim);
+fn compact(n: &Node) -> bool {
+    n.ins.is_empty() && n.outs.len() == 1 && n.outs[0].label.is_empty()
+}
+
+/// Selection is the accent ring; hover is a neutral ring. Worker presence is drawn separately.
+fn emphasis(p: &Pal, e: El, look: Look) -> El {
+    if look.selected {
+        e.outline(2.0, 3.0, p.accent)
+    } else if look.hovered {
+        e.outline(2.0, 3.0, p.muted.alpha(0.8))
+    } else {
+        e
     }
+}
+
+fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], look: Look) -> El {
+    let head = p.header(n.kind.category());
+    let interact = move |e: El| {
+        e.on_press(move |s: &mut State| s.select(Item::Node(i)))
+            .on_double_press(move |s: &mut State| s.open_node(i))
+            .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Node(i), on))
+            .cursor(Cursor::Pointer)
+    };
+    if compact(n) {
+        // Constants and getters: a pill tinted with their family colour.
+        let getter = n.kind == Kind::Get;
+        let (fill, fg) = if getter {
+            (p.node_body, p.node_text)
+        } else if p.dark {
+            (head.mix(p.node_body, 0.45), Color::WHITE)
+        } else {
+            (head.mix(Color::WHITE, 0.78), head.mix(Color::BLACK, 0.35))
+        };
+        let edge = if getter { (1.5, p.ty(n.outs[0].ty)) } else { (1.0, head.alpha(0.5)) };
+        let card = row().size(w, h).px(10.0).gap(7.0).items_center().fill(fill).radius(h / 2.0)
+            .border(edge.0, edge.1)
+            .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.0, 600.0)).color(fg.alpha(0.7)))
+            .child(text(n.title.clone()).font(TextStyle::new(11.5, 600.0)).color(fg).single_line())
+            .child(socket(p, n.outs[0].ty, model::socket_local(n, w, true, 0)));
+        return interact(decorate(p, emphasis(p, card, look), [w, h], h / 2.0, n.evidence, n.claim, look));
+    }
+    let header = row().h(model::HEADER).px(10.0).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
+        .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)))
+        .child(text(n.title.clone()).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE).single_line().grow(1.0))
+        .child(if n.kind == Kind::Group {
+            row().h(16.0).px(5.0).radius(4.0).fill(Color::BLACK.alpha(0.25)).items_center()
+                .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE))
+        } else {
+            el()
+        })
+        .child(lang_chip(p, n.lang));
+
     let mut body = col().py(model::BODY_PAD);
-    for (o, i) in model::rows(n) {
-        body = body.child(match (o, i) {
-            (Some(o), Some(i)) => row().h(ROW).items_center().justify_between()
-                .child(socket_row(p, &n.ins[i], false)).child(socket_row(p, &n.outs[o], true)),
-            (Some(o), None) => socket_row(p, &n.outs[o], true),
-            (None, Some(i)) => socket_row(p, &n.ins[i], false),
+    for (o, ii) in model::rows(n) {
+        body = body.child(match (o, ii) {
+            (Some(o), Some(ii)) => row().h(ROW).items_center().justify_between()
+                .child(socket_row(p, &n.ins[ii], false, look.labels)).child(socket_row(p, &n.outs[o], true, look.labels)),
+            (Some(o), None) => socket_row(p, &n.outs[o], true, look.labels),
+            (None, Some(ii)) => socket_row(p, &n.ins[ii], false, look.labels),
             (None, None) => unreachable!("layout rows hold a pin"),
         });
     }
 
     let mut card = col().w(w).fill(p.node_body).radius(RADIUS).border(1.0, p.node_border)
         .child(header).child(body)
-        .shadow(if p.dark { 4.0 } else { 2.0 }, if p.dark { 14.0 } else { 8.0 }, p.shadow);
-    for (i, pin) in n.outs.iter().enumerate() {
-        card = card.child(socket(p, pin.ty, model::socket_local(n, w, true, i)));
+        .shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
+    if n.kind == Kind::Group {
+        // A collapsed group reads as a stack of cards.
+        card = card.box_shadow(rune_ui::Shadow { x: 5.0, y: 5.0, blur: 0.0, spread: 0.0, color: p.node_border, inset: false });
     }
-    for (i, pin) in n.ins.iter().enumerate() {
-        card = card.child(socket(p, pin.ty, model::socket_local(n, w, false, i)));
+    for (pi, pin) in n.outs.iter().enumerate() {
+        card = card.child(socket(p, pin.ty, model::socket_local(n, w, true, pi)));
     }
-    decorate(p, card, w, n.evidence, n.claim)
+    for (pi, pin) in n.ins.iter().enumerate() {
+        card = card.child(socket(p, pin.ty, model::socket_local(n, w, false, pi)));
+    }
+    interact(decorate(p, emphasis(p, card, look), [w, h], RADIUS, n.evidence, n.claim, look))
 }
 
-/// Evidence badge (top-right) and worker claim (avatar top-left; active work rings the item).
-fn decorate(p: &Pal, mut e: El, w: f32, evidence: Evidence, claim: Option<Claim>) -> El {
+/// Evidence badge (top-right), worker avatar (top-left) and, for active work, a dashed ring in
+/// the worker's colour. Badges keep a readable screen size when zoomed out.
+fn decorate(p: &Pal, mut e: El, [w, h]: [f32; 2], radius: f32, evidence: Evidence, claim: Option<Claim>, look: Look) -> El {
     if let Some(c) = claim {
-        let wc = p.worker(c.worker);
-        if c.active {
-            e = e.outline(2.0, 3.0, wc);
+        if c.active && !look.selected && !look.hovered {
+            let pad = 6.0;
+            e = e.child(el().size(w + 2.0 * pad, h + 2.0 * pad).absolute(-pad, -pad).radius(radius + pad)
+                .border(2.0, p.worker(c.worker)).border_dash(6.0, 4.0));
         }
-        let avatar = el().size(20.0, 20.0).radius(10.0).fill(wc).border(2.0, p.canvas).center()
-            .child(text(c.worker.to_string()).font(TextStyle::new(10.5, 700.0)).color(Color::WHITE))
-            .absolute(-10.0, -10.0);
-        e = e.child(if c.active { avatar } else { avatar.opacity(0.6) });
+        e = e.child(avatar(p, c.worker, c.active, 20.0).scale(look.badge_scale).absolute(-10.0, -10.0));
     }
     let badge = match evidence {
         Evidence::None => return e,
@@ -158,26 +275,36 @@ fn decorate(p: &Pal, mut e: El, w: f32, evidence: Evidence, claim: Option<Claim>
         Evidence::Rejected => ("!", p.bad),
     };
     e.child(el().size(18.0, 18.0).radius(9.0).fill(badge.1).border(2.0, p.canvas).center()
-        .child(text(badge.0).font(TextStyle::new(10.5, 700.0)).color(Color::WHITE))
+        .child(text(badge.0).font(TextStyle::new(10.5, 750.0)).color(if p.dark { p.canvas } else { Color::WHITE }))
+        .scale(look.badge_scale)
         .absolute(w - 9.0, -9.0))
 }
 
-fn socket_row(p: &Pal, pin: &Pin, output: bool) -> El {
+pub fn avatar(p: &Pal, worker: u8, active: bool, d: f32) -> El {
+    let a = el().size(d, d).radius(d / 2.0).fill(p.worker(worker)).border(2.0, p.canvas).center()
+        .child(text(worker.to_string()).font(TextStyle::new(d * 0.52, 700.0)).color(p.on_worker(worker)));
+    if active { a } else { a.opacity(0.65) }
+}
+
+fn socket_row(p: &Pal, pin: &Pin, output: bool, labels: bool) -> El {
     let r = row().h(ROW).px(12.0).items_center();
+    if !labels {
+        return r;
+    }
     let t = text(pin.label.clone()).font(SOCKET).color(p.node_text);
     if output { r.justify_end().child(t) } else { r.child(t) }
 }
 
 fn socket(p: &Pal, ty: Ty, [x, y]: [f32; 2]) -> El {
-    let outline = if p.dark { Color::BLACK.alpha(0.7) } else { p.node_body };
     match ty {
         Ty::Exec => {
             let s = 9.0;
-            el().size(s, s).absolute(x - s / 2.0, y - s / 2.0).fill(p.exec).border(1.0, outline).radius(1.5)
+            el().size(s, s).absolute(x - s / 2.0, y - s / 2.0).fill(p.exec).border(1.5, p.exec_casing).radius(1.5)
                 .rotate(std::f32::consts::FRAC_PI_4)
         }
         _ => {
             let d = 11.0;
+            let outline = if p.dark { Color::BLACK.alpha(0.7) } else { p.node_body };
             el().size(d, d).absolute(x - d / 2.0, y - d / 2.0).fill(p.ty(ty)).radius(d / 2.0).border(1.0, outline)
         }
     }

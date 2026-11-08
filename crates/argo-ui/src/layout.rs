@@ -58,6 +58,9 @@ pub fn layout(g: &Graph) -> Placed {
     let mut unit_of = vec![usize::MAX; n];
     for gi in 0..g.groups.len() {
         let members: Vec<usize> = (0..n).filter(|&i| g.nodes[i].group == Some(gi)).collect();
+        if members.is_empty() {
+            continue; // collapsed: drawn as a single node
+        }
         let (offs, w, h) = arrange(g, &size, &members);
         let ui = units.len();
         for &m in &members {
@@ -102,7 +105,11 @@ pub fn layout(g: &Graph) -> Placed {
         }
     }
     for gi in 0..g.groups.len() {
-        let ui = unit_of[(0..n).find(|&i| g.nodes[i].group == Some(gi)).expect("group has members")];
+        let Some(first) = (0..n).find(|&i| g.nodes[i].group == Some(gi)) else {
+            frames.push([0.0; 4]);
+            continue;
+        };
+        let ui = unit_of[first];
         frames.push([upos[ui][0], upos[ui][1], units[ui].size[0], units[ui].size[1]]);
     }
 
@@ -555,7 +562,7 @@ pub fn with_getters(mut g: Graph) -> Graph {
         if src.kind == Kind::GroupIn && pin.ty != Ty::Exec && fanout[&w.from] >= GETTER_FANOUT {
             let getter = Node {
                 kind: Kind::Get, title: pin.label.clone(), lang: Lang::None, evidence: Evidence::None, claim: None,
-                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty }], group: g.nodes[w.to.0].group,
+                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty }], group: g.nodes[w.to.0].group, members: 0,
             };
             g.nodes.push(getter);
             g.wires.push(Wire { from: (g.nodes.len() - 1, 0), to: w.to });
