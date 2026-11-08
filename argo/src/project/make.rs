@@ -52,6 +52,8 @@ pub fn read(root: &Path) -> Makefile {
         rule: None,
         optional: vec![],
         rules: vec![],
+        rule_id: 0,
+        in_rule: false,
     };
     ev.file(&root.join(name), 0);
     let mut flags = vec![];
@@ -76,16 +78,28 @@ pub fn read(root: &Path) -> Makefile {
             acc
         });
     let mut per_file: Vec<(PathBuf, Vec<String>)> = vec![];
-    for (file, recipe) in ev.rules {
+    // Recipe lines of one rule add up; a later rule for the same file replaces an earlier one.
+    let mut last: Option<(PathBuf, usize)> = None;
+    for (file, recipe, id) in ev.rules {
         let extra: Vec<String> = compiler_flags(&recipe, root)
             .into_iter()
             .filter(|f| !flags.contains(f))
             .collect();
-        per_file.retain(|(p, _)| *p != file);
-        if !extra.is_empty() {
-            per_file.push((file, extra));
+        let same_rule = last.as_ref() == Some(&(file.clone(), id));
+        if !same_rule {
+            per_file.retain(|(p, _)| *p != file);
+            per_file.push((file.clone(), vec![]));
         }
+        if let Some((_, fs)) = per_file.iter_mut().find(|(p, _)| *p == file) {
+            for f in extra {
+                if !fs.contains(&f) {
+                    fs.push(f);
+                }
+            }
+        }
+        last = Some((file, id));
     }
+    per_file.retain(|(_, fs)| !fs.is_empty());
     Makefile {
         flags,
         optional,
@@ -110,8 +124,12 @@ struct Eval<'a> {
     /// The `.c` file the rule being read compiles, if it compiles exactly one.
     rule: Option<PathBuf>,
     optional: Vec<String>,
-    /// (source file, its expanded recipe).
-    rules: Vec<(PathBuf, String)>,
+    /// (source file, one expanded recipe line, the rule it belongs to).
+    rules: Vec<(PathBuf, String, usize)>,
+    /// Rules seen so far (an id for the rule being read).
+    rule_id: usize,
+    /// Tab-indented lines are recipes: true after a rule line, until an assignment or include.
+    in_rule: bool,
 }
 
 impl Eval<'_> {
@@ -129,14 +147,21 @@ impl Eval<'_> {
     }
 
     fn line(&mut self, raw: &str, depth: usize) {
-        if let Some(recipe) = raw.strip_prefix('\t') {
+        // A tab starts a recipe line only inside a rule; make still reads conditionals there, and
+        // outside a rule a tab-indented line (`\tCFLAGS += …` under `ifeq`) is ordinary text.
+        if let Some(recipe) = raw.strip_prefix('\t')
+            && self.in_rule
+            && !self.conditional(strip_comment(recipe).trim())
+        {
             if self.active()
                 && let Some(file) = self.rule.clone()
             {
                 let expanded = self.expand(recipe, 0);
-                self.rules.push((file, expanded));
+                self.rules.push((file, expanded, self.rule_id));
             }
             return;
+        } else if raw.starts_with('\t') && self.in_rule {
+            return; // a conditional inside a recipe, already handled
         }
         let line = strip_comment(raw);
         let line = line.trim();
@@ -151,6 +176,7 @@ impl Eval<'_> {
         }
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         if matches!(word, "include" | "-include" | "sinclude") {
+            self.in_rule = false;
             if depth < 8 {
                 for f in self.expand(rest, 0).split_whitespace() {
                     if f.contains(UNKNOWN) {
@@ -168,12 +194,15 @@ impl Eval<'_> {
         }
         if let Some((name, op, value)) = assignment(line) {
             self.rule = None;
+            self.in_rule = false;
             self.assign(name, op, value);
             return;
         }
         // A rule: `targets: prerequisites [; recipe]`.
         self.rule = None;
         if let Some((targets, prereqs)) = line.split_once(':') {
+            self.in_rule = true;
+            self.rule_id += 1;
             let prereqs = prereqs.split(';').next().unwrap_or("");
             let targets = self.expand(targets, 0);
             let prereqs = self.expand(prereqs, 0);
@@ -575,6 +604,22 @@ mod tests {
             std::fs::write(d.join(n), t).unwrap();
         }
         std::fs::canonicalize(d).unwrap()
+    }
+
+    #[test]
+    fn later_recipe_lines_keep_a_rules_flags() {
+        let d = dir("recipe", &[("cpu.c", ""), ("Makefile", "cpu64.o: cpu.c\n\t$(CC) -DMAX_XLEN=64 -c -o $@ $<\n\t@size $@\n")]);
+        let m = read(&d);
+        assert_eq!(m.per_file, [(d.join("cpu.c"), vec!["-DMAX_XLEN=64".to_string()])]);
+    }
+
+    #[test]
+    fn tab_indented_lines_outside_a_rule_are_makefile_text() {
+        let d = dir(
+            "tabs",
+            &[("Makefile", "ifeq (a,a)\n\tCFLAGS += -DLINUX\n\tifeq (a,b)\n\t\tCFLAGS += -DNO\n\tendif\nendif\nCFLAGS += -DAFTER\n")],
+        );
+        assert_eq!(read(&d).flags, ["-DLINUX".to_string(), "-DAFTER".into()]);
     }
 
     #[test]

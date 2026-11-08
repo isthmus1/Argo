@@ -12,6 +12,14 @@ pub struct Placed {
     pub bounds: [f32; 4],
     /// World y of the empty band between wrapped rows, top to bottom.
     pub row_gaps: Vec<f32>,
+    /// Distinct for every layout run, so drawings derived from a layout can be cached by it.
+    pub generation: u64,
+}
+
+/// A fresh [`Placed::generation`].
+pub fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Width-to-height ratio of the canvas area a graph is framed in.
@@ -160,7 +168,7 @@ fn layout_lanes(g: &Graph) -> (Placed, Vec<[f32; 4]>, Vec<[f32; 4]>) {
         }
         None => [0.0; 4],
     }).collect();
-    (Placed { pos, size: o.size, frames, bounds: bounds(&upos, &sizes), row_gaps }, lanes, unit_rects)
+    (Placed { pos, size: o.size, frames, bounds: bounds(&upos, &sizes), row_gaps, generation: next_generation() }, lanes, unit_rects)
 }
 
 /// How far a collapsed group's stacked plates reach past its node (see `graph::node`).
@@ -233,7 +241,7 @@ fn in_place(view: &Graph, expanded: &Graph) -> Option<Placed> {
         _ => [0.0; 4],
     }).collect();
     let size = view.nodes.iter().map(drawn_size).collect();
-    Some(Placed { pos, size, frames, bounds: bounds(&upos, &sizes), row_gaps })
+    Some(Placed { pos, size, frames, bounds: bounds(&upos, &sizes), row_gaps, generation: next_generation() })
 }
 
 /// A long left-to-right chain shrinks to unreadable when framed. Cut it into rows at column

@@ -106,7 +106,7 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
         }
         world.push(frame(p, &g.groups[i], i, f[2], f[3], look(Item::Group(i))).absolute(o[0] + f[0], o[1] + f[1]));
     }
-    world.push(canvas(wires(p, g, pl, o, focus)).size(ww, wh).absolute(0.0, 0.0));
+    world.push(canvas(cached_wires(p, g, pl, o, focus)).size(ww, wh).absolute(0.0, 0.0));
     for (i, n) in g.nodes.iter().enumerate() {
         world.push(node(p, n, i, pl.size[i], s.can_expand(i), look(Item::Node(i))).absolute(o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]));
     }
@@ -173,18 +173,16 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
     let collapse = group_button(p.frame_text.alpha(0.9), p.frame_text.alpha(0.1), p.frame_text.alpha(0.14), false, look.badge_scale)
         .key(format!("collapse-group-{gi}"))
-        .on_press(move |s: &mut State| s.collapse_group(gi));
+        .on_press(move |s: &mut State| if !s.cam.take_panned() { s.collapse_group(gi) });
     // Trailing controls sit in the frame's corner: equal top and right insets, concentric radii;
     // an evidence badge on that corner pushes the button clear of it.
     let pr = FRAME_CHIP_INSET + if f.evidence == Evidence::None { 0.0 } else { BADGE_CLEAR };
-    // The title itself, behind an open chevron, is the frame's toggle too (a view change, like
-    // the button): a click there collapses the frame to its node.
-    let toggle = row().h(FRAME_TITLE_H).gap(8.0).items_center().grow(1.0).min_w(0.0).cursor(Cursor::Pointer)
-        .child(canvas(chevron(p.frame_text.alpha(0.8))).size(CHEVRON, CHEVRON))
+    // The title is plain: a single click selects the frame (the button collapses it, as does a
+    // double-click). Collapsing on a single title click made a double-click collapse and then
+    // re-expand the node that appeared under the pointer.
+    let toggle = row().h(FRAME_TITLE_H).gap(8.0).items_center().grow(1.0).min_w(0.0)
         .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
-        .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0))
-        .help("Collapse to node")
-        .on_press(move |s: &mut State| if !s.cam.take_panned() { s.collapse_group(gi) });
+        .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0));
     let title = row().h(FRAME_TITLE_H).w(w).pl(12.0).pr(pr).gap(8.0).items_center()
         .child(toggle)
         .child(lang_chip(p, f.lang).radius(concentric(FRAME_RADIUS, FRAME_CHIP_INSET, CHIP_H)))
@@ -198,15 +196,6 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
         .on_drag(pan)
         .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Group(gi), on));
     decorate(p, fr, [w, h], FRAME_RADIUS, f.evidence, f.claim, look)
-}
-
-/// A frame title's open chevron: its box, in world points.
-const CHEVRON: f32 = 10.0;
-
-/// An open (pointing down) chevron filling a `CHEVRON` square.
-fn chevron(c: Color) -> Shape {
-    let (m, s) = (CHEVRON / 2.0, 1.7);
-    Shape::new().stroke_path(&Path::new().move_to([1.5, m - 2.0]).line_to([m, m + 2.5]).line_to([CHEVRON - 1.5, m - 2.0]), s, LineCap::Round, c)
 }
 
 /// The collapse/expand button's hit target is at least this many screen points across.
@@ -772,6 +761,28 @@ fn route(g: &Graph, pl: &crate::layout::Placed, o: [f32; 2]) -> Routing {
     }).collect();
     let curves = back_routes(g, pl, o, &ends, &rects, forward, row);
     Routing { rects, frames, lanes, curves }
+}
+
+/// What a wire drawing was drawn for: (layout generation, focus, dark).
+type WiresKey = (u64, Option<Item>, bool);
+
+thread_local! {
+    /// The last wire drawing and its key.
+    static WIRES: std::cell::RefCell<Option<(WiresKey, Shape)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`wires`], reused while the layout, focus and theme stay the same. Wires are drawn in world
+/// space, so panning and zooming (which rebuild the view every frame) never re-route them.
+fn cached_wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
+    let key = (pl.generation, focus, p.dark);
+    if pl.generation != 0
+        && let Some(sh) = WIRES.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, sh)| sh.clone()))
+    {
+        return sh;
+    }
+    let sh = wires(p, g, pl, o, focus);
+    WIRES.with(|c| *c.borrow_mut() = Some((key, sh.clone())));
+    sh
 }
 
 fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {

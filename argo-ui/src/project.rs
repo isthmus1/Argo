@@ -158,10 +158,12 @@ fn target(spec: &str, rev: &str) -> Result<Target, String> {
         return Err("Enter a git URL or a local directory.".into());
     }
     let mut r = GitRef::parse(spec);
-    if !rev.trim().is_empty() {
-        r.rev = Some(rev.trim().to_string());
-    }
     if !path_shaped(spec) {
+        // The revision field applies to remotes only; the dialog hides it for paths, so text
+        // left in it must not override a path's own `#rev`.
+        if !rev.trim().is_empty() {
+            r.rev = Some(rev.trim().to_string());
+        }
         return Ok(Target::Git(r));
     }
     let path = expand_home(spec);

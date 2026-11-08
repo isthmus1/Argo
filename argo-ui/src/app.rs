@@ -233,7 +233,7 @@ impl State {
         let collapsed = vec![false; graph.groups.len()];
         let selected = graph.selected_group.map(Item::Group);
         let mut s = State {
-            scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![] },
+            scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![], generation: 0 },
             cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, live: None, next_event: 4.0, step: 0,
             project: None, forms: project::Forms::default(), modal: None, loader: None,
             // A state built after the window's first layout already knows its size.
