@@ -1,11 +1,11 @@
-//! Project chrome: the toolbar, the file/function explorer, and the open, progress and rewrite
-//! dialogs. These navigate and request work; the canvas itself stays read-only.
+//! Project chrome: the toolbar, the file/function explorer, and the open and progress dialogs.
+//! These open projects and navigate them; nothing here edits the graph or starts work.
 
-use rune_ui::{Color, Cursor, El, ScrollSpec, TextStyle, col, el, row, text, text_input};
+use rune_ui::{Color, Cursor, El, LoopSpec, ScrollSpec, TextStyle, Tx, col, el, row, text, text_input};
 
 use crate::app::State;
 use crate::palette::Pal;
-use crate::project::{self, Modal, Scope};
+use crate::project::{self, Modal};
 use crate::ui::{CONTROL_H, CONTROL_R, LABEL, M, MONO, TOP, UI, UI_STRONG, bar, card, explorer_w, label, viewport};
 
 const TITLE: TextStyle = TextStyle::new(17.0, 650.0);
@@ -60,19 +60,20 @@ fn field_label(p: &Pal, s: &str) -> El {
     text(s.to_uppercase()).font(LABEL).color(p.muted)
 }
 
-/// Top-right actions beside the status card: open a project, and (with one open) start a rewrite.
-pub fn toolbar(p: &Pal, s: &State) -> El {
-    let mut r = row().child(
-        button(p, "Open…", false)
-            .help("Open a git repository or local directory (Ctrl+O)")
-            .on_press(|s: &mut State| s.modal = Some(Modal::Open)),
-    );
-    if s.project.is_some() {
-        r = r.child(
-            button(p, "Rewrite in Rust…", true)
-                .help("Start a Rust rewrite of this function, file or project")
-                .on_press(|s: &mut State| s.modal = Some(Modal::Rewrite)),
-        );
+/// The toolbar's buttons: title, tooltip, action. Opening a project is the only one, with or
+/// without a project open: the app shows a migration and never starts one.
+type ToolbarButton = (&'static str, &'static str, fn(&mut State));
+const TOOLBAR: [ToolbarButton; 1] = [(
+    "Open…",
+    "Open a git repository or local directory (Ctrl+O)",
+    |s| s.modal = Some(Modal::Open),
+)];
+
+/// Top-right actions beside the status card.
+pub fn toolbar(p: &Pal, _: &State) -> El {
+    let mut r = row().gap(6.0);
+    for (title, tip, action) in TOOLBAR {
+        r = r.child(button(p, title, false).help(tip).on_press(action));
     }
     bar(p, r).key("toolbar")
 }
@@ -280,18 +281,19 @@ pub fn explorer(p: &Pal, s: &State) -> El {
         )
 }
 
-/// The open dialog (or progress, rewrite and not-implemented), over a dimmed canvas.
+/// The open dialog, or a load's progress, over a dimmed canvas.
 pub fn modal(p: &Pal, s: &State) -> El {
     let Some(which) = s.modal else { return el() };
     let dialog = match which {
         Modal::Open => open_dialog(p, s),
         Modal::Loading => loading_dialog(p, s),
-        Modal::Rewrite => rewrite_dialog(p, s),
-        Modal::NotImplemented => not_implemented(p),
     };
+    // Esc closes the open dialog or cancels a load. A click outside only closes the open
+    // dialog: a stray click shouldn't throw away a clone in progress.
     let dismiss = |s: &mut State| {
-        // A running load can't be cancelled midway; its dialog stays until it finishes.
-        if s.modal != Some(Modal::Loading) {
+        if s.modal == Some(Modal::Loading) {
+            project::cancel(s);
+        } else {
             s.modal = None;
         }
     };
@@ -304,7 +306,7 @@ pub fn modal(p: &Pal, s: &State) -> El {
                 .padding(22.0)
                 .gap(16.0)
                 .child(dialog)
-                .modal(true, dismiss),
+                .modal(which != Modal::Loading, dismiss),
         )
 }
 
@@ -344,7 +346,7 @@ fn open_dialog(p: &Pal, s: &State) -> El {
                 .on_submit(|s: &mut State, _| project::start(s))))
             .child(label("Added after any -D/-I flags found in the project's Makefile.", p.faint)));
     if let Some(e) = &f.error {
-        c = c.child(error_box(p, e));
+        c = c.child(error_box(p, e, f.error_open));
     }
     c.child(actions(
         el(),
@@ -357,11 +359,28 @@ fn open_dialog(p: &Pal, s: &State) -> El {
     ))
 }
 
+/// Lines of a load error shown before `Show all`.
+const ERROR_LINES: usize = 6;
+/// Height of one error line, and the most the expanded list takes before it scrolls.
+const ERROR_LINE_H: f32 = 18.0;
+const ERROR_LIST_MAX_H: f32 = 200.0;
+/// The open dialog's height without its error lines (measured from a 1024x640 capture), so the
+/// expanded list never pushes the dialog past a short window.
+const OPEN_DIALOG_REST_H: f32 = 500.0;
+
+/// How tall the expanded error list may grow before it scrolls: up to `ERROR_LIST_MAX_H`, as
+/// the window allows, and never shorter than the collapsed list.
+fn error_list_room(window_h: f32) -> f32 {
+    (window_h - 2.0 * M - OPEN_DIALOG_REST_H)
+        .clamp(ERROR_LINES as f32 * ERROR_LINE_H, ERROR_LIST_MAX_H)
+}
+
 /// A load error: its headline, then the first files with their reasons (one line each, the whole
-/// line on hover) and how many more were printed to the terminal.
-fn error_box(p: &Pal, e: &str) -> El {
-    const SHOWN: usize = 6;
-    let (head, files, more) = project::error_parts(e, SHOWN);
+/// line on hover). `Show all` lists the rest in a scrolling list; `Copy diagnostics` puts the
+/// whole text on the clipboard.
+fn error_box(p: &Pal, e: &str, open: bool) -> El {
+    let (head, files, more) = project::error_parts(e, if open { usize::MAX } else { ERROR_LINES });
+    let total = files.len() + more;
     let mut c = col()
         .gap(4.0)
         .padding(10.0)
@@ -369,141 +388,127 @@ fn error_box(p: &Pal, e: &str) -> El {
         .fill(p.bad.alpha(0.12))
         .child(text(head.to_string()).font(BODY).color(p.bad).wrap());
     if !files.is_empty() {
-        c = c.child(el().h(2.0));
+        let mut list = col();
+        for line in &files {
+            list = list.child(
+                row().h(ERROR_LINE_H).items_center().help(line.to_string()).child(
+                    text(line.to_string())
+                        .font(MONO)
+                        .color(p.text)
+                        .single_line()
+                        .truncate()
+                        .grow(1.0)
+                        .min_w(0.0),
+                ),
+            );
+        }
+        let list_h = files.len() as f32 * ERROR_LINE_H;
+        let room = error_list_room(viewport()[1]);
+        c = c.child(el().h(2.0)).child(if list_h > room {
+            list.h(room)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                // The edge fades over the lines scrolled out of view say there are more.
+                .scroll_edge_fade(ERROR_LINE_H)
+                .key("error-list")
+        } else {
+            list
+        });
     }
-    for line in files {
-        c = c.child(
-            text(line.to_string())
-                .font(MONO)
-                .color(p.text)
-                .single_line()
-                .truncate()
-                .min_w(0.0)
-                .help(line.to_string()),
-        );
+    if project::needs_flags(e) {
+        c = c.child(label(
+            "Most need a header path or a define: add -I or -D under Preprocessor flags.",
+            p.muted,
+        )
+        .wrap());
     }
-    if more > 0 {
-        c = c.child(label(&format!("+{more} more · full list in the terminal"), p.faint));
-    }
-    c
+    let toggle = if total > ERROR_LINES {
+        let title = if open {
+            "Show fewer".to_string()
+        } else {
+            format!("Show all {total}")
+        };
+        row()
+            .h(CONTROL_H)
+            .items_center()
+            .cursor(Cursor::Pointer)
+            .child(text(title).font(UI_STRONG).color(p.accent))
+            .on_press(|s: &mut State| s.forms.error_open = !s.forms.error_open)
+    } else {
+        el()
+    };
+    c.child(el().h(2.0)).child(actions(
+        toggle,
+        vec![
+            button(p, "Copy diagnostics", false)
+                .help("Copy the whole error to the clipboard")
+                .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                    if let Some(e) = &s.forms.error {
+                        tx.copy(e.clone());
+                    }
+                }),
+        ],
+    ))
 }
 
 fn loading_dialog(p: &Pal, s: &State) -> El {
     let Some(l) = &s.loader else {
         return heading(p, "Opening", "");
     };
-    let mut c = col().gap(14.0).child(heading(p, &l.title, &l.step));
-    let frac = l.progress.map_or(0.0, |(d, t)| d as f32 / t.max(1) as f32);
-    let bar_w = DIALOG_W - 44.0;
-    let bar = el().w(bar_w).h(6.0).radius(3.0).fill(p.code_bg);
-    c = c.child(if l.progress.is_some() {
-        bar.child(el().w(bar_w * frac).h(6.0).radius(3.0).fill(p.accent))
-    } else {
-        bar.child(
-            el().w(bar_w * 0.3)
-                .h(6.0)
-                .radius(3.0)
-                .fill(p.accent.alpha(0.6)),
+    let fill = el().h_full().radius(3.0).fill(p.accent);
+    let track = row()
+        .w_full()
+        .h(6.0)
+        .radius(3.0)
+        .fill(p.code_bg)
+        .clip_soft(0.0)
+        .child(match l.progress {
+            Some((done, total)) => fill.w_frac(done as f32 / total.max(1) as f32),
+            // No count yet (fetching, combining, parsing): a quarter-width segment sweeps the
+            // track on the render clock, wrapping from the left.
+            None => fill
+                .w_frac(0.25)
+                .looping(LoopSpec::slide(1.4, [-1.0, 0.0], [4.0, 0.0])),
+        });
+    col()
+        .gap(14.0)
+        .child(heading(p, &l.title, &l.step))
+        .child(track)
+        .child(label(
+            "Files the preprocessor or parser can't read are left out and listed in the explorer, under the file count.",
+            p.faint,
         )
-    });
-    c.child(label(
-        "Files the preprocessor or parser can't read are left out, listed under the file count in the explorer and printed to the terminal.",
-        p.faint,
-    ))
+        .wrap())
+        .child(actions(
+            el(),
+            vec![
+                button(p, "Cancel", false)
+                    .help("Stop opening (Esc)")
+                    .on_press(project::cancel),
+            ],
+        ))
 }
 
-fn rewrite_dialog(p: &Pal, s: &State) -> El {
-    let Some(proj) = &s.project else {
-        return not_implemented(p);
-    };
-    let current = project::current(s);
-    let module = current.as_ref().and_then(|(id, _)| proj.module_of(*id));
-    let option = |scope: Scope, title: String, detail: String| {
-        let on = s.forms.scope == scope;
-        row()
-            .padding(12.0)
-            .gap(12.0)
-            .radius(10.0)
-            .items_center()
-            .cursor(Cursor::Pointer)
-            .fill(if on { p.accent.alpha(0.12) } else { p.code_bg })
-            .border(
-                if on { 1.5 } else { 1.0 },
-                if on { p.accent } else { p.panel_border },
-            )
-            .child(
-                el().size(16.0, 16.0)
-                    .radius(8.0)
-                    .border(1.5, if on { p.accent } else { p.faint })
-                    .center()
-                    .child(if on {
-                        el().size(8.0, 8.0).radius(4.0).fill(p.accent)
-                    } else {
-                        el()
-                    }),
-            )
-            .child(
-                col()
-                    .gap(3.0)
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .child(
-                        text(title)
-                            .font(UI_STRONG)
-                            .color(p.text)
-                            .single_line()
-                            .truncate(),
-                    )
-                    .child(
-                        text(detail)
-                            .font(UI)
-                            .color(p.muted)
-                            .single_line()
-                            .truncate(),
-                    ),
-            )
-            .on_press(move |s: &mut State| s.forms.scope = scope)
-    };
-    let mut scopes = col().gap(8.0);
-    if let Some((_, name)) = &current {
-        scopes = scopes.child(option(
-            Scope::Function,
-            "This function".into(),
-            format!("{name}()"),
-        ));
-    }
-    if let Some(m) = module {
-        scopes = scopes.child(option(
-            Scope::File,
-            "This file".into(),
-            format!("{} · {} functions", m.name, m.functions.len()),
-        ));
-    }
-    scopes = scopes.child(option(
-        Scope::Project,
-        "Whole project".into(),
-        format!(
-            "{} · {} functions in {} files",
-            proj.name,
-            proj.function_count(),
-            proj.included()
-        ),
-    ));
-    col().gap(16.0)
-        .child(heading(p, "Rewrite in Rust", "Agents translate the chosen C into Rust, one work unit at a time; each candidate is checked against the original C before it replaces it."))
-        .child(col().gap(6.0).child(field_label(p, "Scope")).child(scopes))
-        .child(actions(el(), vec![
-            button(p, "Cancel", false).on_press(|s: &mut State| s.modal = None),
-            button(p, "Start rewrite", true).default_button().on_press(|s: &mut State| s.modal = Some(Modal::NotImplemented)),
-        ]))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn not_implemented(p: &Pal) -> El {
-    col().gap(16.0)
-        .child(row().gap(12.0).items_center()
-            .child(el().size(34.0, 34.0).radius(17.0).fill(p.accent.alpha(0.16)).center()
-                .child(text("i").font(TextStyle::new(16.0, 750.0)).color(p.accent)))
-            .child(text("Not yet implemented").font(TITLE).color(p.text)))
-        .child(text("Starting a Rust rewrite from the app isn't built yet: there are no translation workers or validation behind this button. Nothing was changed.".to_string()).font(BODY).color(p.muted).wrap())
-        .child(actions(el(), vec![button(p, "OK", true).default_button().on_press(|s: &mut State| s.modal = None)]))
+    #[test]
+    fn the_toolbar_only_opens_projects() {
+        let titles: Vec<&str> = TOOLBAR.iter().map(|(t, _, _)| *t).collect();
+        assert_eq!(titles, ["Open…"]);
+        let mut s = State::load("fixture");
+        (TOOLBAR[0].2)(&mut s);
+        assert_eq!(s.modal, Some(Modal::Open));
+    }
+
+    #[test]
+    fn the_expanded_error_list_fits_the_window() {
+        let collapsed = ERROR_LINES as f32 * ERROR_LINE_H;
+        // A 640 pt window has no room to spare: the list scrolls at its collapsed height.
+        assert_eq!(error_list_room(640.0), collapsed);
+        assert_eq!(error_list_room(900.0), ERROR_LIST_MAX_H);
+        assert!(error_list_room(700.0) > collapsed && error_list_room(700.0) < ERROR_LIST_MAX_H);
+    }
 }

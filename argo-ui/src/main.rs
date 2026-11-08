@@ -178,12 +178,12 @@ fn main() {
                 s.forms.error = Some(project::SAMPLE_ERROR.into());
                 s.modal = Some(project::Modal::Open);
             }),
-            ("project-rewrite", |s| s.modal = Some(project::Modal::Rewrite)),
-            ("project-rewrite-file", |s| {
-                s.forms.scope = project::Scope::File;
-                s.modal = Some(project::Modal::Rewrite);
+            ("project-open-error-all", |s| {
+                s.forms.error = Some(project::SAMPLE_ERROR.into());
+                s.forms.error_open = true;
+                s.modal = Some(project::Modal::Open);
             }),
-            ("project-not-implemented", |s| s.modal = Some(project::Modal::NotImplemented)),
+            ("project-loading", |s| project::show_loading(s, "Fetching https://github.com/fernandotcl/TinyEMU.git @ HEAD")),
             ("project-filter", |s| {
                 s.forms.filter = rune_ui::TextEdit::new(std::env::var("ARGO_FILTER").unwrap_or_else(|_| "read".into()));
             }),

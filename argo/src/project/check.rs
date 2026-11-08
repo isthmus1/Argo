@@ -2,7 +2,7 @@
 //! left out of the combined unit with the reason.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::Step;
 use super::cpp::{self, Input};
@@ -29,9 +29,12 @@ pub struct Setup<'a> {
     pub flags: &'a [String],
     /// `-D` flags among `flags` a file may go without (Makefile feature switches).
     pub optional: &'a [String],
+    /// Once set, the files not yet checked are skipped as cancelled.
+    pub cancel: &'a AtomicBool,
 }
 
-/// Check every file of `sources`, each starting from its own extra flags.
+/// Check every file of `sources`, each starting from its own extra flags. Files reached after
+/// `setup.cancel` is set are not read.
 pub fn all(
     setup: &Setup<'_>,
     sources: &[(PathBuf, Vec<String>)],
@@ -50,7 +53,14 @@ pub fn all(
             scope.spawn(move || {
                 for (k, verdict) in chunk.iter_mut().enumerate() {
                     let (path, extra) = &sources[ci * per + k];
-                    *verdict = Some(one(setup, path, extra.clone()));
+                    *verdict = Some(if setup.cancel.load(Ordering::Relaxed) {
+                        Verdict {
+                            flags: extra.clone(),
+                            skipped: Some(super::git::CANCELLED.into()),
+                        }
+                    } else {
+                        one(setup, path, extra.clone())
+                    });
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     progress(Step::Checking { done: n, total });
                 }

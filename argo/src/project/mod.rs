@@ -21,6 +21,8 @@ pub mod lines;
 pub mod make;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use argo_protocol::Snapshot;
 
@@ -44,6 +46,19 @@ pub struct Options {
     pub flags: Vec<String>,
     /// Read flags from the project's top-level Makefile (see [`make`]).
     pub makefile_flags: bool,
+    /// Set from another thread to stop a load: a running git command is killed, files not yet
+    /// checked are skipped, and [`open`]/[`open_git`] return [`git::CANCELLED`].
+    pub cancel: Arc<AtomicBool>,
+}
+
+impl Options {
+    fn cancelled(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Relaxed) {
+            Err(git::CANCELLED.into())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Default for Options {
@@ -52,6 +67,7 @@ impl Default for Options {
             cc: std::env::var("CC").unwrap_or_else(|_| "cc".into()),
             flags: vec![],
             makefile_flags: true,
+            cancel: Arc::default(),
         }
     }
 }
@@ -94,7 +110,11 @@ pub fn open_git(
     opts: &Options,
     progress: &(dyn Fn(Step) + Sync),
 ) -> Result<Opened, String> {
-    let dir = git::fetch(r, &|msg| progress(Step::Fetching(msg.to_string())))?;
+    let dir = git::fetch(
+        r,
+        &|msg| progress(Step::Fetching(msg.to_string())),
+        &opts.cancel,
+    )?;
     open(&dir, &r.name(), opts, progress)
 }
 
@@ -105,6 +125,7 @@ pub fn open(
     opts: &Options,
     progress: &(dyn Fn(Step) + Sync),
 ) -> Result<Opened, String> {
+    opts.cancelled()?;
     let root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
     progress(Step::Scanning);
     let sources = files::c_files(&root);
@@ -132,12 +153,14 @@ pub fn open(
         root: &root,
         flags: &flags,
         optional: &optional,
+        cancel: &opts.cancel,
     };
     let starts: Vec<(PathBuf, Vec<String>)> = sources
         .iter()
         .map(|p| (p.clone(), makefile.flags_for(p).to_vec()))
         .collect();
     let verdicts = check::all(&setup, &starts, progress);
+    opts.cancelled()?;
     let mut units: Vec<Unit> = sources
         .iter()
         .zip(verdicts)
@@ -150,6 +173,7 @@ pub fn open(
 
     // Combine the files that work alone; drop any that fail only when combined, and retry.
     loop {
+        opts.cancelled()?;
         let included: Vec<(&Path, &Unit)> = sources
             .iter()
             .zip(&units)
@@ -212,6 +236,7 @@ pub fn open(
                 }
             }
         }
+        opts.cancelled()?;
         progress(Step::Building);
         let graph = parsed
             .ast
@@ -339,6 +364,29 @@ mod tests {
             "#undef XLEN\n#define XLEN 128\n#undef NET\n#include \"/p/a.c\"\n#undef XLEN\n#undef NET\n#define NET 1\n#include \"/p/b.c\"\n"
         );
         assert_eq!(defines(&flags), [("NET", Some("1")), ("MAX", Some("64"))]);
+    }
+
+    #[test]
+    fn a_cancelled_load_stops_between_files() {
+        let dir = std::env::temp_dir().join(format!("argo-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..8 {
+            std::fs::write(dir.join(format!("f{i}.c")), format!("int f{i}(void) {{ return {i}; }}\n")).unwrap();
+        }
+        let opts = Options::default();
+        opts.cancel.store(true, Ordering::Relaxed);
+        assert_eq!(open(&dir, "c", &opts, &|_| {}).err().as_deref(), Some(git::CANCELLED));
+
+        // Cancelled while checking: the files after it aren't read and nothing is combined.
+        let opts = Options::default();
+        let combined = AtomicBool::new(false);
+        let r = open(&dir, "c", &opts, &|step| match step {
+            Step::Checking { .. } => opts.cancel.store(true, Ordering::Relaxed),
+            Step::Combining { .. } => combined.store(true, Ordering::Relaxed),
+            _ => {}
+        });
+        assert_eq!(r.err().as_deref(), Some(git::CANCELLED));
+        assert!(!combined.load(Ordering::Relaxed));
     }
 
     #[test]

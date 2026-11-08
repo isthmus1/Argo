@@ -3,10 +3,12 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, OnceLock};
 
-use argo_c::project::{self as cproj, Opened, Options, Step, Unit, git::GitRef};
+use argo_c::project::git::{self, GitRef};
+use argo_c::project::{self as cproj, Opened, Options, Step, Unit};
 use argo_protocol::{NodeId, NodeKind, Snapshot};
 use rune_ui::{TextEdit, Waker};
 
@@ -48,14 +50,15 @@ impl Project {
     }
 }
 
-/// Editable fields and choices behind the dialogs and the explorer, kept across reloads.
+/// Editable fields behind the dialogs and the explorer, kept across reloads.
 pub struct Forms {
     pub url: TextEdit,
     pub rev: TextEdit,
     pub flags: TextEdit,
     pub filter: TextEdit,
     pub error: Option<String>,
-    pub scope: Scope,
+    /// The open dialog lists every line of `error`, not just the first few.
+    pub error_open: bool,
     /// The module expanded in the explorer.
     pub expanded: Option<NodeId>,
 }
@@ -68,9 +71,16 @@ impl Default for Forms {
             flags: TextEdit::new(""),
             filter: TextEdit::new(""),
             error: None,
-            scope: Scope::Function,
+            error_open: false,
             expanded: None,
         }
+    }
+}
+
+impl Forms {
+    fn set_error(&mut self, e: Option<String>) {
+        self.error = e;
+        self.error_open = false;
     }
 }
 
@@ -78,20 +88,16 @@ impl Default for Forms {
 pub enum Modal {
     Open,
     Loading,
-    Rewrite,
-    NotImplemented,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Scope {
-    Function,
-    File,
-    Project,
-}
+/// What the open dialog shows after the user cancels a load.
+pub const CANCELLED: &str = "Opening was cancelled.";
 
 /// A load running on a background thread.
 pub struct Loader {
     rx: Receiver<Msg>,
+    /// Set to stop the thread: a running git command is killed, unread files are skipped.
+    cancel: Arc<AtomicBool>,
     pub title: String,
     pub step: String,
     pub progress: Option<(usize, usize)>,
@@ -119,9 +125,10 @@ fn target(spec: &str, rev: &str) -> Result<(Option<PathBuf>, GitRef), String> {
     Ok((path.is_dir().then_some(path), r))
 }
 
-fn options(flags: &str) -> Options {
+fn options(flags: &str, cancel: Arc<AtomicBool>) -> Options {
     Options {
         flags: flags.split_whitespace().map(str::to_string).collect(),
+        cancel,
         ..Options::default()
     }
 }
@@ -130,10 +137,11 @@ fn run(
     spec: &str,
     rev: &str,
     flags: &str,
+    cancel: Arc<AtomicBool>,
     progress: &(dyn Fn(Step) + Sync),
 ) -> Result<Opened, String> {
     let (local, r) = target(spec, rev)?;
-    let opts = options(flags);
+    let opts = options(flags, cancel);
     match local {
         Some(dir) => {
             let name = std::fs::canonicalize(&dir)
@@ -154,12 +162,14 @@ pub fn start(s: &mut State) {
         s.forms.flags.text.clone(),
     );
     if let Err(e) = target(&spec, &rev) {
-        s.forms.error = Some(e);
+        s.forms.set_error(Some(e));
         return;
     }
     let (tx, rx) = channel();
     let title = GitRef::parse(spec.trim()).name();
     let source = spec.trim().to_string();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
     std::thread::spawn(move || {
         let wake = || {
             if let Some(w) = WAKER.get() {
@@ -170,19 +180,46 @@ pub fn start(s: &mut State) {
             let _ = tx.send(Msg::Step(step));
             wake();
         };
-        let result = run(&spec, &rev, &flags, &progress);
+        let result = run(&spec, &rev, &flags, stop, &progress);
         log_outcome(&source, result.as_ref().map_err(String::as_str));
         let _ = tx.send(Msg::Done(Box::new(result), source));
         wake();
     });
-    s.forms.error = None;
+    s.forms.set_error(None);
     s.loader = Some(Loader {
         rx,
+        cancel,
         title: format!("Opening {title}"),
         step: "Starting".into(),
         progress: None,
     });
     s.modal = Some(Modal::Loading);
+}
+
+/// The progress dialog at `step` with no count yet and no thread behind it, for the
+/// `project-loading` review scene.
+pub fn show_loading(s: &mut State, step: &str) {
+    let (_, rx) = channel();
+    s.loader = Some(Loader {
+        rx,
+        cancel: Arc::default(),
+        title: "Opening TinyEMU".into(),
+        step: step.into(),
+        progress: None,
+    });
+    s.modal = Some(Modal::Loading);
+}
+
+/// Stop the running load and go back to the open dialog, its fields as they were, so it can be
+/// retried. The thread stops on its own shortly after (killing a running git command); what it
+/// reports is dropped.
+pub fn cancel(s: &mut State) {
+    let Some(loader) = s.loader.take() else {
+        return;
+    };
+    loader.cancel.store(true, Ordering::Relaxed);
+    s.forms.set_error(Some(CANCELLED.into()));
+    s.modal = Some(Modal::Open);
 }
 
 /// Apply background progress; true when something changed.
@@ -219,7 +256,8 @@ pub fn poll(s: &mut State) -> bool {
         match result {
             Ok(opened) => install(s, opened, source),
             Err(e) => {
-                s.forms.error = Some(e);
+                let e = if e == git::CANCELLED { CANCELLED.into() } else { e };
+                s.forms.set_error(Some(e));
                 s.modal = Some(Modal::Open);
             }
         }
@@ -229,7 +267,7 @@ pub fn poll(s: &mut State) -> bool {
 
 /// Open synchronously (command line and headless captures).
 pub fn open_now(s: &mut State, spec: &str, rev: &str, flags: &str) -> Result<(), String> {
-    let opened = run(spec, rev, flags, &|_| {})?;
+    let opened = run(spec, rev, flags, Arc::default(), &|_| {})?;
     // An error goes back to the caller, which prints it.
     log_outcome(spec.trim(), Ok(&opened));
     install(s, opened, spec.trim().to_string());
@@ -303,6 +341,17 @@ pub fn error_parts(error: &str, cap: usize) -> (&str, Vec<&str>, usize) {
     let rest: Vec<&str> = lines.collect();
     let more = rest.len().saturating_sub(cap);
     (head, rest.into_iter().take(cap).collect(), more)
+}
+
+/// Whether most of an error's file lines are a missing header or an undefined required macro:
+/// the kind of failure an `-I` or `-D` in the preprocessor flags fixes.
+pub fn needs_flags(error: &str) -> bool {
+    let (_, files, _) = error_parts(error, usize::MAX);
+    let fixable = files
+        .iter()
+        .filter(|l| l.contains("No such file") || (l.contains("#error") && l.contains("must be defined")))
+        .count();
+    fixable >= 2 && 2 * fixable > files.len()
 }
 
 /// Show an opened project: index its files and functions and open its entry point.
@@ -478,6 +527,74 @@ mod tests {
             dir.display().to_string(),
             "the dialog keeps what was typed"
         );
+    }
+
+    #[test]
+    fn a_cancelled_load_returns_to_the_dialog_ready_to_retry() {
+        let has_cc = std::process::Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+        let dir = std::env::temp_dir().join(format!("argo-ui-cancel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.c"), "int main(void) { return 0; }\n").unwrap();
+
+        let mut s = State::load("fixture");
+        s.forms.url = TextEdit::new(dir.display().to_string());
+        s.forms.flags = TextEdit::new("-DX=1");
+        start(&mut s);
+        assert_eq!(s.modal, Some(Modal::Loading));
+        let flag = s.loader.as_ref().unwrap().cancel.clone();
+        cancel(&mut s);
+
+        assert!(flag.load(Ordering::Relaxed), "the thread is told to stop");
+        assert!(s.loader.is_none());
+        assert_eq!(s.modal, Some(Modal::Open));
+        assert_eq!(s.forms.error.as_deref(), Some(CANCELLED));
+        assert_eq!(s.forms.url.text, dir.display().to_string(), "the form is intact");
+        assert_eq!(s.forms.flags.text, "-DX=1");
+        assert!(s.project.is_none());
+        // What the stopped thread sends later is dropped with its loader.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!poll(&mut s));
+        assert_eq!(s.modal, Some(Modal::Open));
+
+        // Open again from the same fields.
+        if has_cc {
+            start(&mut s);
+            assert_eq!(s.forms.error, None);
+            wait(&mut s);
+            assert_eq!(s.modal, None);
+            assert!(s.project.is_some());
+        }
+    }
+
+    #[test]
+    fn a_cancel_reported_by_the_thread_reads_as_cancelled() {
+        let (tx, rx) = channel();
+        let mut s = State::load("fixture");
+        s.loader = Some(Loader {
+            rx,
+            cancel: Arc::default(),
+            title: String::new(),
+            step: String::new(),
+            progress: None,
+        });
+        s.modal = Some(Modal::Loading);
+        tx.send(Msg::Done(Box::new(Err(git::CANCELLED.into())), "x".into()))
+            .unwrap();
+        poll(&mut s);
+        assert_eq!(s.modal, Some(Modal::Open));
+        assert_eq!(s.forms.error.as_deref(), Some(CANCELLED));
+    }
+
+    #[test]
+    fn missing_headers_and_defines_point_at_the_flags() {
+        assert!(needs_flags(SAMPLE_ERROR));
+        assert!(!needs_flags(
+            "None of the 3 .c files could be preprocessed and parsed.\na.c: No such file\nb.c: expected `;`\nc.c: expected `)`"
+        ));
+        assert!(!needs_flags("git fetch: timed out after 120 s"));
     }
 
     #[test]
