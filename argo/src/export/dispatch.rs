@@ -32,11 +32,11 @@ impl Exporter<'_> {
                 Some(&(c, cn)) => {
                     self.b.exec((d, arm), (cn, key::ENTER));
                     if self.falls_through(c) {
-                        out.to(&mut self.b, (cn, key::THEN), key::THEN);
+                        out.to(self.b, (cn, key::THEN), key::THEN);
                     }
                     self.route_exits(c, cn, out, None);
                 }
-                None => out.to(&mut self.b, (d, arm), key::THEN),
+                None => out.to(self.b, (d, arm), key::THEN),
             }
         }
     }
@@ -59,7 +59,7 @@ impl Exporter<'_> {
             ],
         );
         self.b.exec((gi, key::ENTER), (d, key::ENTER));
-        out.to(&mut self.b, (d, key::COMPLETED), key::THEN);
+        out.to(self.b, (d, key::COMPLETED), key::THEN);
         let mut cur = Some((d, key::BODY));
         for &(c, cn) in kids {
             if let Some(from) = cur.take() {
@@ -103,7 +103,7 @@ impl Exporter<'_> {
             self.b.pin(d, PinSpec::arm(arm.as_str(), &label));
             self.b.exec((d, &arm), (cn, key::ENTER));
             if self.falls_through(c) {
-                out.to(&mut self.b, (cn, key::THEN), key::THEN);
+                out.to(self.b, (cn, key::THEN), key::THEN);
             }
             for exit in self.escaping(c) {
                 let target = if exit == Exit::Break {
@@ -111,12 +111,12 @@ impl Exporter<'_> {
                 } else {
                     out.exit_key(exit)
                 };
-                out.to(&mut self.b, (cn, exit.key()), target);
+                out.to(self.b, (cn, exit.key()), target);
             }
         }
         if !has_default {
             self.b.pin(d, PinSpec::arm(key::DEFAULT, "default"));
-            out.to(&mut self.b, (d, key::DEFAULT), key::THEN);
+            out.to(self.b, (d, key::DEFAULT), key::THEN);
         }
         self.b.exec((gi, key::ENTER), (d, key::ENTER));
     }

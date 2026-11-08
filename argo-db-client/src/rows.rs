@@ -15,7 +15,7 @@ pub const SEGMENT_BYTES: usize = 256 << 10;
 
 /// Traces a byte of an ingested source file to the original repository file and 1-based line it
 /// came from; `None` where that is unknown. For `argo::project::open` that is its `places`
-/// (the snapshot's one source is the combined, preprocessed text, whose offsets say nothing
+/// (each unit's source is its preprocessed items laid end to end, whose offsets say nothing
 /// about the repository's files); for a source that is itself an original file, its own lines.
 pub type Places<'a> = dyn Fn(FileId, u32) -> Option<(String, u32)> + 'a;
 

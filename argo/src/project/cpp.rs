@@ -5,10 +5,18 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// Always passed first, so a caller's flags can still override them. Apple clang defines
-/// `__BLOCKS__`, which makes the macOS SDK headers declare block (`^`) parameters the parser
-/// can't read; without it they declare only the plain C versions. gcc ignores the flag.
-pub const DIALECT_FLAGS: [&str; 1] = ["-U__BLOCKS__"];
+/// Always passed first, so a caller's flags can still override them.
+///
+/// `-std=gnu2x` is C23 with GNU extensions, the standard the parser reads
+/// ([`crate::lexer::DEFAULT_STD`]); without it the output depends on the host compiler's default
+/// (C23 from GCC 15, older before), and `bool` reaches the parser as a keyword on one host and
+/// as `_Bool` on another. `gnu2x` rather than `gnu23` so GCC 9-13 and Apple clang accept it;
+/// GCC 16 and Clang 22 treat the two the same.
+///
+/// Apple clang defines `__BLOCKS__`, which makes the macOS SDK headers declare block (`^`)
+/// parameters the parser can't read; without it they declare only the plain C versions. gcc
+/// ignores the flag.
+pub const DIALECT_FLAGS: [&str; 2] = ["-std=gnu2x", "-U__BLOCKS__"];
 
 /// Run `cc -E` on `input` (a file path, or C text on stdin when `stdin` is given).
 pub fn preprocess(cc: &str, flags: &[String], input: Input<'_>) -> Result<Vec<u8>, Error> {

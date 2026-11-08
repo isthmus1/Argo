@@ -1,4 +1,5 @@
-//! A multi-file project through the system preprocessor into one protocol graph.
+//! A multi-file project through the system preprocessor, one translation unit per `.c` file,
+//! merged into one protocol graph.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,7 +73,7 @@ fn modules_and_functions(snap: &argo_protocol::Snapshot) -> Vec<(String, Vec<Str
 }
 
 #[test]
-fn files_combine_into_one_graph_with_a_module_per_original_file() {
+fn each_file_is_its_own_unit_merged_into_one_graph_with_a_module_per_original_file() {
     if !have("cc") {
         eprintln!("skipped: no `cc`");
         return;
@@ -107,8 +108,8 @@ fn files_combine_into_one_graph_with_a_module_per_original_file() {
         opened.flags
     );
 
-    // The header's inline function appears once (include guard), macros are expanded, and
-    // nothing from system headers (stdio.h) becomes a module.
+    // The header's inline function, which main.c and util.c both include, appears once; macros
+    // are expanded, and nothing from system headers (stdio.h) becomes a module.
     let modules = modules_and_functions(&opened.snapshot);
     assert_eq!(
         modules,
@@ -119,15 +120,36 @@ fn files_combine_into_one_graph_with_a_module_per_original_file() {
             ("util.c".into(), vec!["twice".into()]),
         ]
     );
-    let text = &opened.snapshot.sources[0].text;
+    // One recorded source per unit, holding only the project items it contributed: the shared
+    // header's with the first unit that includes it, and no system header text.
+    let sources: Vec<_> = opened
+        .snapshot
+        .sources
+        .iter()
+        .map(|s| s.path.as_str())
+        .collect();
+    assert_eq!(sources, ["limit.i", "main.i", "util.i"]);
+    let main = &opened.snapshot.sources[1].text;
     assert!(
-        text.contains("((s.w) * (s.h))") && !text.contains("AREA("),
+        main.contains("((s.w) * (s.h))") && !main.contains("AREA("),
         "macros are expanded"
     );
     assert!(
-        !text.lines().any(|l| l.trim_start().starts_with('#')),
-        "no directives reach the parser"
+        !opened.snapshot.sources[2].text.contains("struct shape"),
+        "{}",
+        opened.snapshot.sources[2].text
     );
+    for s in &opened.snapshot.sources {
+        assert!(
+            !s.text.contains("extern "),
+            "no system header text: {}",
+            s.text
+        );
+        assert!(
+            !s.text.lines().any(|l| l.trim_start().starts_with('#')),
+            "no directives reach the parser"
+        );
+    }
     let program = opened
         .snapshot
         .graph
@@ -137,19 +159,103 @@ fn files_combine_into_one_graph_with_a_module_per_original_file() {
         .unwrap();
     assert_eq!(program.name, "sample");
 
-    // Byte offsets index the combined text; places trace each function back to the original
-    // file and line it starts on.
+    // Byte offsets index each unit's recorded text; places trace each function back to the
+    // original file and line it starts on.
     for n in opened.snapshot.graph.nodes.iter() {
         let (NodeKind::Function, Some(p)) = (&n.kind, &n.provenance) else {
             continue;
         };
-        let (file, line) = opened.places.at(p.range.lo).unwrap();
+        let (file, line) = opened.places.at(p.range.file, p.range.lo).unwrap();
         let original = std::fs::read_to_string(root.join(file)).unwrap();
         let text = original.lines().nth(line as usize - 1).unwrap();
         assert!(
             text.contains(&format!("{}(", n.name)),
             "{file}:{line}: {text}"
         );
+    }
+}
+
+/// What a compiler keeps apart because each file is its own translation unit: the same macro
+/// with a different arity, the same `static` function, and a name that is a typedef in one file
+/// and a variable in another; plus a header that expands differently in two units, and C23 `bool`
+/// from `<stdbool.h>`.
+#[test]
+fn names_one_file_defines_mean_nothing_to_another() {
+    if !have("cc") {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("argo-project-apart-{}", std::process::id()));
+    write(
+        &root,
+        &[
+            (
+                "shared.h",
+                "#ifdef WIDE\nstatic inline int width(void) { return 64; }\n#else\nstatic inline int width(void) { return 32; }\n#endif\n",
+            ),
+            (
+                "a.c",
+                "#include \"shared.h\"\n#define say(x) ((x) + 1)\nstatic int helper(int v) { return say(v); }\ntypedef int count;\ncount a(void) { return helper(width()); }\n",
+            ),
+            (
+                "b.c",
+                "#include <stdbool.h>\n#define say(a, b, c, d) ((a) + (b) + (c) + (d))\nstatic int helper(int v) { return say(v, v, v, v); }\nint count = 3;\nbool b(void) { return helper(count) > 0; }\n",
+            ),
+            (
+                "c.c",
+                "#define WIDE\n#include \"shared.h\"\nint c(void) { return width(); }\n",
+            ),
+            (
+                "d.c",
+                "#include \"shared.h\"\nint d(void) { return width(); }\n",
+            ),
+        ],
+    );
+    let opened = project::open(&root, "apart", &Options::default(), &|_| {}).unwrap();
+    let skipped: Vec<_> = opened
+        .units
+        .iter()
+        .filter_map(|u| u.skipped.as_deref())
+        .collect();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(
+        modules_and_functions(&opened.snapshot),
+        [
+            ("a.c".to_string(), vec!["helper".to_string(), "a".into()]),
+            ("b.c".into(), vec!["helper".into(), "b".into()]),
+            ("c.c".into(), vec!["c".into()]),
+            ("d.c".into(), vec!["d".into()]),
+            // Once per expansion: the narrow one a.c and d.c share, and c.c's wide one.
+            ("shared.h".into(), vec!["width".into(), "width".into()]),
+        ]
+    );
+    let text = |path: &str| {
+        let s = opened
+            .snapshot
+            .sources
+            .iter()
+            .find(|s| s.path == path)
+            .unwrap();
+        s.text.as_str()
+    };
+    assert!(text("a.i").contains("return ((v) + 1);"), "{}", text("a.i"));
+    assert!(
+        text("b.i").contains("return ((v) + (v) + (v) + (v));"),
+        "{}",
+        text("b.i")
+    );
+    assert!(text("c.i").contains("return 64;") && !text("c.i").contains("return 32;"));
+    // d.c's narrow width is a.c's, already taken; only d.c's own function is recorded with it.
+    assert_eq!(text("d.i"), "int d(void) { return width(); }\n");
+
+    // Every function traces back to its own file and line, in whichever unit recorded it.
+    for n in &opened.snapshot.graph.nodes {
+        let (argo_protocol::NodeKind::Function, Some(p)) = (&n.kind, &n.provenance) else {
+            continue;
+        };
+        let (file, line) = opened.places.at(p.range.file, p.range.lo).unwrap();
+        let original = std::fs::read_to_string(root.join(file)).unwrap();
+        let at = original.lines().nth(line as usize - 1).unwrap();
+        assert!(at.contains(&format!(" {}(", n.name)), "{file}:{line}: {at}");
     }
 }
 
@@ -332,7 +438,12 @@ fn makefile_conditionals_per_file_rules_and_optional_features() {
             ("main.c".into(), vec!["main".into()]),
         ]
     );
-    let text = &opened.snapshot.sources[0].text;
+    let text: String = opened
+        .snapshot
+        .sources
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect();
     assert!(
         text.contains("return 128;"),
         "cpu.c is read with its rule's MAX_XLEN"

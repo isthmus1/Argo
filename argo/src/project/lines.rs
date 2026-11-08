@@ -10,9 +10,8 @@ pub struct Mapped {
     pub text: Vec<u8>,
     /// Byte offset of each line in `text`.
     line_starts: Vec<u32>,
-    /// Per line: index into `files`, the original 1-based line, and the top-level included file
-    /// (index into `files`) it belongs to, if any.
-    lines: Vec<(u32, u32, Option<u32>)>,
+    /// Per line: index into `files` and the original 1-based line.
+    lines: Vec<(u32, u32)>,
     /// Original file names exactly as the preprocessor spelled them.
     pub files: Vec<String>,
 }
@@ -20,8 +19,6 @@ pub struct Mapped {
 pub struct Origin<'a> {
     pub file: &'a str,
     pub line: u32,
-    /// The file `#include`d directly by the combined input that this code came in through.
-    pub unit: Option<&'a str>,
 }
 
 impl Mapped {
@@ -33,8 +30,7 @@ impl Mapped {
             lines: vec![],
             files: vec![],
         };
-        // Include stack of file indices; `stack[1]` is the top-level include when the input
-        // came from stdin (`stack[0]` is `<stdin>`).
+        // Include stack of file indices; the last is the file being read.
         let mut stack: Vec<u32> = vec![];
         let mut line = 1u32;
         let raw = raw.strip_suffix(b"\n").unwrap_or(raw);
@@ -64,11 +60,7 @@ impl Mapped {
             m.line_starts.push(m.text.len() as u32);
             m.text.extend_from_slice(raw_line);
             m.text.push(b'\n');
-            m.lines.push((
-                stack.last().copied().unwrap_or(0),
-                line,
-                stack.get(1).copied(),
-            ));
+            m.lines.push((stack.last().copied().unwrap_or(0), line));
             line += 1;
         }
         if m.files.is_empty() {
@@ -93,12 +85,25 @@ impl Mapped {
             .line_starts
             .partition_point(|&s| s <= pos)
             .saturating_sub(1);
-        let (file, line, unit) = self.lines.get(i).copied().unwrap_or((0, 1, None));
+        let (file, line) = self.lines.get(i).copied().unwrap_or((0, 1));
         Origin {
             file: &self.files[file as usize],
             line,
-            unit: unit.map(|u| self.files[u as usize].as_str()),
         }
+    }
+
+    /// The lines overlapping bytes `lo..hi` of `text`, in order: where each starts (`lo` for
+    /// the first when it starts earlier), and its file (index into `files`) and original line.
+    pub fn lines_in(&self, lo: u32, hi: u32) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
+        let first = self
+            .line_starts
+            .partition_point(|&s| s <= lo)
+            .saturating_sub(1);
+        self.line_starts[first..]
+            .iter()
+            .zip(&self.lines[first..])
+            .take_while(move |(s, _)| **s < hi.max(lo + 1))
+            .map(move |(&s, &(file, line))| (s.max(lo), file, line))
     }
 }
 
@@ -155,12 +160,16 @@ mod tests {
                 .position(|w| w == s.as_bytes())
                 .unwrap() as u32;
             let o = m.origin(pos);
-            (o.file.to_string(), o.line, o.unit.map(str::to_string))
+            (o.file.to_string(), o.line)
         };
-        assert_eq!(at("int a"), ("a.c".into(), 1, Some("a.c".into())));
-        assert_eq!(at("int h"), ("a.h".into(), 1, Some("a.c".into())));
-        assert_eq!(at("int b"), ("a.c".into(), 3, Some("a.c".into())));
-        assert_eq!(at("int c"), ("b.c".into(), 1, Some("b.c".into())));
+        assert_eq!(at("int a"), ("a.c".into(), 1));
+        assert_eq!(at("int h"), ("a.h".into(), 1));
+        assert_eq!(at("int b"), ("a.c".into(), 3));
+        assert_eq!(at("int c"), ("b.c".into(), 1));
+        // Bytes 9..20 end line 2 and cover line 3; the first is clamped to where the range starts.
+        let name = |f: u32| m.files[f as usize].as_str();
+        let lines: Vec<_> = m.lines_in(9, 20).map(|(s, f, l)| (s, name(f), l)).collect();
+        assert_eq!(lines, [(9, "a.h", 1), (14, "a.c", 3)]);
     }
 
     #[test]

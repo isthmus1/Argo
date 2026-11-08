@@ -9,7 +9,7 @@ use rucc_parse::{Context, parse};
 use rucc_session::Std;
 use rucc_target::{TargetInfo, Triple};
 
-const STD: Std = Std::C11;
+const STD: Std = crate::lexer::DEFAULT_STD;
 const GNU: bool = true;
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 

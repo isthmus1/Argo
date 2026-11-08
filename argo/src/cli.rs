@@ -45,7 +45,8 @@ impl Args {
 }
 
 pub(crate) fn run(args: Args) -> Result<(), String> {
-    // A directory or git reference is a whole project: preprocessed and combined into one graph.
+    // A directory or git reference is a whole project: each file preprocessed, then merged into one
+    // graph.
     let spec = args.path.to_string_lossy();
     let remote = ["https://", "http://", "git@", "ssh://", "git://", "file://"]
         .iter()

@@ -5,6 +5,10 @@ use rucc_session::Std;
 use rucc_target::{TargetInfo, Triple};
 
 pub const DEFAULT_TARGET: &str = "x86_64-unknown-linux-gnu";
+/// The C standard every input is read as, with GNU extensions: C23, current GCC's default. The
+/// system preprocessor is run in the same mode ([`crate::project::cpp::DIALECT_FLAGS`]), so
+/// `bool`, `true`, `false` and `nullptr` reach the parser as the keywords it reads them as.
+pub const DEFAULT_STD: Std = Std::C23;
 
 /// Reusable lexer configuration. Every call gets its own symbol interner.
 /// Directives/macros still require a future preprocessing stage.
@@ -73,6 +77,6 @@ impl Lexer {
 
 impl Default for Lexer {
     fn default() -> Self {
-        Self::new(DEFAULT_TARGET, Std::C11, true).expect("the built-in target triple is valid")
+        Self::new(DEFAULT_TARGET, DEFAULT_STD, true).expect("the built-in target triple is valid")
     }
 }

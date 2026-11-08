@@ -1,14 +1,16 @@
-//! Each `.c` file alone: preprocessed, parsed and built, in parallel. Files that fail here are
-//! left out of the combined unit with the reason.
+//! Each `.c` file alone, as its own translation unit: preprocessed, parsed and built, in
+//! parallel. Files that fail are left out with the reason; the rest are handed on to be merged.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::Step;
 use super::cpp::{self, Input};
 use super::lines::Mapped;
 use super::{dialect, files};
-use crate::{Parser, templates};
+use crate::graph::Graph;
+use crate::{ParseResult, Parser, templates};
 
 /// At most this many optional Makefile features are turned off for one file.
 const MAX_DROPS: usize = 3;
@@ -22,6 +24,16 @@ pub struct Verdict {
     pub skipped: Option<String>,
 }
 
+/// A file that was read: its preprocessed text with the line map, the parse and the graph.
+pub struct Read {
+    pub mapped: Mapped,
+    pub parsed: ParseResult,
+    pub graph: Graph,
+}
+
+/// One file's verdict, and what was read when it could be.
+type Checked = (Verdict, Option<Read>);
+
 pub struct Setup<'a> {
     pub cc: &'a str,
     pub root: &'a Path,
@@ -33,48 +45,72 @@ pub struct Setup<'a> {
     pub cancel: &'a AtomicBool,
 }
 
-/// Check every file of `sources`, each starting from its own extra flags. Files reached after
-/// `setup.cancel` is set are not read.
+/// Check every file of `sources`, each starting from its own extra flags, and hand each one
+/// read to `read` in the order of `sources`, on the calling thread. Files are read a batch at a
+/// time so only a batch's syntax trees are held at once. Files reached after `setup.cancel` is set
+/// are not read.
 pub fn all(
     setup: &Setup<'_>,
     sources: &[(PathBuf, Vec<String>)],
     progress: &(dyn Fn(Step) + Sync),
+    read: &mut dyn FnMut(usize, Read),
 ) -> Vec<Verdict> {
     let total = sources.len();
     let done = AtomicUsize::new(0);
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(1, total.max(1));
-    let per = total.div_ceil(threads).max(1);
-    let mut verdicts: Vec<Option<Verdict>> = (0..total).map(|_| None).collect();
-    std::thread::scope(|scope| {
-        for (ci, chunk) in verdicts.chunks_mut(per).enumerate() {
-            let done = &done;
-            scope.spawn(move || {
-                for (k, verdict) in chunk.iter_mut().enumerate() {
-                    let (path, extra) = &sources[ci * per + k];
-                    *verdict = Some(if setup.cancel.load(Ordering::Relaxed) {
-                        Verdict {
-                            flags: extra.clone(),
-                            skipped: Some(super::git::CANCELLED.into()),
-                        }
-                    } else {
-                        one(setup, path, extra.clone())
-                    });
-                    let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    progress(Step::Checking { done: n, total });
-                }
-            });
+    let mut verdicts = Vec::with_capacity(total);
+    for start in (0..total).step_by(threads * 2) {
+        let batch = &sources[start..(start + threads * 2).min(total)];
+        let next = AtomicUsize::new(0);
+        let results: Vec<Mutex<Option<Checked>>> = batch.iter().map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..threads.min(batch.len()) {
+                scope.spawn(|| {
+                    loop {
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((path, extra)) = batch.get(k) else {
+                            break;
+                        };
+                        let result = if setup.cancel.load(Ordering::Relaxed) {
+                            let skipped = Some(super::git::CANCELLED.into());
+                            (
+                                Verdict {
+                                    flags: extra.clone(),
+                                    skipped,
+                                },
+                                None,
+                            )
+                        } else {
+                            one(setup, path, extra.clone())
+                        };
+                        *results[k].lock().expect("no reader panicked") = Some(result);
+                        let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                        progress(Step::Checking { done: n, total });
+                    }
+                });
+            }
+        });
+        for (k, result) in results.into_iter().enumerate() {
+            let (verdict, unit) = result
+                .into_inner()
+                .expect("no reader panicked")
+                .expect("every file of the batch was checked");
+            if let Some(unit) = unit {
+                read(start + k, unit);
+            }
+            verdicts.push(verdict);
         }
-    });
-    verdicts.into_iter().map(|v| v.expect("checked")).collect()
+    }
+    verdicts
 }
 
 /// Preprocess, parse and build one file alone. When a header is missing, try turning off the
 /// optional features one at a time: `ifdef CONFIG_FS_NET` in the Makefile adds `-DCONFIG_FS_NET`,
 /// which makes `temu.c` include `<openssl/aes.h>`; without OpenSSL installed the file is still
 /// read, as built without that feature.
-fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> Verdict {
+fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> Checked {
     let run = |extra: &[String]| {
         let flags: Vec<String> = setup.flags.iter().chain(extra).cloned().collect();
         cpp::preprocess(setup.cc, &flags, Input::File(path))
@@ -110,17 +146,19 @@ fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> Verdict {
         raw = r;
         drops += 1;
     }
-    let skipped = match raw {
-        Ok(raw) => parse(&raw, setup.root).err(),
-        Err(e) => Some(e.describe(|f| files::short(f, setup.root))),
+    let (skipped, unit) = match raw.map(|raw| parse(&raw, setup.root)) {
+        Ok(Ok(unit)) => (None, Some(unit)),
+        Ok(Err(why)) => (Some(why), None),
+        Err(e) => (Some(e.describe(|f| files::short(f, setup.root))), None),
     };
-    Verdict {
+    let verdict = Verdict {
         flags: extra,
         skipped,
-    }
+    };
+    (verdict, unit)
 }
 
-fn parse(raw: &[u8], root: &Path) -> Result<(), String> {
+fn parse(raw: &[u8], root: &Path) -> Result<Read, String> {
     let mut mapped = Mapped::new(raw);
     dialect::neutralize(&mut mapped.text);
     let parsed = Parser::default().parse(&mapped.text);
@@ -133,9 +171,13 @@ fn parse(raw: &[u8], root: &Path) -> Result<(), String> {
             o.line
         ));
     }
-    parsed
+    let graph = parsed
         .ast
         .build_graph(&parsed.source, templates::all())
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(Read {
+        mapped,
+        parsed,
+        graph,
+    })
 }
