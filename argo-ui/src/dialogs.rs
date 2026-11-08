@@ -91,32 +91,95 @@ pub fn toolbar(p: &Pal, _: &State) -> El {
     bar(p, r).key("toolbar")
 }
 
-/// A function's translation state beside its name: the claiming worker, else its evidence badge.
-/// Calls fold into statements on the canvas, so this is where every function's state shows.
-fn work_mark(p: &Pal, s: &State, id: argo_protocol::NodeId) -> Option<El> {
+/// A function's translation state, as the explorer marks it with a dot at the row's right end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mark {
+    /// A worker is translating it right now: blue.
+    Working,
+    /// Rust was pushed for it: green.
+    Done,
+    /// Translation failed: red.
+    Failed,
+}
+
+impl Mark {
+    /// From the function's evidence and claim. An active claim wins: a requeued function being
+    /// translated again shows as in progress.
+    fn of(evidence: Evidence, claim: Option<crate::model::Claim>) -> Option<Mark> {
+        match (claim, evidence) {
+            (Some(c), _) if c.active => Some(Mark::Working),
+            (_, Evidence::Accepted | Evidence::Unvalidated) => Some(Mark::Done),
+            (_, Evidence::Rejected) => Some(Mark::Failed),
+            (_, Evidence::None) => None,
+        }
+    }
+
+    fn color(self, p: &Pal) -> Color {
+        match self {
+            Mark::Working => p.accent,
+            Mark::Done => p.ok,
+            Mark::Failed => p.bad,
+        }
+    }
+}
+
+/// Width of the explorer's right-hand status column, so dots and bubbles line up.
+const MARK_W: f32 = 16.0;
+
+/// `id`'s mark and its tooltip, in SpacetimeDB mode only.
+fn mark(s: &State, id: argo_protocol::NodeId) -> Option<(Mark, String)> {
     let live = s.live.as_ref()?;
     let (_, evidence, claim) = crate::bridge::own_status(&live.snap, id);
-    if let Some(c) = claim {
-        let tip = format!(
-            "worker {} · {}",
-            c.worker,
-            if c.active { "translating" } else { "queued" }
-        );
-        return Some(crate::graph::avatar(p, c.worker, c.active, 16.0).help(tip));
-    }
-    let (glyph, color, tip) = match evidence {
-        Evidence::None => return None,
-        Evidence::Accepted => ("✓", p.ok, "Rust accepted"),
-        Evidence::Unvalidated => ("?", p.pending, "Rust candidate, not validated"),
-        Evidence::Rejected => ("✕", p.bad, "translation failed"),
+    let mark = Mark::of(evidence, claim)?;
+    let tip = match (mark, evidence) {
+        (Mark::Working, _) => format!("Being translated by worker {}", claim.map_or(0, |c| c.worker)),
+        (Mark::Done, Evidence::Accepted) => "Rust pushed and accepted".into(),
+        (Mark::Done, _) => "Rust pushed (compiles; not linked or tested yet)".into(),
+        (Mark::Failed, _) => "Translation failed".into(),
     };
-    Some(
-        el().size(16.0, 16.0)
-            .radius(8.0)
-            .fill(color.alpha(0.18))
-            .center()
-            .help(tip)
-            .child(text(glyph).font(TextStyle::new(9.5, 800.0)).color(color)),
+    Some((mark, tip))
+}
+
+/// The right-hand status column of a function row: its dot, or empty space.
+fn dot_slot(p: &Pal, s: &State, id: argo_protocol::NodeId) -> El {
+    let slot = row().w(MARK_W).h(MARK_W).items_center().justify_center();
+    match mark(s, id) {
+        Some((m, tip)) => slot
+            .child(el().size(8.0, 8.0).radius(4.0).fill(m.color(p)))
+            .help(tip),
+        None => slot,
+    }
+}
+
+/// The right-hand status column of a folder row: a small blue bubble counting its functions being
+/// translated right now, or empty space.
+fn bubble_slot(p: &Pal, s: &State, functions: &[(argo_protocol::NodeId, String)]) -> El {
+    let working = functions
+        .iter()
+        .filter(|(id, _)| matches!(mark(s, *id), Some((Mark::Working, _))))
+        .count();
+    let slot = row().min_w(MARK_W).h(MARK_W).items_center().justify_end();
+    if working == 0 {
+        return slot;
+    }
+    let tip = match working {
+        1 => "1 function in this file is being translated".to_string(),
+        n => format!("{n} functions in this file are being translated"),
+    };
+    slot.help(tip).child(
+        row()
+            .h(14.0)
+            .min_w(14.0)
+            .px(4.0)
+            .radius(7.0)
+            .fill(p.accent)
+            .items_center()
+            .justify_center()
+            .child(
+                text(working.to_string())
+                    .font(TextStyle::new(9.0, 700.0))
+                    .color(Color::WHITE),
+            ),
     )
 }
 
@@ -213,9 +276,6 @@ pub fn explorer(p: &Pal, s: &State) -> El {
                     .grow(1.0)
                     .min_w(0.0),
             );
-        if let Some(mark) = work_mark(p, s, id) {
-            r = r.child(mark);
-        }
         if let Some(m) = module {
             r = r.child(
                 text(m.to_string())
@@ -224,6 +284,8 @@ pub fn explorer(p: &Pal, s: &State) -> El {
                     .single_line(),
             );
         }
+        // Last, so the dot is right-aligned in the same column on every row.
+        r = r.child(dot_slot(p, s, id));
         if on {
             r = r.fill(p.accent.alpha(0.16));
         }
@@ -277,6 +339,7 @@ pub fn explorer(p: &Pal, s: &State) -> El {
                             .font(TextStyle::new(10.5, 600.0))
                             .color(p.faint),
                     )
+                    .child(bubble_slot(p, s, &m.functions))
                     .on_press(move |s: &mut State| {
                         s.forms.expanded = if s.forms.expanded == Some(id) {
                             None
@@ -696,6 +759,23 @@ fn loading_dialog(p: &Pal, s: &State) -> El {
 mod tests {
     use super::*;
     use rune_ui::{Env, Runtime, TextEdit, accesskit};
+
+    #[test]
+    fn explorer_marks_working_blue_then_done_green() {
+        use crate::model::Claim;
+        let working = Some(Claim { worker: 3, active: true });
+        let queued = Some(Claim { worker: 3, active: false });
+        assert_eq!(Mark::of(Evidence::None, working), Some(Mark::Working));
+        assert_eq!(Mark::of(Evidence::Unvalidated, working), Some(Mark::Working), "retranslating");
+        assert_eq!(Mark::of(Evidence::None, queued), None, "a lapsed claim isn't being worked");
+        assert_eq!(Mark::of(Evidence::Unvalidated, None), Some(Mark::Done));
+        assert_eq!(Mark::of(Evidence::Accepted, None), Some(Mark::Done));
+        assert_eq!(Mark::of(Evidence::Rejected, None), Some(Mark::Failed));
+        assert_eq!(Mark::of(Evidence::None, None), None);
+        let p = crate::palette::Pal::new(true);
+        assert_eq!(Mark::Working.color(&p), p.accent);
+        assert_eq!(Mark::Done.color(&p), p.ok);
+    }
 
     #[test]
     fn the_toolbar_only_opens_projects() {
