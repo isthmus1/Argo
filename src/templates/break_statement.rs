@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// Break remains syntax; its target/control-exit analysis is a later pass.
@@ -12,5 +13,9 @@ impl Template for BreakTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::Break
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        crate::graph::constructs::straight_line(node)
     }
 }

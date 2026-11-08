@@ -5,6 +5,8 @@
 
 pub mod ast;
 pub mod c_node;
+pub mod c_node_role;
+pub mod graph;
 pub mod lexer;
 pub mod parser;
 pub mod report;
@@ -15,6 +17,8 @@ mod lowering;
 
 pub use ast::Ast;
 pub use c_node::{CNode, CNodeType};
+pub use c_node_role::CNodeRole;
+pub use graph::{Graph, GraphEdge, GraphNode};
 pub use lexer::Lexer;
 pub use parser::{ParseResult, Parser};
 pub use templates::{Template, TemplateMatch};

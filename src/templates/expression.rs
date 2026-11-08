@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// Expression and initializer syntax; this does not imply purity/evaluation.
@@ -15,5 +16,9 @@ impl Template for ExpressionTemplate {
             node.node_type,
             CNodeType::Expression | CNodeType::Initializer
         )
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        crate::graph::constructs::straight_line(node)
     }
 }

@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, GraphNodeKind, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// Struct definitions expose field syntax, not resolved layout or ABI pins.
@@ -12,5 +13,9 @@ impl Template for StructTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::Struct
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        Ok(Expansion::leaf(GraphNodeKind::Type, node))
     }
 }

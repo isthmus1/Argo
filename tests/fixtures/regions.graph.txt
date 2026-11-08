@@ -1,0 +1,23 @@
+Function function
+  Scope block
+    Sequence sequence
+    Loop for
+      Scope block
+        Branch if
+          Sequence continue
+          Scope else
+            Sequence expression
+    Loop while
+      Scope block
+        Sequence sequence
+    Loop do
+      Scope block
+        Sequence sequence
+    Switch switch
+      CaseGroup case_group
+        Sequence sequence
+      CaseGroup case_group
+        Sequence sequence
+    Scope block
+      Sequence sequence
+    Sequence sequence

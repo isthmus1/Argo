@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// A compound statement owns the original ordered statements in its scope.
@@ -12,5 +13,9 @@ impl Template for BlockTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::Block
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        crate::graph::constructs::block(node)
     }
 }

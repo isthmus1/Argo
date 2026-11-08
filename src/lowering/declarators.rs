@@ -38,6 +38,7 @@ impl Lowerer<'_> {
                     kind,
                 } => {
                     node.name = Some(format!("function {kind:?} variadic={variadic}"));
+                    node.is_variadic = variadic;
                     for param in &self.ast[params] {
                         let mut child = self.named(
                             Kind::Parameter,

@@ -4,7 +4,7 @@
 
 Argo is a Rust-first legacy-modernization project built around SpacetimeDB, agent-assisted understanding, and incremental C/Rust interoperability.
 
-> **Status: parser/template prototype.** A standalone Rust CLI builds an owned C syntax tree and matches keyword templates. The application, executable graph, migrations, and golden boot remain unimplemented. See [ARCHITECTURE.md](ARCHITECTURE.md) for the broader design and acceptance gates.
+> **Status: parser/syntax-graph prototype.** A standalone Rust CLI builds an owned C syntax tree and expands templates into a source-retaining containment graph, exportable as JSON. The application, executable graph, migrations, and golden boot remain unimplemented. See [ARCHITECTURE.md](ARCHITECTURE.md) for the broader design and acceptance gates.
 
 ## The idea
 
@@ -72,7 +72,7 @@ The golden target is ambitious; an incomplete golden gate must be reported as in
 - **Nemotron:** the intended understanding/planning/implementation workflow, beyond a chatbot.
 - **Legacy modernization:** a natural fit for the 8090 challenge alongside SpacetimeDB and NVIDIA.
 
-## Parser prototype
+## Parser and graph prototype
 
 Run `cargo run -- tests/fixture.c` (or supply another C file). The CLI prints the
 owned syntax tree, a template-match summary, and rucc's C pretty-print. Fatal
@@ -88,8 +88,13 @@ diagnostics go to stderr.
   shapes, expressions, initializers, and control statements. Unsupported forms
   remain source-located opaque nodes rather than guessed structures. Some
   synthesized type/initializer nodes use enclosing declaration spans.
-- `src/templates/`: one recognizer per supported keyword/construct, all
-  re-exported from the module. `templates::all()` supplies the ordered built-ins.
+- `src/templates/`: one template per supported keyword/construct, all re-exported
+  from the module. `templates::all()` supplies the ordered built-ins.
+- `src/c_node_role.rs`: explicit child roles distinguish loop init/condition/step,
+  function signatures, branch arms, switch selectors, and case values. Omitted
+  clauses never shift positional meanings.
+- `src/graph/`: independent `Graph`, `GraphNode`, and `GraphEdge` records, expansion
+  contracts, recursive driver, source-range validation, and JSON serialization.
 
 `Ast::match_templates(Vec<impl Template>)` visits the tree in preorder, choosing
 the first matching template per node. Concrete homogeneous lists and mixed
@@ -101,7 +106,43 @@ Source modules stay below 100 lines; simple keyword recognizers are intentionall
 shorter. Focused checks: `cargo fmt --all --check`, `cargo test --locked --lib
 --tests`, and `cargo clippy --locked --all-targets -- -D warnings`.
 
-This is a syntax/matching foundation, not graph emission: preprocessing, name/type
-resolution, safe region grouping, interfaces/pins, and migration are still future
-work. Implementation must continue to respect the contracts and acceptance gates
-in [ARCHITECTURE.md](ARCHITECTURE.md).
+### Export a syntax graph
+
+```sh
+cargo run --locked -- --graph-json tests/fixture.c > target/fixture.graph.json
+```
+
+Graph mode writes only JSON to stdout; frontend diagnostics stay on stderr and
+fatal errors produce no graph. The existing human-readable mode is unchanged.
+
+`parsed.ast.build_graph(&parsed.source, templates::all())` returns an owned graph.
+Supply the syntax tree's original source bytes. `Template::expand()` returns an
+optional unnumbered node and ordered child regions; `Unsupported` tries the next
+matching template. The driver assigns revision-local preorder IDs and containment
+edges. An unmatched custom registry returns an error, never a partial graph.
+
+- Functions contain bodies; branches contain arms; loops contain bodies while
+  retaining init/condition/step spans as header parts.
+- Compound scopes partition statements into straight-line sequence leaves and
+  control regions. `return`/`break`/`continue` are lexical exit records on their
+  sequences, not standalone graph nodes. Exit targets remain unresolved.
+- Switches group stacked labels and possible fallthrough until an unconditional
+  direct exit. Uncertain fallthrough stays joined; nested switches own their
+  labels. Unsupported switch shapes stay whole rather than guessing boundaries.
+- Types and globals remain coarse leaves. Prototypes/extern declarations stay in
+  the original AST/source, without graph nodes or resolved edge targets yet.
+- Gotos/labels, variadic function bodies, unsupported headers, and other unknown
+  regions become opaque leaves with diagnostics. No opaque region is expanded.
+
+JSON schema version 1 declares `analysis: "syntax_only"`. It retains the complete
+original source as an array of unsigned bytes (including non-UTF-8 bytes), with
+half-open byte ranges on nodes, header parts, and lexical exits. IDs are stable
+for repeated expansion of the same input, not persistent identities across edits.
+`tests/fixtures/regions.c` and its hierarchy snapshot exercise the region model.
+
+This graph is **provenance/navigation, not an execution schedule or a safe
+replacement boundary**. Only containment edges exist. Preprocessing, configured
+name/type resolution, live-in/live-out/effect analysis, trustworthy pins,
+call/data/control edges, safe outlining, and migration remain future work. This
+local JSON schema is not the shared SpacetimeDB protocol. Implementation must
+continue to respect [ARCHITECTURE.md](ARCHITECTURE.md)'s contracts and gates.

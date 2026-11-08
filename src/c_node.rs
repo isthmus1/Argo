@@ -1,5 +1,7 @@
 use rucc_diag::Span;
 
+use crate::CNodeRole;
+
 /// Syntactic categories, not visual graph nodes or executable boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CNodeType {
@@ -39,6 +41,9 @@ pub enum CNodeType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CNode {
     pub node_type: CNodeType,
+    pub role: Option<CNodeRole>,
+    /// Only meaningful on a function declarator's type node.
+    pub is_variadic: bool,
     pub name: Option<String>,
     pub span: Span,
     pub children: Vec<CNode>,
@@ -48,6 +53,8 @@ impl CNode {
     pub fn new(node_type: CNodeType, span: Span) -> Self {
         Self {
             node_type,
+            role: None,
+            is_variadic: false,
             name: None,
             span,
             children: Vec::new(),
@@ -56,6 +63,11 @@ impl CNode {
 
     pub fn named(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
+        self
+    }
+
+    pub fn with_role(mut self, role: CNodeRole) -> Self {
+        self.role = Some(role);
         self
     }
 

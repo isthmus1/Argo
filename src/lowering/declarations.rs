@@ -1,7 +1,7 @@
 use rucc_ast::{Decl, DeclId, DeclSpecsId, Derived, StorageClass};
 
 use super::Lowerer;
-use crate::{CNode, CNodeType as Kind};
+use crate::{CNode, CNodeRole as Role, CNodeType as Kind};
 
 impl Lowerer<'_> {
     pub(super) fn declaration(&self, id: DeclId) -> Vec<CNode> {
@@ -14,11 +14,15 @@ impl Lowerer<'_> {
                 body,
             } => {
                 let mut node = self.named(Kind::Function, span, self.ast[declarator].name);
-                node.children.push(self.declarator_type(specs, declarator));
+                node.children.push(
+                    self.declarator_type(specs, declarator)
+                        .with_role(Role::Signature),
+                );
                 for &declaration in &self.ast[params] {
                     node.children.extend(self.declaration(declaration));
                 }
-                node.children.push(self.statement(body));
+                node.children
+                    .push(self.statement(body).with_role(Role::Body));
                 vec![node]
             }
             Decl::Var { specs, declarators } => {

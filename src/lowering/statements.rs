@@ -1,14 +1,18 @@
 use rucc_ast::{Stmt, StmtId};
 
 use super::Lowerer;
-use crate::{CNode, CNodeType as Kind};
+use crate::{CNode, CNodeRole as Role, CNodeType as Kind};
 
 impl Lowerer<'_> {
     pub(super) fn statement(&self, id: StmtId) -> CNode {
         let span = self.ast.stmt_span(id);
         let (kind, children) = match self.ast[id] {
             Stmt::Empty => (Kind::Empty, Vec::new()),
-            Stmt::Expr(expr) => return self.expression(expr),
+            Stmt::Expr(expr) => {
+                let mut node = self.expression(expr);
+                node.span = span;
+                return node;
+            }
             Stmt::Decl(decl) => (Kind::Declaration, self.declaration(decl)),
             Stmt::Compound(statements) => (
                 Kind::Block,
@@ -30,14 +34,16 @@ impl Lowerer<'_> {
                 return node;
             }
             Stmt::Case { lo, hi, body } => {
-                let mut children = vec![self.expression(lo)];
-                children.extend(hi.map(|id| self.expression(id)));
-                children.extend(body.map(|id| self.statement(id)));
+                let mut children = vec![self.expression(lo).with_role(Role::CaseValue)];
+                children.extend(hi.map(|id| self.expression(id).with_role(Role::CaseEnd)));
+                children.extend(body.map(|id| self.statement(id).with_role(Role::Body)));
                 (Kind::Case, children)
             }
             Stmt::Default { body } => (
                 Kind::Default,
-                body.into_iter().map(|id| self.statement(id)).collect(),
+                body.into_iter()
+                    .map(|id| self.statement(id).with_role(Role::Body))
+                    .collect(),
             ),
             Stmt::GotoExpr(expr) => {
                 let mut node = CNode::new(Kind::Opaque, span).named("computed goto");

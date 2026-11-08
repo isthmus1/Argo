@@ -20,6 +20,15 @@ impl Ast {
         self.roots.iter().flat_map(CNode::walk)
     }
 
+    /// Expand syntax into a source-retaining graph, with an explicit template list.
+    pub fn build_graph(
+        &self,
+        source: &[u8],
+        templates: Vec<impl Template>,
+    ) -> Result<crate::graph::Graph, crate::graph::GraphError> {
+        crate::graph::build(self, source, &templates)
+    }
+
     /// Match nodes in preorder; the first matching template wins at each node.
     ///
     /// Use `templates::all()` for the built-ins, or pass your own ordered list.

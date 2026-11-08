@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// While syntax preserves pre-test condition/body order.
@@ -12,5 +13,9 @@ impl Template for WhileTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::While
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        crate::graph::constructs::loop_region(node)
     }
 }

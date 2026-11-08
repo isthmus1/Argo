@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// The for clauses and body stay together; this does not outline the loop.
@@ -12,5 +13,9 @@ impl Template for ForTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::For
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        crate::graph::constructs::loop_region(node)
     }
 }

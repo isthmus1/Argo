@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, GraphNodeKind, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// Typedefs declare type aliases, not variable/state nodes.
@@ -12,5 +13,9 @@ impl Template for TypedefTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::Typedef
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        Ok(Expansion::leaf(GraphNodeKind::Type, node))
     }
 }

@@ -1,4 +1,5 @@
 use super::Template;
+use crate::graph::{Expansion, GraphNodeKind, Unsupported};
 use crate::{CNode, CNodeType};
 
 /// Local/global object syntax; storage effects require later semantic analysis.
@@ -12,5 +13,9 @@ impl Template for VariableTemplate {
 
     fn matches(&self, node: &CNode) -> bool {
         node.node_type == CNodeType::Variable
+    }
+
+    fn expand<'a>(&self, node: &'a CNode) -> Result<Expansion<'a>, Unsupported> {
+        Ok(Expansion::leaf(GraphNodeKind::State, node))
     }
 }
