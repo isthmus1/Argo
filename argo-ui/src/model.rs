@@ -91,7 +91,8 @@ pub enum Lang {
 pub enum Evidence {
     None,
     Accepted,
-    /// A Rust candidate was submitted but nothing has judged it; the C implementation stays.
+    /// A Rust candidate was written to the database but nothing has judged it: the node reads
+    /// RS, and the panel shows the original C beside the Rust.
     Unvalidated,
     /// The latest candidate was rejected by a counterexample.
     Rejected,

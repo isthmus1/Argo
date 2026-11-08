@@ -180,10 +180,17 @@ pub fn own_status(snap: &Snapshot, id: NodeId) -> (Lang, Evidence, Option<Claim>
 
 /// [`own_status`] from the node's status row itself.
 pub fn status_shown(snap: &Snapshot, s: &argo_protocol::NodeStatus) -> (Lang, Evidence, Option<Claim>) {
+    // The chip says which language the row holds: once a worker has finished the node and its
+    // Rust is in the database, it reads RS, and the evidence badge says whether anything has
+    // judged it yet. A candidate that failed leaves the C in place, so the node stays C.
+    let written = s.candidate.as_ref().is_some_and(|c| {
+        c.language == Language::Rust && !matches!(c.verdict, Verdict::Failed { .. })
+    });
     let lang = match s.accepted {
         Language::None => Lang::None,
-        Language::C => Lang::C,
         Language::Rust => Lang::Rust,
+        Language::C if written => Lang::Rust,
+        Language::C => Lang::C,
     };
     let evidence = if s.is_rejected() {
         Evidence::Rejected
@@ -499,6 +506,15 @@ fn back_links(n: usize, links: &[(usize, usize)]) -> Vec<bool> {
         }
     }
     back
+}
+
+/// The C a node was ingested as (its callee's, for a call site), sliced from the snapshot's
+/// source at the node's provenance: what a Rust implementation takes the place of. Synthesized
+/// nodes (a function's Input and Output, dispatch and grouping nodes) name no code and have none.
+pub fn c_source(snap: &Snapshot, id: NodeId) -> Option<&str> {
+    let ix = GraphIndex::new(&snap.graph);
+    let range = ix.node(shown(snap, &ix, id))?.provenance.as_ref()?.range;
+    snap.source(range.file)?.slice(range)
 }
 
 /// The Rust source a node shows (its callee's for a call site): the accepted implementation, else

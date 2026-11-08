@@ -180,7 +180,8 @@ pub async fn translate(
                                 summary.join("; ")
                             );
                             let left = budget.max_attempts.saturating_sub(failures);
-                            let content = report(task.session, submissions, left, &rejected);
+                            let unit = task.program.as_deref().and_then(|p| p.preprocessed.as_deref());
+                            let content = report(task.session, submissions, left, &rejected, unit);
                             messages.push(Message::Tool {
                                 call: call.id.clone(),
                                 content,
@@ -297,13 +298,26 @@ async fn submit(
 }
 
 /// What a rejected submission is answered with. Each failure's full log is saved beside the
-/// submission, and its start quoted, since the first errors are the ones to fix.
-fn report(session: &Path, n: u32, left: u32, failures: &[Failure]) -> String {
+/// submission, and its start quoted, since the first errors are the ones to fix. `unit` is the
+/// preprocessed translation unit, when the chunk has one: a rejected rewrite is told to read the
+/// whole of it before submitting again, since a guess about a struct or a prototype is what most
+/// rejections come down to.
+fn report(session: &Path, n: u32, left: u32, failures: &[Failure], unit: Option<&Path>) -> String {
     let dir = session.join(format!("submission-{n}"));
     let mut out = format!(
         "REJECTED: submission {n}. Your source is saved at {}.\n",
         dir.join("lib.rs").display()
     );
+    if let Some(unit) = unit {
+        let _ = write!(
+            out,
+            "\nBefore anything else, read the whole preprocessed translation unit with the read \
+             tool; it holds every declaration the code can see, and a guess about one of them is \
+             what most rejections come down to:\n  read({})\nStart at line 1 and page through all \
+             of it (offset/limit return at most 2000 lines at a time).\n",
+            unit.display()
+        );
+    }
     for f in failures {
         let _ = writeln!(out, "\n[{}] {}", f.stage.name(), f.summary);
         for note in &f.notes {
@@ -325,10 +339,15 @@ fn report(session: &Path, n: u32, left: u32, failures: &[Failure]) -> String {
     if left == 0 {
         out.push_str("\nNo submissions are left: this chunk has failed.\n");
     } else {
+        let first = if unit.is_some() {
+            "Read the translation unit above"
+        } else {
+            "Look up what the failures name"
+        };
         let _ = write!(
             out,
-            "\nFix every cause above, then call submit_rewrite with the whole corrected file. \
-             {left} more rejection(s) and this chunk fails.\n"
+            "\n{first}, fix every cause above, then call submit_rewrite with the whole corrected \
+             file. {left} more rejection(s) and this chunk fails.\n"
         );
     }
     cut(out, 48 << 10)

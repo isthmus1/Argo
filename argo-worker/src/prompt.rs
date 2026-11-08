@@ -55,9 +55,10 @@ shows the original source around it.
 signatures of the functions it calls, the globals it touches. Search the repository, or the \
 TARGET's preprocessed translation unit in the session directory, which holds every \
 declaration the TARGET can see.
-3. Submit the whole file. When it is rejected, fix every cause listed and submit the whole \
-corrected file again. After {} rejections the chunk fails, so check your code before \
-submitting.
+3. Submit the whole file. When it is rejected, first call read on the whole preprocessed \
+translation unit (the rejection names its path) so nothing is guessed, then fix every cause \
+listed and submit the whole corrected file again. After {} rejections the chunk fails, so check \
+your code before submitting.
 
 Rules for the Rust:
 {RULES}
@@ -100,8 +101,9 @@ comments are gone.
 2. Work out the TARGET's interface: every local variable and parameter it reads (pass it by \
 value) or assigns (pass a pointer to it), and the types, from the function and the \
 preprocessed translation unit in the session directory.
-3. Submit both parts. When rejected, fix every cause listed and submit both again. After {} \
-rejections the piece fails.
+3. Submit both parts. When rejected, first call read on the whole preprocessed translation unit \
+(the rejection names its path) so nothing is guessed, then fix every cause listed and submit \
+both again. After {} rejections the piece fails.
 
 The `c_replacement`: raw C, placed exactly where the TARGET was. Declare the Rust function \
 first (`T SYMBOL(params);`), then call it. If the TARGET declares a variable the rest of the \

@@ -1157,6 +1157,11 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             }
             if docked {
                 body = body.child(code_block(p, &c.signature, detail_w() - 2.0 * DOCK_PAD, 9.0));
+                // The code the node is: the C it was ingested as, then the Rust a worker wrote
+                // for it, each captioned by its language chip.
+                if let Some(code) = c_code(p, s, i) {
+                    body = body.child(code);
+                }
                 if let Some(code) = rust_code(p, s, i) {
                     body = body.child(code);
                 }
@@ -1233,19 +1238,42 @@ fn kicker_text(n: &crate::model::Node) -> String {
 
 /// The Rust a worker wrote for a node (accepted, or the latest candidate), first lines only.
 fn rust_code(p: &Pal, s: &State, i: usize) -> Option<El> {
-    const LINES: usize = 24;
     let live = s.live.as_ref()?;
     let source = crate::bridge::rust_source(&live.snap, *live.origin.get(i)?)?;
-    let mut code = col().padding(10.0).radius(8.0).fill(p.code_bg)
-        .child(row().gap(6.0).items_center().child(graph::lang_chip(p, crate::model::Lang::Rust)));
-    for line in source.lines().take(LINES) {
-        code = code.child(mono(if line.is_empty() { " " } else { line }, p.text).single_line().truncate());
+    Some(source_code(p, crate::model::Lang::Rust, "rust", source))
+}
+
+/// The node's original C, as ingested: what its Rust implementation takes the place of.
+fn c_code(p: &Pal, s: &State, i: usize) -> Option<El> {
+    let live = s.live.as_ref()?;
+    let source = crate::bridge::c_source(&live.snap, *live.origin.get(i)?)?;
+    Some(source_code(p, crate::model::Lang::C, "original C", source))
+}
+
+/// Lines of a node's source each section of the docked panel shows before it counts the rest.
+const SOURCE_LINES: usize = 10;
+
+/// A source section of the docked panel: the language chip and a caption, then the code, wrapped
+/// to the panel's width (so nothing is cut off) and ended with a count of what it left out.
+fn source_code(p: &Pal, lang: crate::model::Lang, what: &str, source: &str) -> El {
+    let room = detail_w() - 2.0 * DOCK_PAD - 2.0 * 10.0 - 1.0;
+    let fits = |s: &str| rune_ui::text::measure(s, &[], MONO, None).0 <= room;
+    let mut code = col().padding(10.0).radius(8.0).fill(p.code_bg).min_w(0.0)
+        .child(row().gap(6.0).items_center()
+            .child(graph::lang_chip(p, lang))
+            .child(text(what.to_uppercase()).font(LABEL).color(p.faint)));
+    for line in source.lines().take(SOURCE_LINES) {
+        for piece in wrap_code(line, fits) {
+            // An empty line keeps its height.
+            let t = if piece.trim().is_empty() { " ".to_string() } else { piece };
+            code = code.child(mono(&t, p.text).single_line().truncate());
+        }
     }
-    let more = source.lines().count().saturating_sub(LINES);
+    let more = source.lines().count().saturating_sub(SOURCE_LINES);
     if more > 0 {
         code = code.child(label(&format!("+{more} lines"), p.faint));
     }
-    Some(code)
+    code
 }
 
 /// What kind of node this is, in words, above the title: the header colour's meaning.
