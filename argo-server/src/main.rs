@@ -13,6 +13,9 @@
 //! supervises the host until interrupted. Reducers never read files; this process does all of
 //! the I/O.
 //!
+//! A local host also gets the model [`proxy`] on `--proxy-port` (the database's port + 1):
+//! workers attach there for a key of their own instead of holding the provider's.
+//!
 //! Unix-only: children run in their own process groups and are stopped by signal ([`group`]),
 //! and SIGINT/SIGTERM are handled through `tokio::signal::unix`. Linux additionally kills them
 //! if `argo-server` itself is SIGKILLed; other Unixes don't (see [`group::isolate`]).
@@ -34,6 +37,7 @@ mod host;
 mod ingest;
 mod interrupts;
 mod loader;
+mod proxy;
 mod repo;
 #[cfg(test)]
 mod scratch;
@@ -46,6 +50,7 @@ use args::Args;
 use endpoint::Endpoint;
 use host::Host;
 use interrupts::Interrupts;
+use proxy::{Proxy, Upstream};
 
 fn main() -> ExitCode {
     let args = Args::parse();
@@ -85,6 +90,10 @@ async fn run(args: Args) -> ExitCode {
         };
     }
     let data_dir = args.data_dir();
+    let proxy = match proxy(&args, &data_dir) {
+        Ok(proxy) => proxy,
+        Err(e) => return fail(&e),
+    };
     let host = match Host::spawn(args.listen, args.port, &data_dir) {
         Ok(host) => host,
         Err(e) => return fail(&e),
@@ -93,7 +102,7 @@ async fn run(args: Args) -> ExitCode {
     // Every step races the host dying and a stop signal; losing the race drops the step, which
     // kills whatever child process it was waiting on.
     let outcome = tokio::select! {
-        r = serve(&args, &host) => r,
+        r = serve(&args, &host, proxy) => r,
         e = host.exited() => Err(e),
         why = interrupts.recv() => {
             eprintln!("argo-server: {why}; stopping");
@@ -107,16 +116,49 @@ async fn run(args: Args) -> ExitCode {
     }
 }
 
-/// Bring the host up while the repository loads, ingest, then keep serving. Never returns
-/// `Ok`: a running server ends by being interrupted or by its host exiting.
-async fn serve(args: &Args, host: &Host) -> Result<(), String> {
-    setup(args, &Endpoint::local(args.port), host.ready()).await?;
+/// The model proxy, bound, when this machine has the provider's endpoint and key to give it.
+fn proxy(args: &Args, data_dir: &std::path::Path) -> Result<Option<Proxy>, String> {
+    let upstream = Upstream::from_env(&args.model_url, &args.model, args.model_provider.as_deref());
+    let upstream = match upstream {
+        Ok(upstream) => upstream,
+        Err(why) => {
+            eprintln!(
+                "argo-server: model proxy off ({why}); workers need --direct and a key of their own"
+            );
+            return Ok(None);
+        }
+    };
+    let port = args.proxy_port()?;
+    let log = data_dir.join("usage.log");
+    let proxy = Proxy::bind(std::net::SocketAddr::new(args.listen, port), upstream, &log)?;
     eprintln!(
-        "argo-server: serving {} database {}; Ctrl-C to stop",
-        endpoint::advertised(args.listen, args.port),
-        args.module
+        "argo-server: model proxy on {} for workers, forwarding to {}; usage in {}",
+        endpoint::advertised("http", args.listen, port),
+        proxy.upstream(),
+        log.display()
     );
-    std::future::pending().await
+    Ok(Some(proxy))
+}
+
+/// Serve the model proxy and bring the host up while the repository loads, ingest, then keep
+/// serving. Never returns `Ok`: a running server ends by being interrupted or by its host exiting.
+async fn serve(args: &Args, host: &Host, proxy: Option<Proxy>) -> Result<(), String> {
+    let database = async {
+        setup(args, &Endpoint::local(args.port), host.ready()).await?;
+        eprintln!(
+            "argo-server: serving {} database {}; Ctrl-C to stop",
+            endpoint::advertised("ws", args.listen, args.port),
+            args.module
+        );
+        std::future::pending::<Result<(), String>>().await
+    };
+    let proxy = async {
+        match proxy {
+            Some(proxy) => proxy.serve().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::try_join!(database, proxy).map(|_| ())
 }
 
 /// Publish the module to `at` once `ready`, loading the repository meanwhile, then take

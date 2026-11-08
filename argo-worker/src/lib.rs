@@ -9,6 +9,7 @@ pub mod fence;
 pub mod log;
 pub mod model;
 pub mod prompt;
+pub mod proxy;
 pub mod resend;
 pub mod select;
 pub mod shape;
