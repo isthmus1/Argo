@@ -17,6 +17,7 @@ fn build(chunk: &CChunk, root: Option<&std::path::Path>, _: Option<&str>) -> Str
         checkout: root,
         session: session.path(),
         program: None,
+        piece: None,
     })
 }
 

@@ -67,9 +67,101 @@ comments.",
     )
 }
 
-/// The opening messages for `task`.
+/// The opening messages for `task`: a whole function's, or a piece's.
 pub fn conversation(task: &Task<'_>, budget: &Budget) -> Vec<Message> {
-    vec![Message::System(system(budget)), Message::User(brief(task))]
+    match task.piece {
+        Some(piece) => vec![
+            Message::System(piece_system(budget)),
+            Message::User(piece_brief(task, piece)),
+        ],
+        None => vec![Message::System(system(budget)), Message::User(brief(task))],
+    }
+}
+
+fn piece_system(budget: &Budget) -> String {
+    format!(
+        "You are a porting agent. You move one PIECE of a C function, the TARGET (a statement, \
+a loop, a branch), into Rust: it becomes its own exported Rust function, and the TARGET's C is \
+replaced in place by a call to it. The rest of the function and of the program stays C.
+
+Tools:
+- read(path, offset?, limit?), grep(pattern, path?, glob?, ignore_case?), glob(pattern, path?): \
+look at the repository (paths relative to its root) and the session directory (absolute paths).
+- submit_rewrite(rust_source, c_replacement): submit the Rust file and the C that replaces the \
+TARGET. The C is put in the TARGET's place in the real translation unit and compiled; the Rust \
+is compiled, checked against the C program's symbols, linked into the program, and its \
+exported signature is compared with the prototype your C declares. If every check passes it \
+is accepted and you are done; if not, you are told what failed and where the full logs are.
+You cannot write files or run commands: submit_rewrite is the only way to build code.
+
+How to work:
+1. Read the FUNCTION and the TARGET within it. Both are preprocessed: macros are expanded and \
+comments are gone.
+2. Work out the TARGET's interface: every local variable and parameter it reads (pass it by \
+value) or assigns (pass a pointer to it), and the types, from the function and the \
+preprocessed translation unit in the session directory.
+3. Submit both parts. When rejected, fix every cause listed and submit both again. After {} \
+rejections the piece fails.
+
+The `c_replacement`: raw C, placed exactly where the TARGET was. Declare the Rust function \
+first (`T SYMBOL(params);`), then call it. If the TARGET declares a variable the rest of the \
+function uses, keep the declaration (`int x = SYMBOL(...);`). If the TARGET contains `return`, \
+`break`, `continue` or `goto`, keep that control flow in the C, driven by what the call returns.
+
+Rules for the Rust:
+{RULES}
+- The exported function is named exactly SYMBOL.
+- `rust_source` is the raw file text: Rust only, no markdown fences, no prose outside // \
+comments.",
+        budget.max_attempts
+    )
+}
+
+fn piece_brief(task: &Task<'_>, piece: &crate::piece::Piece) -> String {
+    let chunk = task.chunk;
+    let mut out = format!("SYMBOL: `{}`\n", piece.symbol);
+    let _ = writeln!(out, "Inside the C function `{}`", piece.function.name);
+    if !chunk.path.is_empty() && chunk.line_start > 0 {
+        let _ = writeln!(
+            out,
+            "Original location: {} lines {}-{}",
+            chunk.path, chunk.line_start, chunk.line_end
+        );
+    }
+    match task.checkout {
+        Some(_) => out.push_str("Repository: available (paths are relative to its root)\n"),
+        None => out.push_str("Repository: not available for this chunk\n"),
+    }
+    let _ = writeln!(out, "Session directory: {}", task.session.display());
+    let program = task.program.as_deref();
+    if let Some(unit) = program.and_then(|p| p.preprocessed.as_ref()) {
+        let _ = writeln!(
+            out,
+            "The function's translation unit, preprocessed (every declaration it can see): {}",
+            unit.display()
+        );
+    }
+    match program {
+        Some(p) if p.site.is_some() => out.push_str(
+            "Checks on submit: rustc, the C replacement compiled in place, symbols, link into \
+             the C program, ABI against your C prototype.\n",
+        ),
+        _ => out.push_str("Checks on submit: rustc only (no linkable C program).\n"),
+    }
+    for note in program.map(|p| p.notes.as_slice()).unwrap_or_default() {
+        let _ = writeln!(out, "Note: {note}");
+    }
+    let _ = writeln!(
+        out,
+        "\nFUNCTION (preprocessed C, for reference; only the TARGET is replaced):\n{}\n",
+        piece.function.source
+    );
+    let _ = writeln!(
+        out,
+        "TARGET (preprocessed C, the exact code your C replacement takes the place of):\n{}",
+        chunk.source
+    );
+    out
 }
 
 fn brief(task: &Task<'_>) -> String {

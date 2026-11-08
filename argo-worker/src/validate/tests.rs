@@ -87,7 +87,7 @@ async fn prepared(files: &[(&str, &str)]) -> Checked {
         checkout: repo.path(),
     };
     let program = check
-        .prepare(&chunk, Some(ingest), &session.path().join("c-program"))
+        .prepare(&chunk, None, Some(ingest), &session.path().join("c-program"))
         .await
         .expect("a program");
     Checked {
@@ -114,6 +114,8 @@ impl Checked {
             dir: &dir,
             checkout: None,
             program: Some(self.program.clone()),
+            symbol: &self.chunk.name,
+            c: None,
         };
         self.check.validate(&candidate).await
     }
@@ -253,7 +255,8 @@ pub unsafe extern "C" fn add(p: *mut Pair, k: i32) -> i64 {
     assert!(
         lines
             .take(2)
-            .any(|l| l.contains("undefined reference to `helpr'")),
+            .any(|l| l.contains("undefined reference to `helpr'")
+                || l.contains("\"_helpr\", referenced from")),
         "{log}"
     );
 }
@@ -347,7 +350,7 @@ async fn compile_only_without_a_c_program() {
     };
     assert!(
         check
-            .prepare(&chunk, Some(ingest), session.path())
+            .prepare(&chunk, None, Some(ingest), session.path())
             .await
             .is_none()
     );
@@ -361,6 +364,8 @@ async fn compile_only_without_a_c_program() {
         dir: session.path(),
         checkout: None,
         program: None,
+        symbol: &chunk.name,
+        c: None,
     };
     assert_eq!(
         check.validate(&candidate).await,
@@ -368,4 +373,95 @@ async fn compile_only_without_a_c_program() {
             "compiled with rustc; not linked or ABI-checked: no C program to check against".into()
         )
     );
+}
+
+/// A piece of a function: the loop in `sum`, outlined into Rust and replaced in place by a call.
+const SUM: &str = "\
+int sum(const int *v, int n)
+{
+    int total = 0;
+    for (int i = 0; i < n; i++) total += v[i];
+    return total;
+}
+int main(void) { int v[3] = {1, 2, 3}; return sum(v, 3) == 6 ? 0 : 1; }
+";
+
+#[tokio::test]
+async fn a_piece_is_compiled_in_its_function_and_linked_with_its_rust() {
+    let (check, _) = BuildCheck::detect().expect("rustc runs");
+    let (repo, origin) = ingest(&[("sum.c", SUM)]);
+    let session = tempfile::tempdir().unwrap();
+    let f_hi = SUM.find("}\n").unwrap() + 1;
+    let function = CChunk {
+        id: 1,
+        name: "sum".into(),
+        source: SUM[..f_hi].into(),
+        path: "sum.c".into(),
+        line_start: 1,
+        line_end: 6,
+        byte_lo: 0,
+        byte_hi: f_hi as u32,
+        ..chunk(A)
+    };
+    let p_lo = SUM.find("for (").unwrap();
+    let p_hi = p_lo + SUM[p_lo..].find(";\n").unwrap() + 1;
+    let loop_ = CChunk {
+        id: 2,
+        parent: Some(1),
+        kind: ChunkKind::Region,
+        name: "for (int i = 0; i < n; i++)".into(),
+        source: SUM[p_lo..p_hi].into(),
+        line_start: 4,
+        line_end: 4,
+        byte_lo: p_lo as u32,
+        byte_hi: p_hi as u32,
+        ..function.clone()
+    };
+    let piece = crate::piece::Piece::of(&loop_, Some(function)).unwrap();
+    assert_eq!(piece.symbol, "sum__part2");
+    let ingest = Ingest {
+        origin: &origin,
+        checkout: repo.path(),
+    };
+    let program = check
+        .prepare(&loop_, Some(&piece), Some(ingest), &session.path().join("c-program"))
+        .await
+        .expect("a program");
+    assert!(program.site.is_some(), "{:?}", program.notes);
+    let program = Arc::new(program);
+    let judge = |n: u32, rust: &'static str, c: &'static str| {
+        let (check, loop_, program, symbol) =
+            (&check, &loop_, program.clone(), piece.symbol.clone());
+        let dir = session.path().join(format!("submission-{n}"));
+        async move {
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("lib.rs");
+            std::fs::write(&file, rust).unwrap();
+            let candidate = Candidate {
+                chunk: loop_,
+                source: rust,
+                file: &file,
+                dir: &dir,
+                checkout: None,
+                program: Some(program),
+                symbol: &symbol,
+                c: Some(c),
+            };
+            check.validate(&candidate).await
+        }
+    };
+    let rust = "#[no_mangle]\npub extern \"C\" fn sum__part2(total: *mut i32, v: *const i32, n: i32) {\n\
+                let mut i = 0;\n    while i < n {\n        unsafe { *total = (*total).wrapping_add(*v.add(i as usize)) };\n        i += 1;\n    }\n}\n";
+    let call = "void sum__part2(int *total, const int *v, int n); sum__part2(&total, v, n);";
+    match judge(1, rust, call).await {
+        Verdict::Unvalidated(log) => {
+            assert!(log.contains("the C replacement compiled in place"), "{log}");
+            assert!(log.contains("linked into the C program"), "{log}");
+        }
+        other => panic!("expected acceptance, got {other:?}"),
+    }
+    match judge(2, rust, "sum__part2(&total, v, n").await {
+        Verdict::Failed(f) => assert_eq!(f[0].stage, Stage::CCall, "{f:?}"),
+        other => panic!("expected a rejection, got {other:?}"),
+    }
 }

@@ -72,6 +72,16 @@ pub fn fail_chunk(
     Ok(())
 }
 
+/// Give a held claim back without a result: the chunk is claimable again at once, so it is
+/// translated afresh (by this worker or another) instead of being given up. The fencing counter
+/// still moves on, so writes quoting this claim's generation keep failing.
+#[reducer]
+pub fn release_chunk(ctx: &ReducerContext, chunk_id: u64, generation: u32) -> Result<(), String> {
+    held(ctx, chunk_id, generation)?;
+    ctx.db.rust_chunk().chunk().delete(chunk_id);
+    Ok(())
+}
+
 /// Owner only: delete a chunk's Rust row so it can be claimed again. The fencing counter lives
 /// in the config row, so the next claim still gets a fresh generation and writes quoting the
 /// deleted claim's generation keep failing.

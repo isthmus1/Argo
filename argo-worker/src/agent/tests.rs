@@ -172,6 +172,7 @@ async fn run(model: &Script, v: &Verdicts, b: &Budget, d: &Dirs) -> Outcome {
         checkout: Some(d.repo.path()),
         session: d.session.path(),
         program: None,
+        piece: None,
     };
     translate(model, v, b, &task).await
 }
@@ -190,6 +191,7 @@ async fn the_agent_reads_then_an_accepted_submission_ends_the_loop() {
     let outcome = run(&model, &v, &budget(3), &d).await;
     let Outcome::Done {
         source,
+        c: _,
         model: used,
         attempts,
         validation,
@@ -267,6 +269,7 @@ async fn markdown_is_rejected_not_stripped() {
     let v = verdicts([Verdict::Unvalidated("ok".into())]);
     let Outcome::Done {
         source,
+        c: _,
         attempts,
         log,
         ..

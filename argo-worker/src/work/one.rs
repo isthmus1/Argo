@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use argo_db_client::RustChunk;
+use argo_db_client::{CChunk, ChunkKind, RustChunk};
 
 use super::Worker;
 use crate::agent::{Outcome, Task, translate};
@@ -42,6 +42,8 @@ impl<M: Model, V: Validator> Worker<M, V> {
             claim.generation,
             session.path().display()
         );
+        // A piece of a function is translated on its own, inside its function.
+        let piece = crate::piece::Piece::of(&chunk, self.function_of(&chunk));
         let translated = async {
             let origin = self.db.ingested().ok().flatten();
             let ingest = origin
@@ -51,7 +53,7 @@ impl<M: Model, V: Validator> Worker<M, V> {
             let dir = session.path().join("c-program");
             let program = self
                 .validator
-                .prepare(&chunk, ingest, &dir)
+                .prepare(&chunk, piece.as_ref(), ingest, &dir)
                 .await
                 .map(Arc::new);
             for note in program.iter().flat_map(|p| &p.notes) {
@@ -62,6 +64,7 @@ impl<M: Model, V: Validator> Worker<M, V> {
                 checkout,
                 session: session.path(),
                 program,
+                piece: piece.as_ref(),
             };
             translate(&self.model, &self.validator, &self.budget, &task).await
         };
@@ -92,5 +95,18 @@ impl<M: Model, V: Validator> Worker<M, V> {
             Err(why) => eprintln!("argo-worker: chunk {id} {summary}, not recorded: {why}"),
         }
         Ok(())
+    }
+
+    /// The function row a `Region` row is inside: the nearest `Function` up its parents.
+    fn function_of(&self, chunk: &CChunk) -> Option<CChunk> {
+        let mut at = chunk.parent;
+        for _ in 0..64 {
+            let row = self.db.chunk(at?)?;
+            if row.kind == ChunkKind::Function {
+                return Some(row);
+            }
+            at = row.parent;
+        }
+        None
     }
 }

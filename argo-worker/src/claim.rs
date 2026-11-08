@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use argo_db_client::LEASE_MICROS;
-use argo_db_client::bindings::{RemoteReducers, fail_chunk, heartbeat, submit_rust};
+use argo_db_client::bindings::{RemoteReducers, fail_chunk, heartbeat, release_chunk, submit_rust};
 use tokio::time::{Instant, sleep};
 
 use crate::agent::Outcome;
@@ -55,22 +55,24 @@ impl Claim<'_> {
     /// for an unavailable endpoint (the claim lapses with its lease).
     pub async fn finish(&self, outcome: Outcome) -> Result<(), String> {
         let (id, generation) = (self.chunk, self.generation);
-        let (source, model, attempts, validation, log) = match outcome {
-            Outcome::Failed { attempts, log } => return self.fail(attempts, log).await,
+        let (source, c, model, attempts, validation, log) = match outcome {
+            // Out of attempts: the chunk isn't given up, it goes back to be translated afresh.
+            Outcome::Failed { .. } => return self.release().await,
             Outcome::Unavailable { .. } => return Ok(()),
             Outcome::Done {
                 source,
+                c,
                 model,
                 attempts,
                 validation,
                 log,
-            } => (source, model, attempts, validation, log),
+            } => (source, c.unwrap_or_default(), model, attempts, validation, log),
         };
         let submit = async || {
-            let (source, model, log) = (source.clone(), model.clone(), log.clone());
-            // `c_call` is for a piece of a function; the agent translates whole functions.
+            let (source, c, model, log) = (source.clone(), c.clone(), model.clone(), log.clone());
+            // `c` is a piece's C replacement, saved in the row beside its Rust; empty otherwise.
             let submit = |r: &RemoteReducers, f| {
-                r.submit_rust_then(id, generation, source, String::new(), model, attempts, validation, log, f)
+                r.submit_rust_then(id, generation, source, c, model, attempts, validation, log, f)
             };
             self.db.call(submit).await
         };
@@ -86,6 +88,13 @@ impl Claim<'_> {
         let log = tail(&format!("{log}submit_rust {why}\n"), MAX_LOG_BYTES);
         let failed = self.fail(attempts, log).await;
         Err(format!("submit_rust {why}; fail_chunk: {failed:?}"))
+    }
+
+    /// Give the claim back without a result: the chunk is claimable again at once.
+    async fn release(&self) -> Result<(), String> {
+        let (id, generation) = (self.chunk, self.generation);
+        let release = |r: &RemoteReducers, f| r.release_chunk_then(id, generation, f);
+        self.db.call(release).await.map_err(|e| e.to_string())
     }
 
     async fn fail(&self, attempts: u32, log: String) -> Result<(), String> {

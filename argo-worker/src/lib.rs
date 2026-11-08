@@ -8,6 +8,7 @@ pub mod claim;
 pub mod db;
 pub mod log;
 pub mod model;
+pub mod piece;
 pub mod program;
 pub mod prompt;
 pub mod proxy;

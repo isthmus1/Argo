@@ -18,6 +18,7 @@ pub mod ingest_begin_reducer;
 pub mod ingest_finish_reducer;
 pub mod ingest_reset_reducer;
 pub mod ingest_rows_reducer;
+pub mod release_chunk_reducer;
 pub mod requeue_reducer;
 pub mod rust_chunk_table;
 pub mod rust_chunk_type;
@@ -37,6 +38,7 @@ pub use ingest_begin_reducer::ingest_begin;
 pub use ingest_finish_reducer::ingest_finish;
 pub use ingest_reset_reducer::ingest_reset;
 pub use ingest_rows_reducer::ingest_rows;
+pub use release_chunk_reducer::release_chunk;
 pub use requeue_reducer::requeue;
 pub use rust_chunk_table::*;
 pub use rust_chunk_type::RustChunk;
@@ -77,6 +79,10 @@ pub enum Reducer {
     IngestRows {
         rows: Vec<CChunk>,
     },
+    ReleaseChunk {
+        chunk_id: u64,
+        generation: u32,
+    },
     Requeue {
         chunk_id: u64,
     },
@@ -107,6 +113,7 @@ impl __sdk::Reducer for Reducer {
             Reducer::IngestFinish { .. } => "ingest_finish",
             Reducer::IngestReset => "ingest_reset",
             Reducer::IngestRows { .. } => "ingest_rows",
+            Reducer::ReleaseChunk { .. } => "release_chunk",
             Reducer::Requeue { .. } => "requeue",
             Reducer::SubmitRust { .. } => "submit_rust",
             _ => unreachable!(),
@@ -156,6 +163,13 @@ impl __sdk::Reducer for Reducer {
             Reducer::IngestRows { rows } => {
                 __sats::bsatn::to_vec(&ingest_rows_reducer::IngestRowsArgs { rows: rows.clone() })
             }
+            Reducer::ReleaseChunk {
+                chunk_id,
+                generation,
+            } => __sats::bsatn::to_vec(&release_chunk_reducer::ReleaseChunkArgs {
+                chunk_id: chunk_id.clone(),
+                generation: generation.clone(),
+            }),
             Reducer::Requeue { chunk_id } => __sats::bsatn::to_vec(&requeue_reducer::RequeueArgs {
                 chunk_id: chunk_id.clone(),
             }),

@@ -39,6 +39,10 @@ pub struct Candidate<'a> {
     pub checkout: Option<&'a Path>,
     /// The C program the candidate replaces a function of, built for this claim.
     pub program: Option<Arc<Program>>,
+    /// The function the Rust must export: the C function's name, or a piece's symbol.
+    pub symbol: &'a str,
+    /// For a piece of a function: the C that replaces it (a call to `symbol`).
+    pub c: Option<&'a str>,
 }
 
 /// What a validator established.
@@ -77,6 +81,8 @@ pub enum Stage {
     Link,
     /// Its exported signature doesn't match the C function's ABI.
     Abi,
+    /// A piece's C replacement doesn't compile in the piece's place.
+    CCall,
 }
 
 impl Stage {
@@ -87,6 +93,7 @@ impl Stage {
             Stage::Symbols => "symbols",
             Stage::Link => "link",
             Stage::Abi => "abi",
+            Stage::CCall => "c",
         }
     }
 }
@@ -117,6 +124,7 @@ pub trait Validator {
     fn prepare(
         &self,
         _chunk: &CChunk,
+        _piece: Option<&crate::piece::Piece>,
         _ingest: Option<Ingest<'_>>,
         _dir: &Path,
     ) -> impl Future<Output = Option<Program>> {
@@ -227,6 +235,7 @@ impl Validator for BuildCheck {
     async fn prepare(
         &self,
         chunk: &CChunk,
+        piece: Option<&crate::piece::Piece>,
         ingest: Option<Ingest<'_>>,
         dir: &Path,
     ) -> Option<Program> {
@@ -239,13 +248,14 @@ impl Validator for BuildCheck {
             Ok(build) => build,
             Err(why) => return Some(off(why)),
         };
-        let (chunk, root, dir) = (
+        let (chunk, piece, root, dir) = (
             chunk.clone(),
+            piece.cloned(),
             ingest.checkout.to_path_buf(),
             dir.to_path_buf(),
         );
         let prepared = tokio::task::spawn_blocking(move || {
-            Program::prepare(&chunk, &build, &root, &dir, &tools)
+            Program::prepare(&chunk, piece.as_ref(), &build, &root, &dir, &tools)
         });
         Some(
             prepared
@@ -256,7 +266,8 @@ impl Validator for BuildCheck {
 
     async fn validate(&self, candidate: &Candidate<'_>) -> Verdict {
         let job = Job {
-            name: candidate.chunk.name.clone(),
+            name: candidate.symbol.to_string(),
+            c: candidate.c.map(str::to_string),
             file: candidate.file.to_path_buf(),
             dir: candidate.dir.to_path_buf(),
             program: candidate.program.clone(),
@@ -279,6 +290,8 @@ impl Validator for BuildCheck {
 /// One candidate's build, owned so it can run on a blocking thread.
 struct Job {
     name: String,
+    /// A piece's C replacement.
+    c: Option<String>,
     file: PathBuf,
     dir: PathBuf,
     program: Option<Arc<Program>>,
@@ -371,8 +384,52 @@ impl Job {
             ));
         }
 
+        // A piece: its C replacement spliced into its unit, which is compiled for this candidate;
+        // the link and the ABI are then this unit's, with the other units.
+        let mut c_signature = program.signature.clone();
+        let mut declaration = program.declaration.clone();
+        let linked = match &program.site {
+            None => program.link(tools, &self.dir, &lib),
+            Some(site) => {
+                let Some(c) = &self.c else {
+                    failures.push(Failure::new(
+                        Stage::CCall,
+                        "no `c_replacement`: give the C that replaces the TARGET lines",
+                        vec![],
+                        None,
+                    ));
+                    return Verdict::Failed(failures);
+                };
+                let replaced = format!("{}{c}{}", &site.text[..site.lo], &site.text[site.hi..]);
+                let (unit, object) = (self.dir.join("unit.c"), self.dir.join("unit.o"));
+                if let Err(log) = program::compile_text(tools, &unit, &replaced, &object, &[]) {
+                    let errors: Vec<String> =
+                        log.lines().filter(|l| l.contains("error")).take(8).map(str::to_string).collect();
+                    failures.push(Failure::new(
+                        Stage::CCall,
+                        format!(
+                            "the C replacement doesn't compile in the piece's place (the whole unit \
+                             with it is saved at {})",
+                            unit.display()
+                        ),
+                        errors,
+                        Some(log),
+                    ));
+                    return Verdict::Failed(failures);
+                }
+                done.push("the C replacement compiled in place".into());
+                let bytes = std::fs::read(&object).unwrap_or_default();
+                if let Ok(Some(sig)) = abi::signature(&bytes, &self.name) {
+                    declaration = format!("{}{}", self.name, sig.show());
+                    c_signature = Some(sig);
+                }
+                let objects: Vec<PathBuf> = site.others.iter().cloned().chain([object]).collect();
+                Some(program::link(tools, &self.dir, &objects, Some(&lib)))
+            }
+        };
+
         // Link, against what the C program alone already reports.
-        match program.link(tools, &self.dir, &lib) {
+        match linked {
             None => done.push("not linked: no linkable C program".into()),
             Some((linked, log)) => {
                 let base = &program.baseline;
@@ -423,7 +480,7 @@ impl Job {
         }
 
         // ABI: what each compiler says the signature is.
-        match (&program.signature, signature(&objects, &self.name)) {
+        match (&c_signature, signature(&objects, &self.name)) {
             (Some(c), Ok(Some(r))) => {
                 let diffs = abi::compare(c, &r);
                 if diffs.is_empty() {
@@ -434,7 +491,7 @@ impl Job {
                 } else {
                     let log = format!(
                         "C declaration:  {}\nC, as compiled:    {}{}\nRust, as compiled: {}{}\n\n{}\n",
-                        program.declaration,
+                        declaration,
                         self.name,
                         c.show(),
                         self.name,
@@ -446,7 +503,7 @@ impl Job {
                         format!(
                             "the exported Rust signature doesn't match the C function's ABI; \
                              the C declaration is `{}`",
-                            program.declaration
+                            declaration
                         ),
                         diffs,
                         Some(log),
@@ -474,8 +531,9 @@ fn yours_first(log: &str, symbols: &[&String], noisy: bool) -> String {
     let lines: Vec<&str> = log.lines().collect();
     let mut yours = Vec::new();
     for (i, line) in lines.iter().enumerate() {
+        // GNU ld and lld quote the C name; macOS's ld quotes the Mach-O one (`"_name"`).
         let names = symbols.iter().any(|s| {
-            [('`', '\''), ('\'', '\''), ('‘', '’')]
+            [("`", "'"), ("'", "'"), ("‘", "’"), ("\"_", "\""), ("'_", "'")]
                 .iter()
                 .any(|(open, close)| line.contains(&format!("{open}{s}{close}")))
                 || line.ends_with(&format!(": {s}"))

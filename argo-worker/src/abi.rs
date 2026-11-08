@@ -237,6 +237,21 @@ fn find(dwarf: &Dwarf<'_>, symbol: &str) -> gimli::Result<Option<Signature>> {
     Ok(declared)
 }
 
+/// A base type as GCC names it (`long int`), whichever compiler wrote the debug info: Apple's
+/// clang (macOS's `gcc`) says `long`.
+fn gcc_spelling(name: &str) -> String {
+    match name {
+        "long" => "long int",
+        "unsigned long" => "long unsigned int",
+        "short" => "short int",
+        "unsigned short" => "short unsigned int",
+        "long long" => "long long int",
+        "unsigned long long" => "long long unsigned int",
+        other => other,
+    }
+    .to_string()
+}
+
 fn describe(dwarf: &Dwarf<'_>, unit: &Unit<'_>, at: UnitOffset) -> gimli::Result<Signature> {
     let mut tree = unit.entries_tree(Some(at))?;
     let root = tree.root()?;
@@ -357,7 +372,7 @@ fn value(
             };
             Value {
                 class,
-                spelled: name.unwrap_or_else(|| "<base type>".into()),
+                spelled: name.map_or_else(|| "<base type>".into(), |n| gcc_spelling(&n)),
             }
         }
         gimli::DW_TAG_pointer_type

@@ -4,7 +4,8 @@
 
 use argo_db_client::{CChunk, ChunkKind, MAX_RUST_BYTES};
 
-pub fn check(chunk: &CChunk, source: &str) -> Result<(), String> {
+/// `symbol`: the function the Rust must export (the C function's name, or a piece's).
+pub fn check(chunk: &CChunk, symbol: &str, source: &str) -> Result<(), String> {
     if source.trim().is_empty() {
         return Err("`rust_source` is empty".into());
     }
@@ -25,11 +26,8 @@ pub fn check(chunk: &CChunk, source: &str) -> Result<(), String> {
     if !source.contains("extern \"C\"") || !source.contains("no_mangle") {
         return Err("no exported function: write it as `#[no_mangle] pub extern \"C\" fn`".into());
     }
-    if chunk.kind == ChunkKind::Function && !declares(source, &chunk.name) {
-        return Err(format!(
-            "no `fn {}(`: keep the C function's exact name",
-            chunk.name
-        ));
+    if matches!(chunk.kind, ChunkKind::Function | ChunkKind::Region) && !declares(source, symbol) {
+        return Err(format!("no `fn {symbol}(`: export the function under exactly that name"));
     }
     Ok(())
 }

@@ -21,9 +21,24 @@ pub const DIALECT_FLAGS: [&str; 1] = ["-std=gnu2x"];
 pub const GCC: &str = "gcc";
 
 /// Run `<cc> -E` on `input` (a file path, or C text on stdin when `stdin` is given).
+/// On macOS `gcc` is Apple's clang, whose SDK headers use clang-only syntax the parser doesn't
+/// read: blocks (`int (^f)(void)`, left out without `__BLOCKS__`) and nullability qualifiers
+/// (`_Nullable`), which mean nothing to the code. Empty elsewhere.
+pub const MACOS_FLAGS: &[&str] = if cfg!(target_os = "macos") {
+    &[
+        "-fno-blocks",
+        "-D_Nullable=",
+        "-D_Nonnull=",
+        "-D_Null_unspecified=",
+        "-D_Nullable_result=",
+    ]
+} else {
+    &[]
+};
+
 pub fn preprocess(cc: &str, flags: &[String], input: Input<'_>) -> Result<Vec<u8>, Error> {
     let mut cmd = Command::new(cc);
-    cmd.arg("-E").args(DIALECT_FLAGS).args(flags);
+    cmd.arg("-E").args(DIALECT_FLAGS).args(MACOS_FLAGS).args(flags);
     match input {
         Input::File(path) => {
             cmd.arg(path);
@@ -54,7 +69,69 @@ pub fn preprocess(cc: &str, flags: &[String], input: Input<'_>) -> Result<Vec<u8
     if !out.status.success() {
         return Err(Error::from_stderr(&String::from_utf8_lossy(&out.stderr)));
     }
-    Ok(out.stdout)
+    Ok(without_availability(out.stdout))
+}
+
+/// `text` without `__attribute__((availability(...)))`. Apple's SDK headers mark declarations
+/// with the OS versions that have them (`macos(10.13.4)`), which macOS's `gcc` (Apple's clang)
+/// keeps and the parser can't read as numbers. They say nothing about the code. Removing them
+/// keeps every line where it was (they never span lines' worth of meaning, and newlines inside
+/// one are kept), so locations stay exact. Linux headers have none: there it changes nothing.
+pub fn without_availability(text: Vec<u8>) -> Vec<u8> {
+    const START: &[u8] = b"__attribute__((availability(";
+    if !text.windows(START.len()).any(|w| w == START) {
+        return text;
+    }
+    let mut out = Vec::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if !text[i..].starts_with(START) {
+            out.push(text[i]);
+            i += 1;
+            continue;
+        }
+        // From the attribute's first `(`, to where the parentheses close; quotes are skipped.
+        let (mut j, mut depth, mut quote) = (i + b"__attribute__".len(), 0usize, None::<u8>);
+        let mut newlines = 0;
+        while j < text.len() {
+            let c = text[j];
+            if c == b'\n' {
+                newlines += 1;
+            }
+            match quote {
+                Some(_) if c == b'\\' => j += 1,
+                Some(q) if c == q => quote = None,
+                Some(_) => {}
+                None if c == b'"' || c == b'\'' => quote = Some(c),
+                None if c == b'(' => depth += 1,
+                None if c == b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                None => {}
+            }
+            j += 1;
+        }
+        out.extend(std::iter::repeat_n(b'\n', newlines));
+        i = j + 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod availability_tests {
+    use super::without_availability;
+
+    #[test]
+    fn apples_availability_attributes_are_removed_and_lines_kept() {
+        let text = b"int f(int) __attribute__((availability(macos,introduced=10.13.4))) __attribute__((availability(ios,introduced=11.3,message=\"use g() (it's (newer))\")));\nint g(void);\n";
+        let out = String::from_utf8(without_availability(text.to_vec())).unwrap();
+        assert_eq!(out, "int f(int)  ;\nint g(void);\n");
+        let plain = b"int h(void) __attribute__((noreturn));\n".to_vec();
+        assert_eq!(without_availability(plain.clone()), plain);
+    }
 }
 
 #[derive(Clone, Copy)]

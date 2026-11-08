@@ -41,6 +41,8 @@ pub enum Outcome {
     /// Never `Validation::Failed`: a failing candidate is rejected, not submitted.
     Done {
         source: String,
+        /// For a piece of a function: the accepted C that replaces it.
+        c: Option<String>,
         model: String,
         /// Submissions made, the accepted one included.
         attempts: u32,
@@ -65,6 +67,15 @@ pub struct Task<'a> {
     /// The claim's own directory: the C program, and each submission's source and logs.
     pub session: &'a Path,
     pub program: Option<Arc<Program>>,
+    /// Set for a piece of a function (a `Region` row): it is outlined into its own function.
+    pub piece: Option<&'a crate::piece::Piece>,
+}
+
+impl Task<'_> {
+    /// The function the Rust must export.
+    pub fn symbol(&self) -> &str {
+        self.piece.map_or(&self.chunk.name, |p| &p.symbol)
+    }
 }
 
 /// Translate the task's chunk.
@@ -127,8 +138,12 @@ pub async fn translate(
         for call in &reply.calls {
             let content = match call.name.as_str() {
                 "submit_rewrite" => {
-                    let source = match arguments(call).and_then(|a| rust_source(&a)) {
-                        Ok(source) => source,
+                    let parsed = arguments(call).and_then(|a| {
+                        let source = rust_source(&a)?;
+                        Ok((source, c_replacement(&a, task)?))
+                    });
+                    let (source, c) = match parsed {
+                        Ok(parsed) => parsed,
                         Err(why) => {
                             messages.push(Message::Tool {
                                 call: call.id.clone(),
@@ -138,7 +153,7 @@ pub async fn translate(
                         }
                     };
                     submissions += 1;
-                    match submit(validator, task, submissions, &source).await {
+                    match submit(validator, task, submissions, &source, c.as_deref()).await {
                         Ok((validation, checked)) => {
                             let _ = writeln!(
                                 log,
@@ -146,6 +161,7 @@ pub async fn translate(
                             );
                             return Outcome::Done {
                                 source,
+                                c,
                                 model: name.to_string(),
                                 attempts: submissions,
                                 validation,
@@ -226,6 +242,14 @@ pub fn submit_spec() -> ToolSpec {
                     "description": "The complete raw Rust source file as plain text. It must \
                         start with Rust (a comment, an attribute, `use`, `extern` or an item), \
                         never with ``` or prose, and contain no markdown anywhere."
+                },
+                "c_replacement": {
+                    "type": "string",
+                    "description": "Only when the TARGET is a piece of a function: the C that \
+                        replaces the TARGET in place, raw C with no markdown: a prototype of \
+                        your exported Rust function, then the call to it, keeping any \
+                        declaration the rest of the function uses and any return, break or \
+                        continue the TARGET had. Leave it out for a whole function."
                 }
             },
             "required": ["rust_source"],
@@ -241,6 +265,7 @@ async fn submit(
     task: &Task<'_>,
     n: u32,
     source: &str,
+    c: Option<&str>,
 ) -> Result<(Validation, String), Vec<Failure>> {
     let dir = task.session.join(format!("submission-{n}"));
     let file = dir.join("lib.rs");
@@ -250,8 +275,13 @@ async fn submit(
             "the worker could not save the submission ({e}); submit again"
         ))]);
     }
-    shape::check(task.chunk, source).map_err(|why| vec![Failure::shape(why)])?;
+    if let Some(c) = c {
+        let _ = std::fs::write(dir.join("replacement.c"), c);
+    }
+    shape::check(task.chunk, task.symbol(), source).map_err(|why| vec![Failure::shape(why)])?;
     let candidate = Candidate {
+        symbol: task.symbol(),
+        c,
         chunk: task.chunk,
         source,
         file: &file,
@@ -338,6 +368,22 @@ fn arguments(call: &ToolCall) -> Result<Value, String> {
             call.name,
             cut(call.arguments.clone(), 300)
         )),
+    }
+}
+
+/// A piece's `c_replacement`: required for a piece, ignored otherwise.
+fn c_replacement(args: &Value, task: &Task<'_>) -> Result<Option<String>, String> {
+    if task.piece.is_none() {
+        return Ok(None);
+    }
+    match args.get("c_replacement") {
+        Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+        _ => Err(
+            "error: this TARGET is a piece of a function, so submit_rewrite also needs \
+             `c_replacement`: the C that replaces the TARGET lines (a prototype of your Rust \
+             function and the call to it). Nothing was submitted."
+                .into(),
+        ),
     }
 }
 

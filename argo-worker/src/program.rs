@@ -22,7 +22,7 @@ use argo_c::project::cpp::DIALECT_FLAGS;
 use argo_c::project::lines::Mapped;
 use argo_c::project::make;
 use argo_db_client::{CChunk, ChunkKind};
-use object::{Object, ObjectSymbol, SymbolKind};
+use object::{BinaryFormat, Object, ObjectSymbol, SymbolKind};
 use regex::Regex;
 use tempfile::TempDir;
 
@@ -81,6 +81,21 @@ pub struct Program {
     pub signature: Option<Signature>,
     /// Checks that can't run for this chunk, and why.
     pub notes: Vec<String>,
+    /// For a piece of a function: where it sits, to splice each candidate's C call into.
+    pub site: Option<Site>,
+}
+
+/// Where a piece sits in its function's unit. Each candidate's C replacement is spliced in at
+/// `lo..hi` and that unit compiled, then linked with `others` and the Rust.
+#[derive(Debug, Default, Clone)]
+pub struct Site {
+    /// The unit's preprocessed text, as compiled here.
+    pub text: String,
+    /// The piece's byte range in `text`.
+    pub lo: usize,
+    pub hi: usize,
+    /// Every other unit's object.
+    pub others: Vec<PathBuf>,
 }
 
 /// Symbols of one or more objects, by binding.
@@ -288,11 +303,15 @@ impl Program {
     /// out and said so in [`Program::notes`].
     pub fn prepare(
         chunk: &CChunk,
+        piece: Option<&crate::piece::Piece>,
         build: &Build,
         root: &Path,
         dir: &Path,
         tools: &Toolchain,
     ) -> Program {
+        if let Some(piece) = piece {
+            return Program::prepare_piece(chunk, piece, build, root, dir, tools);
+        }
         let mut p = Program {
             name: chunk.name.clone(),
             ..Program::default()
@@ -412,6 +431,83 @@ impl Program {
         p
     }
 
+    /// The program for a piece of a function: its function's unit, where the piece sits in it,
+    /// and the other units. The unit itself is compiled per candidate, with that candidate's C
+    /// replacement spliced in at the piece.
+    fn prepare_piece(
+        chunk: &CChunk,
+        piece: &crate::piece::Piece,
+        build: &Build,
+        root: &Path,
+        dir: &Path,
+        tools: &Toolchain,
+    ) -> Program {
+        let mut p = Program {
+            name: piece.symbol.clone(),
+            ..Program::default()
+        };
+        let off = |p: &mut Program, why: String| {
+            p.notes.push(format!("link checks are off: {why}"));
+        };
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            off(&mut p, format!("{}: {e}", dir.display()));
+            return p;
+        }
+        let Ok(root) = root.canonicalize() else {
+            off(&mut p, "the clone is missing".into());
+            return p;
+        };
+        let makefile = make::read(&root);
+        let (target, text, function_at) = match build.place(&piece.function, &root, &makefile, tools)
+        {
+            Ok(placed) => placed,
+            Err(why) => {
+                off(&mut p, format!("the piece's function: {why}"));
+                return p;
+            }
+        };
+        // The piece inside its function: by the rows' byte ranges (both index the same ingested
+        // text, contiguous inside the function), else its text found once in the function.
+        let function = &piece.function.source;
+        let by_range = chunk
+            .byte_lo
+            .checked_sub(piece.function.byte_lo)
+            .map(|r| r as usize)
+            .filter(|&r| function.get(r..r + chunk.source.len()) == Some(chunk.source.as_str()));
+        let by_text = || {
+            let found: Vec<usize> = function.match_indices(&chunk.source).map(|(at, _)| at).collect();
+            (found.len() == 1).then(|| found[0])
+        };
+        let Some(within) = by_range.or_else(by_text) else {
+            off(&mut p, "the piece's text isn't found in its function".into());
+            return p;
+        };
+        let lo = function_at + within;
+        let hi = lo + chunk.source.len();
+
+        // The original unit: what the agent reads, its symbols, and the program's baseline.
+        let (preprocessed, original) = (dir.join("original.c"), dir.join("original.o"));
+        if let Err(e) = compile_text(tools, &preprocessed, &text, &original, &[]) {
+            off(&mut p, format!("`{}` doesn't compile preprocessed: {}", target.path, first_error(&e)));
+            return p;
+        }
+        p.preprocessed = Some(preprocessed);
+        let others: Vec<PathBuf> = build
+            .units
+            .iter()
+            .filter(|u| u.path != target.path)
+            .filter_map(|u| u.object.clone())
+            .collect();
+        for u in build.units.iter().filter(|u| u.path != target.path) {
+            p.symbols.extend(&u.symbols);
+        }
+        p.symbols.extend(&symbols(&std::fs::read(&original).unwrap_or_default()).unwrap_or_default());
+        p.objects = others.iter().cloned().chain([original]).collect();
+        p.baseline = link(tools, dir, &p.objects, None).0;
+        p.site = Some(Site { text, lo, hi, others });
+        p
+    }
+
     /// Link `rust` (a static library) into the program, in `dir`; `None` when there is no
     /// program to link into.
     pub fn link(&self, tools: &Toolchain, dir: &Path, rust: &Path) -> Option<(Problems, String)> {
@@ -452,7 +548,7 @@ fn run_cc(tools: &Toolchain, flags: &[String], source: &Path, out: &Path) -> Res
 }
 
 /// Compile preprocessed C `text`, saved as `file`.
-fn compile_text(
+pub(crate) fn compile_text(
     tools: &Toolchain,
     file: &Path,
     text: &str,
@@ -482,7 +578,7 @@ fn preprocess(tools: &Toolchain, flags: &[String], source: &Path) -> Result<Stri
 }
 
 /// Link `objects` (and `rust`) into `dir/program`: what failed, and the linker's output.
-fn link(
+pub(crate) fn link(
     tools: &Toolchain,
     dir: &Path,
     objects: &[PathBuf],
@@ -496,8 +592,27 @@ fn link(
     cmd.args(&tools.libs);
     match cmd.output() {
         Ok(out) => {
-            let log = String::from_utf8_lossy(&out.stderr).into_owned();
-            (problems(&log, !out.status.success()), log)
+            let mut log = String::from_utf8_lossy(&out.stderr).into_owned();
+            let mut found = problems(&log, !out.status.success());
+            // macOS's ld stops at undefined symbols before it reports duplicates (GNU ld names
+            // both): link again letting undefined ones be, to find any duplicates too.
+            if cfg!(target_os = "macos") && !found.undefined.is_empty() {
+                let mut again = Command::new(&tools.cc);
+                again.arg("-o").arg(dir.join("program")).args(objects);
+                if let Some(lib) = rust {
+                    again.arg(lib);
+                }
+                again.args(&tools.libs).arg("-Wl,-undefined,dynamic_lookup");
+                if let Ok(out) = again.output() {
+                    let more = String::from_utf8_lossy(&out.stderr).into_owned();
+                    let dup = problems(&more, !out.status.success()).duplicate;
+                    if !dup.is_empty() {
+                        found.duplicate.extend(dup);
+                        log.push_str(&more);
+                    }
+                }
+            }
+            (found, log)
         }
         Err(e) => {
             let log = format!("cannot run `{}`: {e}", tools.cc);
@@ -517,6 +632,12 @@ static UNDEFINED: LazyLock<Regex> = LazyLock::new(|| {
 static DUPLICATE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"multiple definition of [`'‘"]([^'’"`]+)['’"`]|duplicate symbol: (\S+)"#).unwrap()
 });
+/// macOS's ld: `  "_add", referenced from:` under `Undefined symbols for architecture …:`, and
+/// `duplicate symbol '_helper' in:`; both name Mach-O symbols (a `_` before the C name).
+static MACOS_UNDEFINED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^\s+"_([^"]+)", referenced from:"#).unwrap());
+static MACOS_DUPLICATE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"duplicate symbol '_([^']+)'"#).unwrap());
 
 /// GNU ld's, lld's and mold's complaints, by symbol.
 pub fn problems(log: &str, failed: bool) -> Problems {
@@ -534,7 +655,14 @@ pub fn problems(log: &str, failed: bool) -> Problems {
             p.undefined.insert(s);
         } else if let Some(s) = DUPLICATE.captures(line).and_then(symbol) {
             p.duplicate.insert(s);
-        } else if line.contains("error") && !line.contains("ld returned") {
+        } else if let Some(s) = MACOS_UNDEFINED.captures(line).and_then(symbol) {
+            p.undefined.insert(s);
+        } else if let Some(s) = MACOS_DUPLICATE.captures(line).and_then(symbol) {
+            p.duplicate.insert(s);
+        } else if line.contains("error")
+            && !line.contains("ld returned")
+            && !line.contains("linker command failed")
+        {
             p.other.insert(line.trim().to_string());
         }
     }
@@ -545,12 +673,15 @@ pub fn problems(log: &str, failed: bool) -> Problems {
 /// assembler-local labels and Rust's own internals are left out.
 pub fn symbols(bytes: &[u8]) -> Result<Symbols, String> {
     let file = object::File::parse(bytes).map_err(|e| e.to_string())?;
+    // Mach-O (macOS) spells every C symbol with a leading `_`: read it as the C name.
+    let macho = file.format() == BinaryFormat::MachO;
     let mut out = Symbols::default();
     for sym in file.symbols() {
         if matches!(sym.kind(), SymbolKind::Section | SymbolKind::File) {
             continue;
         }
         let Ok(name) = sym.name() else { continue };
+        let name = if macho { name.strip_prefix('_').unwrap_or(name) } else { name };
         if name.is_empty() || name.starts_with('.') || internal(name) {
             continue;
         }
@@ -587,7 +718,7 @@ pub fn internal(name: &str) -> bool {
 }
 
 /// The first error line of a compiler's output.
-fn first_error(log: &str) -> String {
+pub(crate) fn first_error(log: &str) -> String {
     log.lines()
         .find(|l| l.contains("error"))
         .or_else(|| log.lines().next())

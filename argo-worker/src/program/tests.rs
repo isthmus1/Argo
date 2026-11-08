@@ -87,7 +87,7 @@ fn function(path: &str, text: &str, name: &str, starts: &str) -> CChunk {
 /// The program for `chunk`, and the directory holding its files.
 fn prepare(repo: &TempDir, build: &Build, chunk: &CChunk) -> (Program, TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    let p = Program::prepare(chunk, build, repo.path(), dir.path(), &tools());
+    let p = Program::prepare(chunk, None, build, repo.path(), dir.path(), &tools());
     (p, dir)
 }
 
