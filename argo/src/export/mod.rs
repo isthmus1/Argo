@@ -70,26 +70,26 @@ impl Placement {
         Placement { file, spans }
     }
 
-    /// The recorded offset of parsed offset `pos`. A position outside every span (which an
-    /// exported node never has, since each lies inside its top-level item) is pinned to the
-    /// nearest span's start.
-    fn at(&self, pos: u32) -> u32 {
+    /// The recorded offset of parsed offset `pos`, where a range starts (`end` false) or ends.
+    /// When two kept spans touch, their shared offset is the first's end and the second's start.
+    /// A position outside every span (which an exported node never has, since each lies inside
+    /// its top-level item) is clamped to the nearest edge of the span before it.
+    fn at(&self, pos: u32, end: bool) -> u32 {
         let i = self
             .spans
-            .partition_point(|&(lo, _, _)| lo <= pos)
+            .partition_point(|&(lo, _, _)| if end { lo < pos } else { lo <= pos })
             .saturating_sub(1);
-        match self.spans.get(i) {
-            Some(&(lo, hi, at)) if pos >= lo && pos <= hi => at + (pos - lo),
-            Some(&(_, _, at)) => at,
-            None => 0,
-        }
+        self.spans
+            .get(i)
+            .map_or(0, |&(lo, hi, at)| at + (pos.clamp(lo, hi) - lo))
     }
 
     fn range(&self, lo: u32, hi: u32) -> SourceRange {
+        let lo = self.at(lo, false);
         SourceRange {
             file: self.file,
-            lo: self.at(lo),
-            hi: self.at(hi),
+            lo,
+            hi: self.at(hi, true).max(lo),
         }
     }
 }
@@ -235,5 +235,48 @@ impl Exporter<'_> {
             }
         }
         node
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placement_maps_kept_spans_and_their_shared_edges() {
+        // Parsed bytes 0..5 and 5..9 kept (touching), 9..20 dropped, 20..24 kept; each kept span
+        // is followed by a separator byte in the recorded text.
+        let at = Placement::spans(FileId(3), vec![(0, 5, 0), (5, 9, 6), (20, 24, 11)]);
+        let r = |lo, hi| {
+            let r = at.range(lo, hi);
+            assert_eq!(r.file, FileId(3));
+            (r.lo, r.hi)
+        };
+        assert_eq!(
+            r(0, 5),
+            (0, 5),
+            "the end of the first is not the start of the second"
+        );
+        assert_eq!(r(5, 9), (6, 10));
+        assert_eq!(r(6, 8), (7, 9));
+        assert_eq!(r(20, 24), (11, 15));
+        assert_eq!(
+            r(12, 14),
+            (10, 10),
+            "a dropped gap clamps to the end before it"
+        );
+        assert_eq!(
+            r(5, 5),
+            (6, 6),
+            "an empty range at a shared edge is never inverted"
+        );
+        assert_eq!(
+            Placement::whole(FileId(1), 9).range(2, 9),
+            SourceRange {
+                file: FileId(1),
+                lo: 2,
+                hi: 9
+            }
+        );
     }
 }

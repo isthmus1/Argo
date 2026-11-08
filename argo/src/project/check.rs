@@ -31,6 +31,9 @@ pub struct Read {
     pub graph: Graph,
 }
 
+/// One file's verdict, and what was read when it could be.
+type Checked = (Verdict, Option<Read>);
+
 pub struct Setup<'a> {
     pub cc: &'a str,
     pub root: &'a Path,
@@ -61,8 +64,7 @@ pub fn all(
     for start in (0..total).step_by(threads * 2) {
         let batch = &sources[start..(start + threads * 2).min(total)];
         let next = AtomicUsize::new(0);
-        let results: Vec<Mutex<Option<(Verdict, Option<Read>)>>> =
-            batch.iter().map(|_| Mutex::new(None)).collect();
+        let results: Vec<Mutex<Option<Checked>>> = batch.iter().map(|_| Mutex::new(None)).collect();
         std::thread::scope(|scope| {
             for _ in 0..threads.min(batch.len()) {
                 scope.spawn(|| {
@@ -108,7 +110,7 @@ pub fn all(
 /// optional features one at a time: `ifdef CONFIG_FS_NET` in the Makefile adds `-DCONFIG_FS_NET`,
 /// which makes `temu.c` include `<openssl/aes.h>`; without OpenSSL installed the file is still
 /// read, as built without that feature.
-fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> (Verdict, Option<Read>) {
+fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> Checked {
     let run = |extra: &[String]| {
         let flags: Vec<String> = setup.flags.iter().chain(extra).cloned().collect();
         cpp::preprocess(setup.cc, &flags, Input::File(path))
