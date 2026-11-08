@@ -1,10 +1,11 @@
 use serde_json::Value;
+const CONTEXT_LINES: u32 = 5;
 const testCode: &str = "
  printf(\"Hello, World!\\n\");
 ";
 
 fn main() {
-    if let Err(err) = sendPrompt(getLines(testCode, 3, 1000)) {
+    if let Err(err) = sendPrompt(testCode, 3, 1000) {
         eprintln!("error: {err}");
     }
 }
@@ -41,14 +42,47 @@ fn text_at(value: &Value, path: &str) -> Option<String> {
 }
 
 #[tokio::main]
-async fn sendPrompt(inputCode: String) -> Result<(), Box<dyn std::error::Error>> {
-    let specPrompt = "You're not allowed to say anything that isn't code. This is either comments or c code. Take this code and convert it into rust. You're ONLY allowed to give back code, if you need to say something, it has to be consize and in the form of rust comments. never turn rust code into comments and never give back comments without comment marks. If you have ANYTHING to say that isn't code it has to be in rust comment form. This is the code:\n";
+async fn sendPrompt(
+    source: &str,
+    start_line: u32,
+    end_line: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if start_line == 0 || end_line < start_line {
+        return Err(format!(
+            "invalid line range: start_line={start_line}, end_line={end_line}"
+        )
+        .into());
+    }
+
+    let context_start = start_line.saturating_sub(CONTEXT_LINES).max(1);
+    let context_end = end_line.saturating_add(CONTEXT_LINES);
+    let before = getLines(source, context_start, start_line.saturating_sub(1));
+    let after = getLines(source, end_line.saturating_add(1), context_end);
+    let target = getLines(source, start_line, end_line);
+
+    let mut context = String::new();
+    if !before.is_empty() {
+        context.push_str(&format!(
+            "BEFORE (lines {context_start}-{}, for reference only, do NOT output):\n{before}\n",
+            start_line - 1
+        ));
+    }
+    if !after.is_empty() {
+        context.push_str(&format!(
+            "AFTER (lines {}-{context_end}, for reference only, do NOT output):\n{after}\n",
+            end_line.saturating_add(1)
+        ));
+    }
+
+    let specPrompt = format!(
+        "You're not allowed to say anything that isn't code. This is either comments or c code. Take the TARGET lines and convert them into rust. The BEFORE and AFTER lines are surrounding reference only: do NOT rewrite, repeat, or output them. Only output the rewritten TARGET lines. You're ONLY allowed to give back code, if you need to say something, it has to be consize and in the form of rust comments. never turn rust code into comments and never give back comments without comment marks. If you have ANYTHING to say that isn't code it has to be in rust comment form.\n{context}TARGET (lines {start_line}-{end_line}, rewrite ONLY these into rust):\n{target}\n"
+    );
 
     let api_key = std::env::var("OPENAI_API_KEY")?;
     let base_url =
         std::env::var("OPENAI_BASE_URL").map(|value| value.trim_end_matches('/').to_owned())?;
     let model = std::env::var("OPENAI_MODEL")?;
-    let finalPrompt = format!("{} {}", specPrompt, inputCode);
+    let finalPrompt = specPrompt;
 
     let url = format!("{base_url}/v1/chat/completions");
     let body = serde_json::json!({
