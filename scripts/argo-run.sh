@@ -117,6 +117,13 @@ openrouter_key() {
 
 pid_of() { cat "$PID_DIR/$1.pid" 2>/dev/null || true; }
 
+# How many workers in the pool have connected so far, counted from the log's own lines.
+connected() {
+    local n
+    n="$(grep -c 'connected as ' "$LOG_DIR/workers.log" 2>/dev/null || true)"
+    printf '%s' "${n:-0}"
+}
+
 alive() { [ -n "$(pid_of "$1")" ] && kill -0 "$(pid_of "$1")" 2>/dev/null; }
 
 # Kill one recorded process group, waiting for it to go.
@@ -237,7 +244,22 @@ case "$CMD" in
 
         DB="ws://127.0.0.1:$PORT"
         detach workers "$BIN/argo-worker" --db "$DB" --module "$MODULE" --jobs "$JOBS" >"$PID_DIR/workers.pid"
-        say "workers: $JOBS in one pool, pid $(pid_of workers), log $LOG_DIR/workers.log"
+        # Each worker connects, clones the repository and claims on its own, so the pool takes a
+        # while to be all there: wait until one connection line per worker has been written.
+        i=0
+        while [ "$(connected)" -lt "$JOBS" ]; do
+            i=$((i + 1))
+            if [ "$i" -gt "${ARGO_WAIT:-180}" ]; then
+                say "warning: $(connected) of $JOBS workers connected in ${ARGO_WAIT:-180}s — see $LOG_DIR/workers.log"
+                break
+            fi
+            if ! kill -0 "$(pid_of workers)" 2>/dev/null; then
+                tail -n 10 "$LOG_DIR/workers.log" >&2 || true
+                die "the worker pool exited before it was up (see $LOG_DIR/workers.log)"
+            fi
+            sleep 1
+        done
+        say "workers: $(connected) of $JOBS connected, one pool, pid $(pid_of workers), log $LOG_DIR/workers.log"
 
         if [ "$UI" = 1 ]; then
             detach ui "$BIN/argo-ui" --db "$DB" --module "$MODULE" >"$PID_DIR/ui.pid"
