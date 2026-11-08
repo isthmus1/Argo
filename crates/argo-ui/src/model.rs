@@ -48,6 +48,21 @@ pub enum Category {
     Type,
 }
 
+impl Category {
+    /// The category in words, as the hover card names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Category::Interface => "function in / out",
+            Category::Control => "control flow",
+            Category::Function => "function",
+            Category::Expression => "expression",
+            Category::Variable => "variable",
+            Category::Statement => "statements",
+            Category::Type => "type",
+        }
+    }
+}
+
 impl Kind {
     pub fn category(self) -> Category {
         match self {

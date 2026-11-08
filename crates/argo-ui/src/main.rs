@@ -102,7 +102,13 @@ fn main() {
                 s.replay(usize::MAX);
                 hover(s, "uint32_t acc = 0");
             }),
-            ("snapshot", |s| *s = snapshot_from_env().unwrap_or_else(State::protocol_fixture)),
+            ("snapshot", |s| {
+                *s = snapshot_from_env().unwrap_or_else(State::protocol_fixture);
+                // Captures can show a hover card: `ARGO_HOVER` names the node by its title.
+                if let Ok(name) = std::env::var("ARGO_HOVER") {
+                    hover(s, &name);
+                }
+            }),
             ("interp-collapsed", |s| {
                 *s = State::load("interp");
                 s.toggle_group(0);

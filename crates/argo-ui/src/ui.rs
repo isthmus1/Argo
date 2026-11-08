@@ -32,44 +32,7 @@ const RUST_SOURCE: &[&str] = &[
 /// Canvas area not covered by floating panels: x, y, w, h.
 pub fn free_area(detail_open: bool) -> [f32; 4] {
     let right = if detail_open { DETAIL_W + 2.0 * M } else { M };
-    [M, 72.0, W - M - right, H - 72.0 - 2.0 * M - LEGEND_H]
-}
-
-const LEGEND_H: f32 = 32.0;
-
-/// What the marks mean, for the kinds actually on screen: wire and socket styles, header colours,
-/// and the language chip.
-fn legend(p: &Pal, s: &State) -> El {
-    use crate::model::{Category, Lang, Ty};
-    let item = |mark: El, what: &str| row().gap(6.0).items_center().child(mark).child(label(what, p.muted));
-    let glyph = |g: &str, c: Color| text(g).font(TextStyle::new(12.0, 700.0)).color(c);
-    let mut r = row().h(LEGEND_H).px(12.0).gap(16.0).items_center()
-        .child(item(glyph("◆──▶", p.ty(Ty::Exec)), "runs next"))
-        .child(item(glyph("◆┄┄▶", p.ty(Ty::Exec)), "back to loop"));
-    if s.view.wires.iter().any(|w| s.view.wire_ty(w) != Ty::Exec)
-        || s.view.nodes.iter().any(|n| n.ins.iter().chain(&n.outs).any(|p| p.ty != Ty::Exec))
-    {
-        r = r.child(item(glyph("●──▶", p.ty(Ty::U32)), "value"));
-    }
-    r = r.child(el().w(1.0).h(16.0).fill(p.panel_border));
-    for (c, what) in [
-        (Category::Interface, "function in / out"),
-        (Category::Control, "control flow"),
-        (Category::Statement, "statements"),
-        (Category::Variable, "variable"),
-        (Category::Function, "call"),
-        (Category::Expression, "expression"),
-        (Category::Type, "type"),
-    ] {
-        if s.view.nodes.iter().any(|n| n.kind.category() == c) {
-            r = r.child(item(el().size(14.0, 10.0).radius(3.0).fill(p.header(c)), what));
-        }
-    }
-    if s.view.nodes.iter().any(|n| n.lang == Lang::C) {
-        r = r.child(el().w(1.0).h(16.0).fill(p.panel_border))
-            .child(item(graph::lang_chip(p, Lang::C), "written in C"));
-    }
-    card(p).child(r)
+    [M, 72.0, W - M - right, H - 72.0 - M]
 }
 
 fn label(s: &str, c: Color) -> El {
@@ -89,8 +52,7 @@ pub fn view(p: &Pal, s: &State) -> El {
     let mut root = el().size(W, H)
         .child(graph::view(p, s, W, H).absolute(0.0, 0.0))
         .child(breadcrumb(p, s).absolute(M, M))
-        .child(status(p, s).pin(None, Some(M), Some(M), None))
-        .child(legend(p, s).absolute(M, H - M - LEGEND_H));
+        .child(status(p, s).pin(None, Some(M), Some(M), None));
     if let Some(item) = s.selected {
         root = root.child(info(p, s, item, true).0.w(DETAIL_W).absolute(W - M - DETAIL_W, 72.0));
     }
@@ -307,7 +269,9 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let c = describe::card(&s.view, i);
             let limit = if docked { usize::MAX } else { HOVER_PORTS };
             let mut body = col().gap(12.0)
-                .child(header(p, &n.title, graph::kind_glyph(n.kind), p.header(n.kind.category()), n.evidence, n.lang, &c.effects, (n.kind == crate::model::Kind::Group).then_some(n.members)));
+                .child(col().gap(4.0)
+                    .child(kicker(p, n.kind.category().name(), p.header(n.kind.category())))
+                    .child(header(p, &n.title, graph::kind_glyph(n.kind), p.header(n.kind.category()), n.evidence, n.lang, &c.effects, (n.kind == crate::model::Kind::Group).then_some(n.members))));
             if let Some(a) = activity(p, n.claim, n.evidence) {
                 body = body.child(a);
             }
@@ -344,7 +308,9 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let grp = &s.view.groups[g];
             let members: Vec<&crate::model::Node> = s.view.nodes.iter().filter(|n| n.group == Some(g)).collect();
             let mut body = col().gap(12.0)
-                .child(header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, &[], Some(members.len())));
+                .child(col().gap(4.0)
+                    .child(kicker(p, "node group", p.header(Category::Function)))
+                    .child(header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, &[], Some(members.len()))));
             if let Some(a) = activity(p, grp.claim, grp.evidence) {
                 body = body.child(a);
             }
@@ -369,6 +335,13 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             (shell(p, body, docked, p.header(Category::Function)), 80.0 + members.len().min(6) as f32 * 24.0)
         }
     }
+}
+
+/// What kind of node this is, in words, above the title: the header colour's meaning.
+fn kicker(p: &Pal, what: &str, tile: Color) -> El {
+    row().gap(6.0).items_center()
+        .child(el().size(8.0, 8.0).radius(2.0).fill(tile))
+        .child(text(what.to_uppercase()).font(LABEL).color(p.muted))
 }
 
 #[allow(clippy::too_many_arguments)]
