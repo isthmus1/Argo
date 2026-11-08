@@ -142,6 +142,13 @@ pub struct Group {
     pub claim: Option<Claim>,
 }
 
+/// Where a view node comes from: a node of the semantic graph, or a collapsed group.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Origin {
+    Node(usize),
+    Group(usize),
+}
+
 #[derive(Clone)]
 pub struct Graph {
     pub crumbs: Vec<String>,
@@ -154,11 +161,11 @@ pub struct Graph {
 impl Graph {
     /// The view graph: each collapsed group becomes one node whose pins are the wires that
     /// cross its frame. View state only; the semantic graph is untouched.
-    pub fn collapse(&self, collapsed: &[bool]) -> (Graph, Vec<Option<usize>>) {
+    pub fn collapse(&self, collapsed: &[bool]) -> (Graph, Vec<Origin>) {
         let n = self.nodes.len();
         let mut map: Vec<Option<usize>> = vec![None; n];
         let mut out = Graph { crumbs: self.crumbs.clone(), nodes: vec![], wires: vec![], groups: self.groups.clone(), selected_group: self.selected_group };
-        // view index -> original node (None for a collapsed group node)
+        // view index -> original node or collapsed group
         let mut origin = vec![];
         let mut group_node = vec![None; self.groups.len()];
         for (i, node) in self.nodes.iter().enumerate() {
@@ -171,26 +178,27 @@ impl Graph {
                             claim: grp.claim, outs: vec![], ins: vec![], group: None,
                             members: self.nodes.iter().filter(|n| n.group == Some(g)).count(),
                         });
-                        origin.push(None);
+                        origin.push(Origin::Group(g));
                         out.nodes.len() - 1
                     });
                     map[i] = Some(gi);
                 }
                 _ => {
                     out.nodes.push(node.clone());
-                    origin.push(Some(i));
+                    origin.push(Origin::Node(i));
                     map[i] = Some(out.nodes.len() - 1);
                 }
             }
         }
         let mut in_pins: Vec<Vec<(usize, usize)>> = vec![vec![]; out.nodes.len()];
         let mut out_pins: Vec<Vec<(usize, usize)>> = vec![vec![]; out.nodes.len()];
+        let folded = |v: usize| matches!(origin[v], Origin::Group(_));
         for w in &self.wires {
             let (a, b) = (map[w.from.0].expect("mapped"), map[w.to.0].expect("mapped"));
-            if a == b && origin[a].is_none() {
+            if a == b && folded(a) {
                 continue; // internal to a collapsed group
             }
-            let from = if origin[a].is_none() {
+            let from = if folded(a) {
                 let pins = &mut out_pins[a];
                 let idx = pins.iter().position(|&p| p == w.from).unwrap_or_else(|| {
                     pins.push(w.from);
@@ -202,7 +210,7 @@ impl Graph {
             } else {
                 (a, w.from.1)
             };
-            let to = if origin[b].is_none() {
+            let to = if folded(b) {
                 // One group input per external source value, however many members read it.
                 let pins = &mut in_pins[b];
                 let idx = pins.iter().position(|&p| p == w.from).unwrap_or_else(|| {
@@ -219,7 +227,7 @@ impl Graph {
         }
         // Exec pins first on collapsed nodes, keeping wire indices consistent.
         for (vi, node) in out.nodes.iter_mut().enumerate() {
-            if origin[vi].is_some() {
+            if matches!(origin[vi], Origin::Node(_)) {
                 continue;
             }
             for (pins, output) in [(&mut node.ins, false), (&mut node.outs, true)] {
@@ -244,6 +252,8 @@ impl Graph {
 pub const HEADER: f32 = 30.0;
 pub const ROW: f32 = 22.0;
 pub const BODY_PAD: f32 = 4.0;
+/// The expand/collapse button in a group's node header or frame title.
+pub const GROUP_BUTTON: f32 = 18.0;
 
 /// Body rows as (output index, input index). A leading exec input and exec output share the
 /// first row (UE's exec-on-top); remaining rows follow Blender: outputs, then inputs.
@@ -271,13 +281,13 @@ pub fn size(n: &Node) -> [f32; 2] {
         return [w, HEADER + 2.0];
     }
     // Header: padding, family glyph, title, then the language chip (and a collapsed group's
-    // member-count chip), each with its gap.
+    // member-count chip and expand button), each with its gap.
     let chip = match n.lang {
         Lang::None => 0.0,
         Lang::C => 16.0 + 7.0,
         Lang::Rust => 26.0 + 7.0,
     };
-    let count = if n.kind == Kind::Group { 34.0 + 7.0 } else { 0.0 };
+    let count = if n.kind == Kind::Group { 34.0 + 7.0 + GROUP_BUTTON + 7.0 } else { 0.0 };
     // Code headers are monospace (wider per character) — see `graph::header_font`.
     let per = if matches!(n.kind, Kind::GroupIn | Kind::GroupOut) { 6.9 } else { 7.7 };
     let title = 10.0 + 16.0 + 7.0 + text_w(&n.title, per) + chip + count + 10.0;

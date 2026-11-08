@@ -1,8 +1,9 @@
 //! Argo UI: a read-only visualization of agent work on a C program's graph.
 //!
 //! `cargo run -p argo-ui --release` opens the window on the protocol fixture: drag to pan,
-//! scroll or pinch to zoom, hover for details, click to select, double-click a frame or
-//! collapsed group to fold it, click a breadcrumb to go up a level, `F` to frame, `1`–`5` to
+//! scroll or pinch to zoom, hover for details, click to select, a frame's collapse button (or a
+//! double-click) folds a node group into one node and the node's expand button (or a
+//! double-click) opens it again, click a breadcrumb to go up a level, `F` to frame, `1`–`5` to
 //! switch mock scene, `6` for the protocol fixture. Headless:
 //! `-- --snap out.png --scene interp --theme dark`.
 //!
@@ -207,6 +208,16 @@ fn main() {
                 s.fit();
                 hover(s, "alu");
             }),
+            // Node groups both ways: as a frame, and collapsed to one node.
+            ("fixture-collapsed", |s| {
+                *s = State::load("fixture");
+                if let Some(g) = s.graph.groups.iter().position(|g| g.title == "step ∘ normalize") {
+                    s.collapse_group(g);
+                }
+                s.fit();
+            }),
+            ("protocol-module", |s| *s = State::protocol_module(false)),
+            ("protocol-module-open", |s| *s = State::protocol_module(true)),
         ],
         min_size: Some((ui::MIN_W, ui::MIN_H)),
         poll: Some(poll),
