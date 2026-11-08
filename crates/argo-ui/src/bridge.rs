@@ -35,10 +35,10 @@ fn kind(k: P) -> Kind {
         P::Switch | P::Dispatch(argo_protocol::DispatchKind::Switch) => Kind::Switch,
         P::CaseGroup => Kind::Case,
         P::Function | P::Call => Kind::Call,
-        P::Program | P::Module | P::MacroGroup => Kind::Group,
+        P::Program | P::Module => Kind::Group,
         P::Sequence | P::Scope | P::Fragment | P::Opaque => Kind::Region,
         P::Expression => Kind::Op,
-        P::Local | P::Constant | P::State | P::Macro => Kind::Local,
+        P::Local | P::Constant | P::State => Kind::Local,
         P::Assign => Kind::Set,
         P::Type(_) => Kind::Type,
     }
@@ -130,7 +130,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     // Control flow is never framed: an opened `for`/`if`/`switch`/block lays its contents out
     // flat, and the construct's own node (the dispatch) wires straight to them, as in UE5.
     let drawn = |f: NodeId| {
-        let group = ix.node(f).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program | P::MacroGroup));
+        let group = ix.node(f).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program));
         group || snap.status(f).is_some_and(|s| s.collapsed)
     };
     let outermost: HashMap<NodeId, Option<NodeId>> = {

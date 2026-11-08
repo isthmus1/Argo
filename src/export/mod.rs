@@ -31,6 +31,20 @@ const FILE: FileId = FileId(1);
 
 /// Export one translation unit's syntax graph as a draft protocol revision plus its source.
 pub fn to_protocol(graph: &Graph, ast: &Ast, path: &str) -> (argo_protocol::Graph, SourceFile) {
+    let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
+    to_protocol_modules(graph, ast, path, "program", &|_| Some(file_name.clone()))
+}
+
+/// Export a syntax graph parsed from one preprocessed text that combines several files: each
+/// top-level item goes to the module `module_of` names for its start offset (its original file),
+/// and items it maps to `None` (system headers) are left out. Modules appear in source order.
+pub fn to_protocol_modules(
+    graph: &Graph,
+    ast: &Ast,
+    path: &str,
+    program: &str,
+    module_of: &dyn Fn(u32) -> Option<String>,
+) -> (argo_protocol::Graph, SourceFile) {
     let text = String::from_utf8_lossy(&graph.source).into_owned();
     let source = SourceFile::new(FILE, path, text);
     let mut b = GraphBuilder::new(GraphRevision {
@@ -41,10 +55,24 @@ pub fn to_protocol(graph: &Graph, ast: &Ast, path: &str) -> (argo_protocol::Grap
         state: RevisionState::Draft,
     });
     b.file(source.file_ref());
-    let program = b.node(None, NodeKind::Program, "program");
-    let file_name = path.rsplit('/').next().unwrap_or(path);
-    let module = b.node(Some(program), NodeKind::Module, file_name);
-    b.provenance(module, Provenance::at(range(0, graph.source.len() as u32)));
+    let program = b.node(None, NodeKind::Program, program);
+
+    // Roots per module, and each module's extent (the hull of its items, so they nest in it).
+    let mut order: Vec<String> = vec![];
+    let mut roots: HashMap<String, (Vec<usize>, u32, u32)> = HashMap::new();
+    for &root in &graph.roots {
+        let span = graph.nodes[root].span;
+        let Some(name) = module_of(span.lo) else {
+            continue;
+        };
+        let entry = roots.entry(name.clone()).or_insert_with(|| {
+            order.push(name);
+            (vec![], u32::MAX, 0)
+        });
+        entry.0.push(root);
+        entry.1 = entry.1.min(span.lo);
+        entry.2 = entry.2.max(span.hi);
+    }
 
     let functions = ast
         .walk()
@@ -56,8 +84,13 @@ pub fn to_protocol(graph: &Graph, ast: &Ast, path: &str) -> (argo_protocol::Grap
         b,
         functions,
     };
-    for &root in &graph.roots {
-        ex.node(root, module);
+    for name in order {
+        let (items, lo, hi) = &roots[&name];
+        let module = ex.b.node(Some(program), NodeKind::Module, &name);
+        ex.b.provenance(module, Provenance::at(range(*lo, *hi)));
+        for &root in items {
+            ex.node(root, module);
+        }
     }
     (ex.b.finish(), source)
 }

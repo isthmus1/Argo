@@ -1,7 +1,8 @@
 //! C syntax trees and keyword-template matching for the Argo parser prototype.
 //!
-//! Syntax nodes are deliberately separate from future UI/graph nodes. This
-//! crate does not yet preprocess C or resolve names, types, or graph interfaces.
+//! Syntax nodes are deliberately separate from future UI/graph nodes. The parser reads plain C:
+//! [`project`] runs the system preprocessor first, so `#include`s and macros are already expanded.
+//! Names, types and graph interfaces are not resolved yet.
 
 pub mod ast;
 pub mod c_node;
@@ -10,6 +11,7 @@ pub mod export;
 pub mod graph;
 pub mod lexer;
 pub mod parser;
+pub mod project;
 pub mod report;
 pub mod source;
 pub mod templates;

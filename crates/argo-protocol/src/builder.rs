@@ -29,8 +29,6 @@ pub fn default_template(kind: NodeKind) -> TemplateId {
         Type(TypeKind::Enum) => "c.enum",
         Type(TypeKind::Alias) => "c.typedef",
         State => "c.variable",
-        Macro => "c.macro",
-        MacroGroup => "c.macro_call",
         Branch => "c.if",
         Loop(LoopKind::For) => "c.for",
         Loop(LoopKind::While) => "c.while",

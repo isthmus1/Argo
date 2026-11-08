@@ -10,3 +10,5 @@ description = "Argo control-plane client: node-graph canvas, inspectors and live
 argo-protocol = { path = "../argo-protocol" }
 rune-ui.workspace = true
 serde_json.workspace = true
+# The C front end (package `Argo`, library `main`): preprocess, parse and export a project.
+argo-c = { package = "Argo", path = "../.." }

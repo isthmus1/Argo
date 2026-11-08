@@ -7,6 +7,8 @@ use crate::graph::GraphNode;
 use crate::{CNodeRole, CNodeType};
 
 const SPECIFIERS: &[&str] = &["static", "inline", "extern", "__inline", "__inline__"];
+/// Labels the function node already uses for its exec pins.
+const EXEC_LABELS: &[&str] = &["run", "then"];
 
 impl Exporter<'_> {
     pub(super) fn signature(&mut self, n: &GraphNode, node: NodeId) {
@@ -44,10 +46,17 @@ impl Exporter<'_> {
                 }
                 None => (format!("arg{}", p.span.lo), text.trim().to_string()),
             };
-            self.b.pin(
-                node,
-                PinSpec::param(&pname, ValueType::Spelled { c: spelled }),
-            );
+            let mut spec = PinSpec::param(&pname, ValueType::Spelled { c: spelled.clone() });
+            // A parameter named like an exec pin (`run`, `then`) would repeat that label on the
+            // same side; spell it as a declaration instead.
+            if EXEC_LABELS.contains(&pname.as_str()) {
+                spec.label = if spelled.ends_with('*') {
+                    format!("{spelled}{pname}")
+                } else {
+                    format!("{spelled} {pname}")
+                };
+            }
+            self.b.pin(node, spec);
         }
         if !ret.is_empty() && ret != "void" {
             self.b

@@ -106,6 +106,22 @@ Source modules stay below 100 lines; simple keyword recognizers are intentionall
 shorter. Focused checks: `cargo fmt --all --check`, `cargo test --locked --lib
 --tests`, and `cargo clippy --locked --all-targets -- -D warnings`.
 
+### Open a whole C project
+
+```sh
+# A git reference (cloned into a temporary folder) or a local directory:
+cargo run --release -p argo-ui -- https://example.com/project.git#v1.0 -DNAME=value
+cargo run --release -- --protocol-json ~/src/project > target/project.json
+```
+
+The parser reads plain C, so `src/project/` runs the system preprocessor (`cc -E`, or
+`$CC`) first: includes are pasted in and macros expanded. Each `.c` file is checked on
+its own; the ones that preprocess and parse are combined into one translation unit, and
+line markers put every function back under its original file. Files that fail (missing
+headers, undefined build macros) are listed with the reason instead of failing the
+project. `-D`/`-I` flags come from the Makefile's `CFLAGS`/`CPPFLAGS`/`DEFINES` lines,
+then from the command line or the app's Open dialog (Ctrl+O).
+
 ### Export a syntax graph
 
 ```sh

@@ -64,14 +64,12 @@ impl SourceRange {
     }
 }
 
-/// Where a node's code came from (§5.2). Code produced by a macro maps to its call site; code in a
-/// template or fragment file maps to that file plus the instantiation that produced it.
+/// Where a node's code came from (§5.2): a range of the preprocessed source it was parsed from,
+/// plus the template/fragment instantiation that produced it, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// Spelling location.
     pub range: SourceRange,
-    /// Macro call site, when the code came from an expansion.
-    pub expansion: Option<SourceRange>,
     /// The template/fragment instantiation, when the code came from one.
     pub instantiation: Option<InstanceId>,
     /// Structural sub-ranges: condition, body, arms and so on.
@@ -82,7 +80,6 @@ impl Provenance {
     pub fn at(range: SourceRange) -> Self {
         Self {
             range,
-            expansion: None,
             instantiation: None,
             parts: Vec::new(),
         }

@@ -47,7 +47,10 @@ impl Exporter<'_> {
     /// A case group's labels: those that start it, and those control falls onto partway through
     /// (`case 0: case 1: x++; case 2: …` starts at 0 and 1; 2 enters after `x++`).
     fn case_labels(&self, n: &GraphNode) -> (Vec<String>, Vec<String>) {
-        let body = n.children.first().map_or(u32::MAX, |&c| self.g.nodes[c].span.lo);
+        let body = n
+            .children
+            .first()
+            .map_or(u32::MAX, |&c| self.g.nodes[c].span.lo);
         let (mut leading, mut inner) = (Vec::new(), Vec::new());
         for p in &n.parts {
             let label = match p.role {
@@ -55,7 +58,11 @@ impl Exporter<'_> {
                 CNodeRole::DefaultLabel => "default".into(),
                 _ => continue,
             };
-            if p.span.lo < body { leading.push(label) } else { inner.push(label) }
+            if p.span.lo < body {
+                leading.push(label)
+            } else {
+                inner.push(label)
+            }
         }
         (leading, inner)
     }
@@ -83,7 +90,11 @@ impl Exporter<'_> {
         let (leading, inner) = self.case_labels(n);
         match inner.is_empty() {
             true => Self::join_labels(&leading),
-            false => format!("{} · {} joins inside", Self::join_labels(&leading), Self::join_labels(&inner)),
+            false => format!(
+                "{} · {} joins inside",
+                Self::join_labels(&leading),
+                Self::join_labels(&inner)
+            ),
         }
     }
 
@@ -92,7 +103,11 @@ impl Exporter<'_> {
         let (leading, inner) = self.case_labels(n);
         match inner.is_empty() {
             true => format!("{}:", Self::join_labels(&leading)),
-            false => format!("{}: … {}:", Self::join_labels(&leading), Self::join_labels(&inner)),
+            false => format!(
+                "{}: … {}:",
+                Self::join_labels(&leading),
+                Self::join_labels(&inner)
+            ),
         }
     }
 
@@ -123,7 +138,9 @@ impl Exporter<'_> {
                 part(CNodeRole::Condition),
                 part(CNodeRole::Step)
             ),
-            (_, NodeKind::Loop(LoopKind::While)) => format!("while ({})", part(CNodeRole::Condition)),
+            (_, NodeKind::Loop(LoopKind::While)) => {
+                format!("while ({})", part(CNodeRole::Condition))
+            }
             (_, NodeKind::Loop(LoopKind::DoWhile)) => {
                 format!("do … while ({})", part(CNodeRole::Condition))
             }
@@ -150,7 +167,10 @@ fn collapse(text: &str) -> String {
 
 fn clip(text: &str, max: usize) -> String {
     if text.chars().count() > max {
-        format!("{}…", text.chars().take(max - 1).collect::<String>().trim_end())
+        format!(
+            "{}…",
+            text.chars().take(max - 1).collect::<String>().trim_end()
+        )
     } else {
         text.to_string()
     }

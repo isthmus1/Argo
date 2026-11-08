@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// Template catalog v1 (§5.3), plus the program/module levels above functions (§5.5), the
 /// statement-level detail nodes drawn inside a sequence, and the interface nodes synthesized
-/// inside every opened container.
+/// inside every opened container. Sources are preprocessed before parsing, so macros are already
+/// expanded and have no nodes of their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "of")]
 pub enum NodeKind {
@@ -18,10 +19,6 @@ pub enum NodeKind {
     Type(TypeKind),
     /// A global or file/function-static variable: one state pin.
     State,
-    /// Object-like or function-like macro (compile-time).
-    Macro,
-    /// A code-generating macro call (A.6.6): one child per generated symbol.
-    MacroGroup,
 
     // Statement regions: pins come from live-in/live-out and control-exit analysis.
     Branch,
@@ -93,7 +90,7 @@ pub enum NodeFamily {
     Interface,
     /// Branches, loops, switches, their arms and dispatch nodes.
     Control,
-    /// Functions, call sites, macro groups and modules.
+    /// Functions, call sites and modules.
     Function,
     /// Sequences, scopes, fragments: straight-line statement regions.
     Statement,
@@ -101,7 +98,6 @@ pub enum NodeFamily {
     /// Locals, assignments, constants and global state.
     Variable,
     Type,
-    Macro,
     Opaque,
 }
 
@@ -111,12 +107,11 @@ impl NodeKind {
         match self {
             GroupInput | GroupOutput => NodeFamily::Interface,
             Branch | Loop(_) | Switch | CaseGroup | Dispatch(_) => NodeFamily::Control,
-            Program | Module | Function | MacroGroup | Call => NodeFamily::Function,
+            Program | Module | Function | Call => NodeFamily::Function,
             Scope | Sequence | Fragment => NodeFamily::Statement,
             Expression => NodeFamily::Expression,
             State | Local | Assign | Constant => NodeFamily::Variable,
             Type(_) => NodeFamily::Type,
-            Macro => NodeFamily::Macro,
             Opaque => NodeFamily::Opaque,
         }
     }
@@ -125,10 +120,7 @@ impl NodeKind {
     /// but only when every effect is `pure` (§5.4); that is checked per node, not per kind.
     pub fn is_data_only(self) -> bool {
         use NodeKind::*;
-        matches!(
-            self,
-            Type(_) | State | Macro | Expression | Constant | Local
-        )
+        matches!(self, Type(_) | State | Expression | Constant | Local)
     }
 
     /// Kinds that sit on the exec chain and need exactly one exec entry.
@@ -158,7 +150,6 @@ impl NodeKind {
             Program
                 | Module
                 | Function
-                | MacroGroup
                 | Branch
                 | Loop(_)
                 | Switch
@@ -169,14 +160,10 @@ impl NodeKind {
         )
     }
 
-    /// Opened containers wire their children through group input/output nodes. Program, module
-    /// and macro-group levels connect top-level items by relations instead (§5.5).
+    /// Opened containers wire their children through group input/output nodes. Program and
+    /// module levels connect top-level items by relations instead (§5.5).
     pub fn has_interior_interface(self) -> bool {
-        self.is_container()
-            && !matches!(
-                self,
-                NodeKind::Program | NodeKind::Module | NodeKind::MacroGroup
-            )
+        self.is_container() && !matches!(self, NodeKind::Program | NodeKind::Module)
     }
 
     pub fn is_interface(self) -> bool {

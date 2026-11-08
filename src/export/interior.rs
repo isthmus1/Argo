@@ -21,16 +21,13 @@ impl Outputs {
     pub(super) fn to(&mut self, b: &mut GraphBuilder, from: (NodeId, &str), exit: &'static str) {
         let values: &[&str] = if self.function { &[key::RETURN] } else { &[] };
         let (container, function) = (self.container, self.function);
-        let go = *self
-            .by_exit
-            .entry(exit)
-            .or_insert_with(|| {
-                let go = b.group_output(container, exit, values);
-                if function {
-                    typed_result(b, go);
-                }
-                go
-            });
+        let go = *self.by_exit.entry(exit).or_insert_with(|| {
+            let go = b.group_output(container, exit, values);
+            if function {
+                typed_result(b, go);
+            }
+            go
+        });
         b.exec(from, (go, exit));
     }
 
@@ -90,12 +87,20 @@ impl Exporter<'_> {
     /// Inside a function, its input reads like the parameter list: `struct ram *r`.
     fn declare_params(&mut self, gi: NodeId) {
         for spec in self.b.specs(gi) {
-            let (Some(name), Some(ty)) = (spec.key.as_str().strip_prefix("param."), spec.kind.value_type()) else {
+            let (Some(name), Some(ty)) = (
+                spec.key.as_str().strip_prefix("param."),
+                spec.kind.value_type(),
+            ) else {
                 continue;
             };
             let ty = ty.c();
-            let label = if ty.ends_with('*') { format!("{ty}{name}") } else { format!("{ty} {name}") };
-            self.b.relabel(&argo_protocol::PinRef::new(gi, spec.key.clone()), label);
+            let label = if ty.ends_with('*') {
+                format!("{ty}{name}")
+            } else {
+                format!("{ty} {name}")
+            };
+            self.b
+                .relabel(&argo_protocol::PinRef::new(gi, spec.key.clone()), label);
         }
     }
 

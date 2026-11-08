@@ -1,5 +1,6 @@
 //! Floating chrome over a full-bleed canvas. Read-only: the UI visualizes agent work recorded in
-//! SpacetimeDB; it offers navigation and inspection, never editing.
+//! SpacetimeDB; it offers navigation and inspection, never editing. Opening a project and
+//! requesting a rewrite live in `dialogs`.
 
 use crate::app::{Item, MARGIN, State};
 use crate::describe::{self, Card};
@@ -9,13 +10,13 @@ use crate::palette::Pal;
 use rune_ui::{Color, Cursor, El, Family, LineCap, Path, Shape, TextStyle, canvas, col, el, row, text};
 
 pub const MONO: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Named("JetBrains Mono, DejaVu Sans Mono"));
-const UI: TextStyle = TextStyle::new(11.5, 450.0);
-const UI_STRONG: TextStyle = TextStyle::new(11.5, 600.0);
-const LABEL: TextStyle = TextStyle::new(10.0, 650.0).tracking(0.4);
+pub(crate) const UI: TextStyle = TextStyle::new(11.5, 450.0);
+pub(crate) const UI_STRONG: TextStyle = TextStyle::new(11.5, 600.0);
+pub(crate) const LABEL: TextStyle = TextStyle::new(10.0, 650.0).tracking(0.4);
 
 pub const W: f32 = 1600.0;
 pub const H: f32 = 920.0;
-const M: f32 = 16.0;
+pub(crate) const M: f32 = 16.0;
 const DETAIL_W: f32 = 380.0;
 const HOVER_W: f32 = 340.0;
 
@@ -30,12 +31,16 @@ const RUST_SOURCE: &[&str] = &[
 ];
 
 /// Canvas area not covered by floating panels: x, y, w, h.
-pub fn free_area(detail_open: bool) -> [f32; 4] {
+pub fn free_area(detail_open: bool, explorer: bool) -> [f32; 4] {
     let right = if detail_open { DETAIL_W + 2.0 * M } else { M };
-    [M, 72.0, W - M - right, H - 72.0 - M]
+    let left = if explorer { M + EXPLORER_W + M } else { M };
+    [left, 72.0, W - left - right, H - 72.0 - M]
 }
 
-fn label(s: &str, c: Color) -> El {
+/// Width of the project explorer docked on the left.
+pub const EXPLORER_W: f32 = 290.0;
+
+pub(crate) fn label(s: &str, c: Color) -> El {
     text(s).font(UI).color(c).single_line()
 }
 
@@ -43,7 +48,7 @@ fn mono(s: &str, c: Color) -> El {
     text(s).font(MONO).color(c)
 }
 
-fn card(p: &Pal) -> El {
+pub(crate) fn card(p: &Pal) -> El {
     col().fill(p.panel).radius(RADIUS).border(1.0, p.panel_border)
         .shadow(8.0, 30.0, p.shadow.alpha(if p.dark { 0.5 } else { 0.12 }))
 }
@@ -52,7 +57,10 @@ pub fn view(p: &Pal, s: &State) -> El {
     let mut root = el().size(W, H)
         .child(graph::view(p, s, W, H).absolute(0.0, 0.0))
         .child(breadcrumb(p, s).absolute(M, M))
-        .child(status(p, s).pin(None, Some(M), Some(M), None));
+        .child(row().gap(8.0).child(crate::dialogs::toolbar(p, s)).child(status(p, s)).pin(None, Some(M), Some(M), None));
+    if s.project.is_some() {
+        root = root.child(crate::dialogs::explorer(p, s).absolute(M, 72.0));
+    }
     if let Some(item) = s.selected {
         root = root.child(info(p, s, item, true).0.w(DETAIL_W).absolute(W - M - DETAIL_W, 72.0));
     }
@@ -61,6 +69,9 @@ pub fn view(p: &Pal, s: &State) -> El {
         let w = hover_w(s, item);
         let [x, y] = hover_anchor(s, item, w, h);
         root = root.child(card.w(w).absolute(x, y));
+    }
+    if s.modal.is_some() {
+        root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
     }
     root
 }
@@ -187,7 +198,7 @@ fn hover_w(s: &State, item: Item) -> f32 {
 fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> [f32; 2] {
     let [x, y, w, h] = item_rect(s, item);
     let gap = 14.0;
-    let [fx, fy, fw, fh] = free_area(s.selected.is_some());
+    let [fx, fy, fw, fh] = free_area(s.selected.is_some(), s.project.is_some());
     let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - card_w).max(fx)), cy.clamp(fy, (fy + fh - card_h).max(fy))];
     let candidates = [
         clamp(x + w + gap, y),

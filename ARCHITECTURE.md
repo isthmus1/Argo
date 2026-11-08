@@ -201,6 +201,8 @@ Two layers with separate jobs:
 
 Neither layer is enough alone. The inventory can't see inside function bodies, and it can't tell a local from a global or a macro constant. The AST can't drive edits, because preprocessing loses the exact source text.
 
+**Preprocessing (decided 2026-11-08; implemented in `src/project/`):** the configured layer reads *preprocessed* C. The system preprocessor (`cc -E`) runs first: `#include` is copy-paste and every macro is expanded, so the graph has no macro nodes and the parser never sees a directive. A project's `.c` files are each checked alone (preprocess, parse, build); those that pass are combined into one input of `#include "<file>.c"` lines and preprocessed once into a single translation unit. Its line markers map every top-level item back to its original file, which becomes its `Module`; code from outside the project (system headers) is dropped. Flags come from the Makefile's `CFLAGS`/`CPPFLAGS`/`DEFINES` lines plus the caller's. Consequences: provenance points into the combined preprocessed text, not the original file; one combined unit has one configuration, so per-object defines (TinyEMU's `riscv_cpu.c` built three times with `-DMAX_XLEN=32/64/128`) need a chosen value; macros defined in one `.c` file are visible to the files combined after it.
+
 **Parser choice (open; recommendation recorded):** use Clang's AST for the configured layer, either through libclang bindings or `clang -Xclang -ast-dump=json`, run with the same defines and include paths as the build.
 
 - *Why:* it resolves every name to its declaration, which live-in/live-out analysis (5.4) needs. It provides types for pins. It expands TinyEMU's `glue()` names, template files and in-body fragment includes into separate subtrees per instance. It also reports spelling and expansion locations for mapping back to blocks.
@@ -241,8 +243,7 @@ pub struct Expansion {
 | | `enum` | Type, variants as pins | — |
 | | `typedef` | Type alias | — |
 | | Global or file-static variable | State | Non-trivial initializer |
-| | Object-like or function-like macro | Macro (compile-time) | — |
-| | Code-generating macro call (A.6.6) | Group | One node per generated symbol |
+| | Macros, code-generating macro calls | No node: expanded by the preprocessor first (5.2); generated functions appear as ordinary functions | — |
 | | Prototype / `extern` declaration | No node; an edge target | — |
 | Statement | `if`, `if/else`, `if / else if / else` | Branch region | One child per arm |
 | | `for`, `while`, `do/while` | Loop region | Body; init, condition and step stay on the loop |

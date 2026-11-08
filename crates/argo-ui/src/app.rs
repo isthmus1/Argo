@@ -8,6 +8,7 @@ use argo_protocol::{NodeId, NodeKind, Snapshot, Update, fixture};
 
 use crate::bridge;
 use crate::layout::{self, Placed};
+use crate::project;
 use crate::model::{Evidence, Graph, Kind, Lang};
 use crate::scenes;
 use crate::ui;
@@ -16,8 +17,9 @@ use crate::ui;
 pub const MARGIN: f32 = 40.0;
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 2.0;
-/// The default view never zooms out past this; larger graphs pan instead.
-const READABLE_ZOOM: f32 = 0.5;
+/// The default view never zooms out past this; larger graphs pan instead. Below about this zoom
+/// headers and pin labels are too small to read.
+const READABLE_ZOOM: f32 = 0.9;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
@@ -56,6 +58,11 @@ pub struct State {
     pub online: bool,
     /// Set when the graph comes from an `argo-protocol` snapshot rather than a seeded mock.
     pub live: Option<Live>,
+    /// An opened C project, with its file/function index.
+    pub project: Option<project::Project>,
+    pub forms: project::Forms,
+    pub modal: Option<project::Modal>,
+    pub loader: Option<project::Loader>,
     next_event: f64,
     step: usize,
 }
@@ -78,6 +85,7 @@ impl State {
         let mut s = State {
             scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![] },
             cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None, next_event: 4.0, step: 0,
+            project: None, forms: project::Forms::default(), modal: None, loader: None,
         };
         s.relayout();
         s.fit();
@@ -153,7 +161,7 @@ impl State {
     }
 
     /// Re-derive the semantic graph from the protocol snapshot (live scenes only).
-    fn reproject(&mut self) {
+    pub(crate) fn reproject(&mut self) {
         let Some(live) = &mut self.live else { return };
         let p = bridge::project(&live.snap, live.container, &live.open);
         live.origin = p.origin;
@@ -163,7 +171,7 @@ impl State {
     }
 
     /// Rebuild the view graph and its layout after a structural view change (collapse/expand).
-    fn relayout(&mut self) {
+    pub(crate) fn relayout(&mut self) {
         self.view = self.graph.collapse(&self.collapsed).0;
         self.placed = layout::layout(&self.view);
     }
@@ -177,7 +185,7 @@ impl State {
     pub fn fit_all(&mut self) {
         let [_, _, bw, bh] = self.placed.bounds;
         let (ww, wh) = (bw + 2.0 * MARGIN, bh + 2.0 * MARGIN);
-        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some());
+        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some(), self.project.is_some());
         let zoom = (vw / ww).min(vh / wh).clamp(MIN_ZOOM, 1.25);
         self.cam.zoom = zoom;
         self.cam.pan = [vx + (vw - ww * zoom) / 2.0, vy + (vh - wh * zoom) / 2.0];
@@ -199,7 +207,7 @@ impl State {
             return;
         }
         // Start where the program starts (reading order); the far edge fades to show more.
-        let [vx, vy, _, vh] = ui::free_area(self.selected.is_some());
+        let [vx, vy, _, vh] = ui::free_area(self.selected.is_some(), self.project.is_some());
         let [_, _, _, bh] = self.placed.bounds;
         let wh = (bh + 2.0 * MARGIN) * READABLE_ZOOM;
         self.cam.zoom = READABLE_ZOOM;
@@ -218,7 +226,7 @@ impl State {
     pub fn tile(&mut self, zoom: f32, col: usize, row: usize) {
         let [_, _, bw, bh] = self.placed.bounds;
         let (ww, wh) = ((bw + 2.0 * MARGIN) * zoom, (bh + 2.0 * MARGIN) * zoom);
-        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some());
+        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some(), self.project.is_some());
         let median = |i: usize| {
             let mut v: Vec<f32> = self.placed.size.iter().map(|s| s[i]).collect();
             v.sort_by(f32::total_cmp);
@@ -263,7 +271,7 @@ impl State {
     pub fn select(&mut self, item: Item) {
         self.selected = Some(item);
         if let Item::Node(i) = item {
-            let [vx, _, vw, _] = ui::free_area(true);
+            let [vx, _, vw, _] = ui::free_area(true, self.project.is_some());
             let [x, _, w, _] = self.screen_rect(i);
             let limit = vx + vw - 48.0;
             if x + w > limit {
