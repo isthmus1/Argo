@@ -1,11 +1,13 @@
-//! Argo UI: a read-only visualization of agent work recorded in SpacetimeDB.
+//! Argo UI: a read-only visualization of agent work on a C program's graph.
 //!
-//! `cargo run -p argo-ui --release` opens the window: drag to pan, scroll or pinch to zoom, hover
-//! for details, click to select, double-click a frame or collapsed group to fold it, `F` to
-//! frame, `1`–`5` to switch mock scene, `6` for the protocol fixture. Headless:
+//! `cargo run -p argo-ui --release` opens the window on the protocol fixture: drag to pan,
+//! scroll or pinch to zoom, hover for details, click to select, double-click a frame or
+//! collapsed group to fold it, click a breadcrumb to go up a level, `F` to frame, `1`–`5` to
+//! switch mock scene, `6` for the protocol fixture. Headless:
 //! `-- --snap out.png --scene interp --theme dark`.
 //!
-//! Protocol data: scene `protocol` replays `argo_protocol::fixture` live. `ARGO_SNAPSHOT=x.json`
+//! Protocol data: scene `protocol` replays `argo_protocol::fixture`'s recorded updates (the
+//! default with no arguments). `ARGO_SNAPSHOT=x.json`
 //! (from `cargo run -- --protocol-json x.c`) opens a snapshot file instead; `ARGO_FUNCTION` picks
 //! the function shown.
 //!
@@ -89,7 +91,9 @@ fn init() -> State {
         }
     }
     let Some(spec) = spec else {
-        return snapshot_from_env().unwrap_or_else(|| State::load("fixture"));
+        // Real protocol data by default, so the breadcrumb is a hierarchy to navigate; the
+        // mock scenes stay on keys 1–5 and `--scene`.
+        return snapshot_from_env().unwrap_or_else(State::protocol_fixture);
     };
     let mut s = State::load("fixture");
     project::prefill(&mut s.forms, &spec, &flags);
