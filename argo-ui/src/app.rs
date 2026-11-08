@@ -132,6 +132,8 @@ pub struct State {
     pub db: Option<db::Link>,
     /// Whether the subscription is connected.
     pub online: bool,
+    /// Whether the top bar's worker list is folded away to the right, leaving one control.
+    pub workers_folded: bool,
     /// Whether the camera has been fitted to the real window size yet.
     sized: bool,
 }
@@ -272,7 +274,7 @@ impl State {
         let mut s = State {
             view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![], generation: 0 },
             cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None,
-            project: None, forms: project::Forms::default(), db: None,
+            project: None, forms: project::Forms::default(), db: None, workers_folded: false,
             // A state built after the window's first layout already knows its size.
             sized: ui::viewport() != [ui::W, ui::H],
         };

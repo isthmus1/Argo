@@ -365,14 +365,22 @@ pub(crate) fn reveal(s: &mut State, item: Item) {
     s.cam.pan[1] += place(y, h, fy, fh);
 }
 
+/// How many worker avatars the bar shows before it counts the rest: a pool of 64 would push the
+/// bar off the window, and the fold control is there for the ones it leaves out.
+const AVATARS_SHOWN: usize = 12;
+
 /// Worker presence (click one to go to its work), framing and appearance. The data source is a
-/// passive chip in the breadcrumb, not here among the buttons.
+/// passive chip in the breadcrumb, not here among the buttons. The list folds away to the right,
+/// into one control carrying the count, so the bar keeps its width however many workers claim.
 fn status(p: &Pal, s: &State) -> El {
     let sep = || el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0);
     let mut r = row();
     let workers = workers(s);
     let any_worker = !workers.is_empty();
-    for (k, (worker, active, title, item)) in workers.into_iter().enumerate() {
+    let count = workers.len();
+    let rest = count.saturating_sub(AVATARS_SHOWN);
+    let shown = if s.workers_folded { 0 } else { AVATARS_SHOWN };
+    for (k, (worker, active, title, item)) in workers.into_iter().take(shown).enumerate() {
         // Hovering shows an accent ring round the avatar: a press goes to the worker's item.
         let o = AVATAR + 2.0 * HOVER_RING_GAP;
         let hover_ring = el().size(o, o).radius(o / 2.0).border(HOVER_RING, p.accent).group_opacity(0.0, 1.0)
@@ -387,6 +395,14 @@ fn status(p: &Pal, s: &State) -> El {
             None => b.cursor(Cursor::Default),
         });
     }
+    if rest > 0 && !s.workers_folded {
+        r = r.child(el().h(AVATAR).px(7.0).radius(AVATAR / 2.0).center().fill(p.code_bg)
+            .help(format!("{rest} more worker(s) claiming"))
+            .child(label(&format!("+{rest}"), p.muted)));
+    }
+    if any_worker {
+        r = r.child(worker_fold(p, s.workers_folded, count));
+    }
     let dark = p.dark;
     if any_worker {
         r = r.child(sep());
@@ -396,6 +412,31 @@ fn status(p: &Pal, s: &State) -> El {
         .child(icon_button(p, canvas(theme_icon(p, dark)).size(14.0, 14.0), if dark { "Switch to light mode" } else { "Switch to dark mode" })
             .key("theme").on_press(move |_: &mut State| set_theme(Some(!dark))));
     bar(p, r).key("status")
+}
+
+/// The worker list's fold control, at the right end of it: a chevron pointing the way the list
+/// goes (right to fold away, left to bring back), counting the claims while it is folded.
+fn worker_fold(p: &Pal, folded: bool, count: usize) -> El {
+    let tip = if folded {
+        format!("Show {count} worker(s)")
+    } else {
+        "Fold the worker list away".to_string()
+    };
+    let mut content = row().gap(5.0).items_center().child(canvas(chevron(p, !folded)).size(14.0, 14.0));
+    if folded {
+        content = content.child(label(&count.to_string(), p.muted));
+    }
+    el().h(CONTROL_H).min_w(CONTROL_H).px(6.0).radius(CONTROL_R).center()
+        .hover(p.code_bg).cursor(Cursor::Pointer).help(tip)
+        .key("workers-fold")
+        .on_press(|s: &mut State| s.workers_folded = !s.workers_folded)
+        .child(content)
+}
+
+/// A chevron in a 14-point box, pointing right or left.
+fn chevron(p: &Pal, right: bool) -> Shape {
+    let (near, far) = if right { (5.0, 9.5) } else { (9.5, 5.0) };
+    Shape::new().stroke_path(&Path::new().move_to([near, 3.5]).line_to([far, 7.0]).line_to([near, 10.5]), 1.6, LineCap::Round, p.muted)
 }
 
 /// The appearance a click switches to: a moon in light mode, a sun in dark mode.
