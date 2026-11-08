@@ -20,14 +20,21 @@ const MAX_ZOOM: f32 = 2.0;
 /// The zoom the default view prefers when the graph does not fit the readable band: node titles
 /// and pin labels at their natural size (about 11 px).
 const READABLE_ZOOM: f32 = 1.0;
-/// The readable band's floor: the default view frames the whole graph down to this zoom, and an
-/// overflowing graph's view searches down to it for more of its goals.
+/// The readable band's floor: an overflowing graph's view searches down to this zoom for more of
+/// its goals.
 const FIT_FLOOR: f32 = 0.85;
-/// The readable band's ceiling: framing never magnifies past this, so a small graph in a large
-/// window keeps node text near the chrome's type size.
+/// The readable band's ceiling in windows up to [`WIDE`] points wide: framing never magnifies
+/// past this, so a small graph keeps node text near the chrome's type size.
 const FIT_MAX: f32 = 1.25;
-/// Below the band, down to this zoom, only to show a selection together with all of its upstream
-/// context back to the graph's entry (small windows beside the details panel).
+/// Window width past which the framing ceiling grows from [`FIT_MAX`], reaching [`WIDE_MAX`] at
+/// 2560 points, so a small graph in a large window does not sit small amid wide margins.
+const WIDE: f32 = 1800.0;
+const WIDE_MAX: f32 = 1.6;
+/// Share of the free area's limiting axis a small graph fills under the grown ceiling.
+const WIDE_FILL: f32 = 0.7;
+/// The default view frames the whole graph down to this zoom. Below the readable band, the view
+/// of an overflowing graph also goes down to it, but only to show the selection with its claimed
+/// and failing items, or with its whole upstream context (small windows beside the details panel).
 const CONTEXT_FLOOR: f32 = 0.72;
 /// Gap between the free canvas area's edge and content aligned to it.
 const EDGE_PAD: f32 = 24.0;
@@ -152,38 +159,62 @@ impl Live {
 struct Score {
     /// The selection shows whole in the padded free area, clear of the overview card.
     selection: bool,
-    /// No claimed item is cut by the free area's edge or the overview card.
+    /// No claimed or failing item is cut by the free area's edge or the overview card.
     claims: bool,
+    /// How many claimed or failing items show whole: where agents work and checks fail outranks
+    /// the selection's upstream context, which falls off the far edge first.
+    must: usize,
     /// Every frame on screen shows the start of its title row.
     frames: bool,
+    /// No exit node (a group output or a node no wire leaves) is cut by the free area's edge.
+    exits: bool,
     /// The selection's whole upstream context (every node feeding it, back to the graph's
     /// entry) shows whole.
     entry: bool,
-    /// How many nodes of the selection's upstream context show whole: what leads into it
-    /// outranks downstream claimed items.
+    /// How many nodes of the selection's upstream context show whole.
     context: usize,
     /// How many of the graph's left and top edges are in view.
     start: u8,
-    claims_shown: usize,
+    /// How many nodes show whole or not at all (none cut by the free area's edge).
+    whole: usize,
     /// Minus the pan distance moved and [`COVER_COST`] per node under the overview card.
     closeness: f32,
 }
 
 impl Score {
-    const WORST: Score =
-        Score { selection: false, claims: false, frames: false, entry: false, context: 0, start: 0, claims_shown: 0, closeness: f32::NEG_INFINITY };
+    const WORST: Score = Score {
+        selection: false,
+        claims: false,
+        must: 0,
+        frames: false,
+        exits: false,
+        entry: false,
+        context: 0,
+        start: 0,
+        whole: 0,
+        closeness: f32::NEG_INFINITY,
+    };
 
-    /// Everything but closeness: what a different zoom in the readable band must improve on to
-    /// be chosen.
-    fn goals(&self) -> (bool, bool, bool, bool, usize, u8, usize) {
-        (self.selection, self.claims, self.frames, self.entry, self.context, self.start, self.claims_shown)
+    /// The goals a different zoom in the readable band must improve on to be chosen (not the
+    /// pan tie-breakers).
+    fn goals(&self) -> (bool, bool, usize, bool, bool, bool, usize, u8) {
+        (self.selection, self.claims, self.must, self.frames, self.exits, self.entry, self.context, self.start)
     }
 
-    /// What a zoom below the readable band must improve on: only showing the selection with its
-    /// whole upstream context justifies smaller text, not more downstream items.
-    fn essentials(&self) -> (bool, bool, bool, bool) {
-        (self.selection, self.claims, self.frames, self.entry)
+    /// What a zoom below the readable band must improve on: only showing the selection with
+    /// more of its claimed and failing items, or with its whole upstream context, justifies
+    /// smaller text.
+    fn essentials(&self) -> (bool, bool, usize, bool, bool) {
+        (self.selection, self.claims, self.must, self.frames, self.entry)
     }
+}
+
+/// The most framing magnifies a graph whose whole-graph zoom is `whole`: [`FIT_MAX`] in windows
+/// up to [`WIDE`] points wide; wider, enough for the graph to fill [`WIDE_FILL`] of the free
+/// area's limiting axis, within a cap that grows with the window to [`WIDE_MAX`] at 2560.
+fn ceiling(whole: f32) -> f32 {
+    let t = ((ui::viewport()[0] - WIDE) / (2560.0 - WIDE)).clamp(0.0, 1.0);
+    (WIDE_FILL * whole).clamp(FIT_MAX, FIT_MAX + t * (WIDE_MAX - FIT_MAX))
 }
 
 /// Screen rectangles `a` and `b` overlap by more than half a point.
@@ -328,7 +359,8 @@ impl State {
         let [_, _, bw, bh] = self.placed.bounds;
         let (ww, wh) = (bw + 2.0 * MARGIN, bh + 2.0 * MARGIN);
         let [_, _, vw, vh] = self.free();
-        self.place((vw / ww).min(vh / wh).clamp(MIN_ZOOM, FIT_MAX));
+        let whole = (vw / ww).min(vh / wh);
+        self.place(whole.clamp(MIN_ZOOM, ceiling(whole)));
     }
 
     /// The canvas area left free by the floating panels currently shown.
@@ -349,16 +381,16 @@ impl State {
         self.cam.pan = [axis(bw, vx, vw), axis(bh, vy, vh)];
     }
 
-    /// Default view: fit everything when that stays in the readable band ([`FIT_FLOOR`] to
-    /// [`FIT_MAX`]); otherwise keep a readable zoom (from [`READABLE_ZOOM`] down to
-    /// [`FIT_FLOOR`]) and pan, leaving the rest to panning, so that, in priority order: the
-    /// selection shows whole in the free area; every claimed item shows whole or not at all
-    /// (never cut by the details panel); every frame on screen shows its title; the selection's
-    /// upstream context, back to the graph's entry, shows (downstream items fall off the far
-    /// edge first); the graph's top-left (where it starts reading) stays in view; and as many
-    /// claimed items as possible show. A lower zoom is used only when it meets more of these,
-    /// and one below the band (down to [`CONTEXT_FLOOR`]) only to show the selection with its
-    /// whole upstream context.
+    /// Default view: fit the whole graph (beside the details panel when something is selected)
+    /// when that zoom is at least [`CONTEXT_FLOOR`]; otherwise keep a readable zoom (from
+    /// [`READABLE_ZOOM`] down to [`FIT_FLOOR`]) and pan, leaving the rest to panning, so that, in
+    /// priority order: the selection shows whole in the free area; no claimed or failing item is
+    /// cut (by the details panel or any other edge); as many of them as possible show whole;
+    /// every frame on screen shows its title; no exit node is cut; the selection's upstream
+    /// context, back to the graph's entry, shows; the graph's top-left (where it starts reading)
+    /// stays in view; and as few nodes as possible are cut. A lower zoom is used only when it
+    /// meets more of these, and one below the band (down to [`CONTEXT_FLOOR`]) only to show the
+    /// selection with more claimed or failing items or with its whole upstream context.
     pub fn fit(&mut self) {
         self.fit_all();
         // Captures can pan like a person would: `ARGO_TILE=col,row` at `ARGO_ZOOM`.
@@ -368,8 +400,9 @@ impl State {
             self.tile(zoom, c, r);
             return;
         }
-        // Captures can ask for the whole graph regardless of readability (`ARGO_FIT=all`).
-        if self.cam.zoom >= FIT_FLOOR || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
+        // The whole flow, entry to exits, beats a readable slice of it. Captures can ask for the
+        // whole graph regardless of readability (`ARGO_FIT=all`).
+        if self.cam.zoom >= CONTEXT_FLOOR || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
             return;
         }
         let mut best: Option<(Score, f32, [f32; 2])> = None;
@@ -383,7 +416,7 @@ impl State {
                 if best.as_ref().is_none_or(|(b, _, _)| score.goals() > b.goals()) {
                     best = Some((score, zoom, pan));
                 }
-            } else if below.as_ref().is_none_or(|(b, _, _)| score.essentials() > b.essentials()) {
+            } else if self.selected.is_some() && below.as_ref().is_none_or(|(b, _, _)| score.essentials() > b.essentials()) {
                 below = Some((score, zoom, pan));
             }
         }
@@ -431,11 +464,19 @@ impl State {
         out
     }
 
-    /// Every item an agent has claimed (active or queued), as drawn.
+    /// Every item an agent has claimed (active or queued) or whose checks failed, as drawn: what
+    /// the default view must show.
     fn claims(&self) -> Vec<Item> {
-        let nodes = self.view.nodes.iter().enumerate().filter(|(_, n)| n.claim.is_some()).map(|(i, _)| Item::Node(i));
-        let groups = (0..self.view.groups.len()).filter(|&g| self.view.groups[g].claim.is_some() && self.expanded(g)).map(Item::Group);
+        let must = |claim: Option<crate::model::Claim>, evidence: Evidence| claim.is_some() || evidence == Evidence::Rejected;
+        let nodes = self.view.nodes.iter().enumerate().filter(|(_, n)| must(n.claim, n.evidence)).map(|(i, _)| Item::Node(i));
+        let groups = (0..self.view.groups.len()).filter(|&g| must(self.view.groups[g].claim, self.view.groups[g].evidence) && self.expanded(g)).map(Item::Group);
         nodes.chain(groups).collect()
+    }
+
+    /// The view nodes the flow leaves through: group outputs and nodes no wire leaves.
+    fn exits(&self) -> Vec<usize> {
+        let n = self.view.nodes.len().min(self.placed.pos.len());
+        (0..n).filter(|&i| self.view.nodes[i].kind == Kind::GroupOut || !self.view.wires.iter().any(|w| w.from.0 == i)).collect()
     }
 
     /// Whether group `g` is drawn as a frame.
@@ -444,8 +485,9 @@ impl State {
     }
 
     /// The pan, at `zoom`, closest to `from` that best meets the view goals (see [`State::fit`]):
-    /// `selection` whole in the free area, claimed items whole or hidden, frames on screen with
-    /// their titles, and, when `reading`, the graph's top-left in view. Items revealed keep clear
+    /// `selection` whole in the free area, claimed and failing items whole (else hidden, never
+    /// cut), frames on screen with their titles, and, when `reading`, exit nodes whole or hidden,
+    /// the selection's upstream and the graph's top-left in view. Items revealed keep clear
     /// of the overview card. Candidate pans line item edges up with the free area's edges, its
     /// padding and the card's edges.
     fn solve(&self, zoom: f32, from: [f32; 2], selection: Option<Item>, reading: bool) -> (Score, [f32; 2]) {
@@ -457,6 +499,8 @@ impl State {
         let nodes: Vec<[f32; 4]> = (0..self.placed.pos.len()).map(|i| world(Item::Node(i))).collect();
         // What leads into the selection, read before it (default view only).
         let upstream: Vec<[f32; 4]> = selection.filter(|_| reading).map_or(vec![], |it| self.upstream(it).into_iter().map(|i| nodes[i]).collect());
+        // Where the flow leaves, whole or not at all (default view only).
+        let exits: Vec<[f32; 4]> = if reading { self.exits().into_iter().map(|i| nodes[i]).collect() } else { vec![] };
         let [_, _, bw, bh] = self.placed.bounds;
         let content = [MARGIN, MARGIN, bw, bh];
         let map = crate::overview::rect(self);
@@ -483,10 +527,16 @@ impl State {
             // The graph's entry and the selection's upstream nodes, lined up with the edges: a
             // budget of their own, so a long upstream never crowds out the selection's pans.
             let mut context: Vec<f32> = vec![];
+            // Every node's edges lined up with the free area's edges, so nodes there show whole
+            // or not at all: a budget of their own too.
+            let mut whole: Vec<f32> = vec![];
             if reading {
-                let edges = upstream.iter().flat_map(|r| [r[axis] * zoom, (r[axis] + r[axis + 2]) * zoom]);
+                let edges = upstream.iter().chain(&exits).flat_map(|r| [r[axis] * zoom, (r[axis] + r[axis + 2]) * zoom]);
                 for e in std::iter::once(content[axis] * zoom).chain(edges) {
                     context.extend(targets.iter().map(|t| t - e));
+                }
+                for r in &nodes {
+                    whole.extend([lo - r[axis] * zoom, lo + room - (r[axis] + r[axis + 2]) * zoom]);
                 }
             }
             // Nodes lined up with the overview card's edge, to slide them out from under it.
@@ -497,11 +547,12 @@ impl State {
             }
             // Large graphs with many frames: the pans nearest `from` bound the search.
             let near = from[axis];
-            for (v, n) in [(&mut cands[axis], MAX_CANDS), (&mut context, MAX_CANDS / 2)] {
+            for (v, n) in [(&mut cands[axis], MAX_CANDS), (&mut context, MAX_CANDS / 2), (&mut whole, MAX_CANDS / 4)] {
                 v.sort_by(|a, b| (a - near).abs().total_cmp(&(b - near).abs()));
                 v.truncate(n);
             }
             cands[axis].extend(context);
+            cands[axis].extend(whole);
             cands[axis].sort_by(f32::total_cmp);
             cands[axis].dedup_by(|a, b| (*a - *b).abs() < 0.25);
         }
@@ -528,16 +579,23 @@ impl State {
                 axes && (!fits || clear(r))
             };
             let selection = sel.is_none_or(|r| shown(rect(&r, BADGE_OUT), EDGE_PAD));
-            let mut claims_shown = 0;
+            let mut must = 0;
             let mut claims_ok = true;
             for r in &claims {
                 let r = rect(r, BADGE_OUT);
                 if shown(r, 0.0) {
-                    claims_shown += 1;
+                    must += 1;
                 } else if overlaps(r, free) {
                     claims_ok = false;
                 }
             }
+            // Cut by the free area's edge: partly in it, partly out.
+            let cut = |r: &[f32; 4]| {
+                let r = rect(r, 0.0);
+                overlaps(r, free) && !contains(free, r, 0.5)
+            };
+            let exits_ok = !exits.iter().any(cut);
+            let whole = if reading { nodes.len() - nodes.iter().filter(|r| cut(r)).count() } else { 0 };
             let frames_ok = frames.iter().all(|r| {
                 let r = rect(r, 0.0);
                 let title = [r[0], r[1], r[2].min(TITLE_ROW[0] * zoom), r[3].min(TITLE_ROW[1] * zoom)];
@@ -557,11 +615,13 @@ impl State {
             Score {
                 selection,
                 claims: claims_ok,
+                must,
                 frames: frames_ok,
+                exits: exits_ok,
                 entry: context == upstream.len(),
                 context,
                 start,
-                claims_shown,
+                whole,
                 closeness: -shift - COVER_COST * covered as f32,
             }
         };
@@ -1105,35 +1165,67 @@ mod tests {
         (0..s.placed.pos.len()).map(|i| s.screen_rect(i)).chain(frames.map(|g| s.item_rect(Item::Group(g)))).collect()
     }
 
-    /// The protocol fixture shows whole where it fits the readable band; in a small window it
-    /// reads from its entry at a readable zoom, and only its far (downstream) end runs off the
-    /// right edge.
+    /// The protocol fixture shows whole, from its entry to its exits, at every review size: in a
+    /// small window the whole flow at a zoom down to [`CONTEXT_FLOOR`] beats a readable slice
+    /// whose far end runs off the right edge.
     #[test]
     fn fit_shows_the_protocol_fixture_from_its_entry() {
         for size in SIZES {
             ui::set_viewport(size);
             let s = State::protocol_fixture();
             let free = s.free();
-            assert!((FIT_FLOOR..=FIT_MAX).contains(&s.cam.zoom), "{size:?}: zoom {}", s.cam.zoom);
-            let whole = size[0] > 1024.0;
+            assert!(s.cam.zoom >= CONTEXT_FLOOR - 1e-4 && s.cam.zoom <= WIDE_MAX + 1e-4, "{size:?}: zoom {}", s.cam.zoom);
+            if size[0] <= WIDE {
+                assert!(s.cam.zoom <= FIT_MAX + 1e-4, "{size:?}: zoom {} above the band", s.cam.zoom);
+            }
             for (i, r) in drawn(&s).into_iter().enumerate() {
-                if whole {
-                    assert!(inside(r, free), "{size:?}: item {i} at {r:?} outside {free:?}");
-                } else {
-                    let rows = r[1] >= free[1] - 0.5 && r[1] + r[3] <= free[1] + free[3] + 0.5;
-                    assert!(rows && r[0] >= free[0] - 0.5, "{size:?}: item {i} at {r:?} cut other than at the right of {free:?}");
-                }
+                assert!(inside(r, free), "{size:?}: item {i} at {r:?} outside {free:?}");
             }
             let input = s.screen_rect(s.find("Input").unwrap());
             assert!(inside(input, free), "{size:?}: the entry {input:?} outside {free:?}");
         }
-        // A large window magnifies a small graph only up to the band's ceiling.
-        ui::set_viewport([2560.0, 1440.0]);
-        assert_eq!(State::protocol_fixture().cam.zoom, FIT_MAX);
     }
 
-    /// The fixture's selected group shows whole beside the details panel, with everything that
-    /// feeds it (the for loop, `acc = 0` and the graph's entry, Input) in view too.
+    /// At 1024x640 every node of the protocol fixture, its exits included, lies wholly inside
+    /// the free canvas area: nothing is sliced at the window's right edge.
+    #[test]
+    fn fit_shows_every_protocol_node_at_1024() {
+        ui::set_viewport([1024.0, 640.0]);
+        let s = State::protocol_fixture();
+        let free = s.free();
+        assert!(!s.exits().is_empty());
+        for i in 0..s.view.nodes.len() {
+            let r = s.screen_rect(i);
+            assert!(inside(r, free), "{} at {r:?} outside {free:?}", s.view.nodes[i].title);
+        }
+    }
+
+    /// A small graph in a wide window grows past [`FIT_MAX`] to fill about [`WIDE_FILL`] of the
+    /// free area's limiting axis, capped at [`WIDE_MAX`]; up to [`WIDE`] points the ceiling stays.
+    #[test]
+    fn wide_windows_magnify_a_small_graph_gently() {
+        ui::set_viewport([2560.0, 1440.0]);
+        let s = State::protocol_fixture();
+        let [_, _, bw, bh] = s.placed.bounds;
+        let [_, _, vw, vh] = s.free();
+        let whole = (vw / (bw + 2.0 * MARGIN)).min(vh / (bh + 2.0 * MARGIN));
+        let z = s.cam.zoom;
+        assert!(z > FIT_MAX && z <= WIDE_MAX + 1e-4, "zoom {z}");
+        assert!(z <= whole + 1e-4, "zoom {z} overflows the free area (whole {whole})");
+        assert!((z - (WIDE_FILL * whole).clamp(FIT_MAX, WIDE_MAX)).abs() < 1e-3, "zoom {z}, whole {whole}");
+        // The ceiling is continuous in the window width and unchanged up to WIDE.
+        for w in [1024.0, 1440.0, WIDE] {
+            ui::set_viewport([w, 900.0]);
+            assert_eq!(ceiling(10.0), FIT_MAX, "{w}");
+        }
+        ui::set_viewport([WIDE + 1.0, 900.0]);
+        assert!(ceiling(10.0) - FIT_MAX < 0.01);
+    }
+
+    /// The fixture's selected group shows whole beside the details panel, with what feeds it (the
+    /// for loop, `acc = 0` and the graph's entry, Input) whole in view where the window has room
+    /// for it after the claimed report; in a small window that upstream context is the goal that
+    /// gives way, falling off the left edge whole, never cut.
     #[test]
     fn fit_keeps_the_fixtures_selected_group_and_its_upstream_beside_the_details_panel() {
         for size in SIZES {
@@ -1149,13 +1241,19 @@ mod tests {
             assert_eq!(titles, ["Input", "acc = 0", "for (i = 0; i < n; i++)"]);
             for i in up {
                 let r = s.screen_rect(i);
-                assert!(inside(r, free), "{size:?}: upstream {} {r:?} outside {free:?}", s.view.nodes[i].title);
+                let name = &s.view.nodes[i].title;
+                if size[0] > 1024.0 {
+                    assert!(inside(r, free), "{size:?}: upstream {name} {r:?} outside {free:?}");
+                } else {
+                    assert!(inside(r, free) || r[0] + r[2] <= free[0] + 0.5, "{size:?}: upstream {name} {r:?} cut by {free:?}");
+                }
             }
         }
     }
 
-    /// At 1024x640 beside the details panel, the fixture's entry is on screen: no wire comes in
-    /// from the window's left edge without a visible source.
+    /// At 1024x640 beside the details panel, the fixture's far upstream may fall off the left
+    /// edge (the claimed report outranks it), but no wire into a node on screen comes from a
+    /// node cut at that edge: each source shows whole or not at all.
     #[test]
     fn fit_shows_the_fixtures_input_in_a_small_window() {
         ui::set_viewport([1024.0, 640.0]);
@@ -1163,22 +1261,22 @@ mod tests {
         assert!(matches!(s.selected, Some(Item::Group(_))), "the fixture selects its group");
         let free = s.free();
         let input = s.screen_rect(s.find("Input").unwrap());
-        assert!(inside(input, free), "Input {input:?} outside {free:?}");
-        // Every wire into a node on screen leaves from a node that shows (its output side).
+        assert!(inside(input, free) || !overlaps(input, free), "Input {input:?} cut by {free:?}");
         for w in &s.view.wires {
-            let [x, _, fw, _] = s.screen_rect(w.from.0);
+            let from = s.screen_rect(w.from.0);
             let to = s.screen_rect(w.to.0);
-            if to[0] < free[0] + free[2] && to[0] + to[2] > free[0] {
-                let (from, into) = (&s.view.nodes[w.from.0].title, &s.view.nodes[w.to.0].title);
-                assert!(x + fw > free[0], "a wire into {into} leaves from off-screen {from}");
+            if overlaps(to, free) {
+                let (name, into) = (&s.view.nodes[w.from.0].title, &s.view.nodes[w.to.0].title);
+                assert!(inside(from, free) || !overlaps(from, free), "a wire into {into} leaves from {name} cut at {from:?}");
             }
         }
     }
 
-    /// The default zoom stays in the readable band ([`FIT_FLOOR`] to [`FIT_MAX`]) for every
-    /// review scene and window size, so node text never shrinks far below or swells far above
-    /// the chrome's type. It goes below the band, down to [`CONTEXT_FLOOR`], only where that
-    /// shows a selection together with its whole upstream context.
+    /// The default zoom stays in the readable band ([`FIT_FLOOR`] to the framing ceiling) for
+    /// every review scene and window size, so node text never shrinks far below or swells far
+    /// above the chrome's type. It goes below the band, down to [`CONTEXT_FLOOR`], only where
+    /// that shows the whole graph, or a selection together with all of its claimed and failing
+    /// items or its whole upstream context.
     #[test]
     fn default_zoom_stays_in_the_readable_band() {
         for size in SIZES {
@@ -1191,27 +1289,34 @@ mod tests {
             states.push(fixture);
             for s in states {
                 let z = s.cam.zoom;
-                assert!(z <= FIT_MAX + 1e-4, "{size:?} {}: zoom {z} above the band", s.scene);
+                let top = if size[0] <= WIDE { FIT_MAX } else { WIDE_MAX };
+                assert!(z <= top + 1e-4, "{size:?} {}: zoom {z} above the band", s.scene);
                 if z >= FIT_FLOOR - 1e-4 {
                     continue;
                 }
                 assert!(z >= CONTEXT_FLOOR - 1e-4, "{size:?} {}: zoom {z} below the context floor", s.scene);
-                let sel = s.selected.unwrap_or_else(|| panic!("{size:?} {}: zoom {z} below the band with no selection", s.scene));
                 let free = s.free();
-                for i in s.upstream(sel) {
-                    let r = s.screen_rect(i);
-                    assert!(inside(r, free), "{size:?} {}: zoom {z} below the band yet upstream {r:?} hidden", s.scene);
+                if drawn(&s).into_iter().all(|r| inside(r, free)) {
+                    continue;
                 }
+                let sel = s.selected.unwrap_or_else(|| panic!("{size:?} {}: zoom {z} below the band with no selection", s.scene));
+                assert!(inside(s.item_rect(sel), free), "{size:?} {}: zoom {z} below the band yet the selection is hidden", s.scene);
+                let claims = s.claims().into_iter().all(|it| inside(s.item_rect(it), free));
+                let upstream = s.upstream(sel).into_iter().all(|i| inside(s.screen_rect(i), free));
+                assert!(claims || upstream, "{size:?} {}: zoom {z} below the band shows neither all claims nor all upstream", s.scene);
             }
         }
-        // The protocol fixture and the fixture without its selection never leave the band.
+        // Without a selection the view never goes below the band except to show the whole graph:
+        // the fixture and the protocol fixture show whole at every review size.
         for size in SIZES {
             ui::set_viewport(size);
             let mut fixture = State::load("fixture");
             fixture.selected = None;
             fixture.fit();
-            for s in [State::protocol_fixture(), fixture] {
-                assert!((FIT_FLOOR..=FIT_MAX).contains(&s.cam.zoom), "{size:?} {}: zoom {}", s.scene, s.cam.zoom);
+            for s in [fixture, State::protocol_fixture()] {
+                let free = s.free();
+                assert!(s.cam.zoom >= CONTEXT_FLOOR - 1e-4, "{size:?} {}: zoom {}", s.scene, s.cam.zoom);
+                assert!(drawn(&s).into_iter().all(|r| inside(r, free)), "{size:?} {}: not whole", s.scene);
             }
         }
     }
@@ -1251,10 +1356,10 @@ mod tests {
             assert!(!(r[0] < right - 0.5 && r[0] + r[2] > right + 0.5), "{item:?} {r:?} straddles the free area's right edge {right}");
             assert!(inside(r, free) || !overlaps(r, free), "{item:?} {r:?} is cut by the free area {free:?}");
         }
-        // The selection's upstream (back to Input) outranks the downstream report: here the
-        // report falls off to the right, whole, rather than the entry off the left.
+        // The claimed report with its failing checks outranks the selection's far upstream: the
+        // entry falls off the left before the report falls under the panel.
         let report = s.item_rect(Item::Node(s.find("report").unwrap()));
-        assert!(!overlaps(report, free), "report {report:?} shows in {free:?}, crowding out the entry");
+        assert!(inside(report, free), "report {report:?} hidden beside {free:?}");
         for s in focused_scenes() {
             let free = s.free();
             let right = free[0] + free[2];
@@ -1268,6 +1373,44 @@ mod tests {
                 let r = s.item_rect(item);
                 let straddles = r[0] < right - 0.5 && r[0] + r[2] > right + 0.5;
                 assert!(!(straddles && overlaps(r, free)), "{}: {item:?} {r:?} straddles {right}", s.scene);
+            }
+        }
+    }
+
+    /// With the fixture's group selected, the downstream `acc =` (Set acc) and the claimed
+    /// `report` with failing checks show whole beside the details panel, not under it.
+    #[test]
+    fn fit_shows_the_fixtures_claimed_report_beside_the_details_panel() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            let s = State::load("fixture");
+            assert!(matches!(s.selected, Some(Item::Group(_))), "the fixture selects its group");
+            let free = ui::free_area(true, false);
+            for title in ["report", "acc ="] {
+                let r = s.screen_rect(s.find(title).unwrap());
+                assert!(inside(r, free), "{size:?}: {title} {r:?} outside {free:?}");
+            }
+        }
+    }
+
+    /// The `dataflow-select` capture hovers a node a person could see: on screen beside the
+    /// details panel at every review size, and feeding the selection.
+    #[test]
+    fn dataflow_select_hovers_a_node_in_view() {
+        let [sel, hover] = crate::DATAFLOW_SELECT;
+        for size in SIZES {
+            ui::set_viewport(size);
+            // Selected after loading, then (in the window) the first layout's fit.
+            let mut a = State::load("dataflow");
+            a.select(Item::Node(a.find(sel).unwrap()));
+            let mut b = State::load("dataflow");
+            b.selected = Some(Item::Node(b.find(sel).unwrap()));
+            b.fit();
+            for s in [a, b] {
+                let h = s.find(hover).unwrap();
+                assert!(s.upstream(s.selected.unwrap()).contains(&h), "{hover} feeds {sel}");
+                let (r, free) = (s.screen_rect(h), s.free());
+                assert!(inside(r, free), "{size:?}: hovered {hover} {r:?} outside {free:?}");
             }
         }
     }

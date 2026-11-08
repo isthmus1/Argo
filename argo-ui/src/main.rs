@@ -75,6 +75,11 @@ fn on_key(s: &mut State, k: &KeyEvent, _: &mut Tx) -> bool {
     true
 }
 
+/// The `dataflow-select` capture: the node it selects, and the one it hovers. A scripted pointer
+/// hovers only what a person could see: `normalize` (claimed, feeding round_pack) stays in view
+/// beside the details panel at every review size.
+const DATAFLOW_SELECT: [&str; 2] = ["round_pack", "normalize"];
+
 /// Hover a node by title, as a scripted pointer would.
 fn hover(s: &mut State, title: &str) {
     if let Some(i) = s.find(title) {
@@ -156,10 +161,10 @@ fn main() {
             }),
             ("dataflow-select", |s| {
                 *s = State::load("dataflow");
-                if let Some(i) = s.find("round_pack") {
+                if let Some(i) = s.find(DATAFLOW_SELECT[0]) {
                     s.select(Item::Node(i));
                 }
-                hover(s, "is_nan(a|b)");
+                hover(s, DATAFLOW_SELECT[1]);
             }),
             ("protocol", |s| *s = State::protocol_fixture()),
             ("protocol-hover", |s| {
