@@ -112,10 +112,12 @@ fn rust_rows_become_node_visuals() {
     assert_eq!((n.lang, n.evidence), (Lang::C, Evidence::None));
 
     let cases = [
+        // A worker that finished the node put Rust in the database: the node reads RS, and the
+        // badge says nothing has judged it yet.
         (
             RustStatus::Done,
             Validation::Unvalidated,
-            Lang::C,
+            Lang::Rust,
             Evidence::Unvalidated,
         ),
         (
