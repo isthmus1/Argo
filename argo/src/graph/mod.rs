@@ -22,3 +22,4 @@ pub use expansion::{ChildRegion, Expansion, NodeDraft, Unsupported};
 pub use kinds::{ControlExitKind, GraphEdgeKind, GraphNodeKind};
 pub use model::{Graph, GraphDiagnostic, GraphEdge, GraphNode, NodeId};
 pub use provenance::{ControlExit, SourceSpan, SyntaxPart};
+pub use sequence::DECLARATIONS;

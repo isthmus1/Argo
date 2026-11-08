@@ -1,6 +1,21 @@
 use super::{ControlExit, ControlExitKind, Expansion, GraphError, GraphNodeKind, SourceSpan};
 use crate::{CNode, CNodeType as Kind};
 
+/// The template of a straight-line run: `declarations` when it only declares (`u32 *rk; int i;`).
+/// Such a run can't move into a function of its own, since the rest of the body uses what it
+/// declares, so it is never a work unit.
+pub(super) fn template(nodes: &[&CNode]) -> &'static str {
+    let declares = |n: &&CNode| matches!(n.node_type, Kind::Declaration | Kind::Variable);
+    if nodes.iter().all(declares) {
+        DECLARATIONS
+    } else {
+        "sequence"
+    }
+}
+
+/// The template of a run of declarations only.
+pub const DECLARATIONS: &str = "declarations";
+
 pub(super) fn expand<'a>(nodes: &[&'a CNode]) -> Result<Expansion<'a>, GraphError> {
     let first = *nodes.first().ok_or(GraphError::EmptyRegion)?;
     let last = nodes.last().unwrap();

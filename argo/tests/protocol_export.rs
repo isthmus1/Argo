@@ -121,3 +121,22 @@ fn syntax_only_export_claims_no_data_flow() {
     );
     assert!(graph.nodes.iter().all(|n| n.effects.is_empty()));
 }
+
+#[test]
+fn a_run_of_declarations_only_is_not_a_work_unit() {
+    let graph = export("tests/fixtures/declarations.c");
+    let unit = |name: &str| {
+        let n = graph.nodes.iter().find(|n| n.name == name).unwrap();
+        (n.template.as_str().to_string(), n.work_unit)
+    };
+    assert_eq!(
+        unit("int *p; int i = 0; int t;"),
+        ("c.declarations".into(), false),
+        "its locals are used after it, so it can't become a function of its own"
+    );
+    assert_eq!(
+        unit("p = &a; int n = g(a); t = n + i; return t + *p;"),
+        ("c.sequence".into(), true),
+        "a declaration among statements doesn't stop a run from being a work unit"
+    );
+}

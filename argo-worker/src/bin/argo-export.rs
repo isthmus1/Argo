@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use argo_db_client::{CChunk, RustChunk, RustStatus};
+use argo_db_client::{CChunk, ChunkKind, RustChunk, RustStatus};
 use clap::Parser;
 
 use argo_worker::db::Db;
@@ -88,14 +88,17 @@ fn build(chunks: &[CChunk], rusts: &[RustChunk], name: &str, origin: &str) -> Cr
             None => ("left out", "not translated yet".to_string()),
             Some(r) if r.status == RustStatus::Failed => ("left out", "translation failed".to_string()),
             Some(r) if r.status == RustStatus::Claimed => ("left out", "still being translated".to_string()),
-            Some(_) if !symbols.insert(c.name.clone()) => {
+            // A piece's name is its C text, which repeats; its symbol is unique per row.
+            Some(_) if c.kind == ChunkKind::Function && !symbols.insert(c.name.clone()) => {
                 ("left out", "another file already exports this symbol".to_string())
             }
             Some(r) => {
                 let module = by_module.entry(module_name(&path)).or_insert_with(|| (path.clone(), String::new()));
                 let _ = writeln!(
                     module.1,
-                    "// ── `{}` · {}:{}-{} · chunk {} · {} · {} attempt(s) · {:?}\n//\n// Original C:\n{}\n{}\n",
+                    "// ── `{}` · {}:{}-{} · chunk {} · {} · {} attempt(s) · {:?}\n//\n// Original C:\n{}\n\
+                     // Its own module: each chunk's file brings its own `use`s and C type stubs.\n\
+                     pub mod chunk{} {{\n{}\n}}\n",
                     c.name,
                     path,
                     c.line_start,
@@ -105,6 +108,7 @@ fn build(chunks: &[CChunk], rusts: &[RustChunk], name: &str, origin: &str) -> Cr
                     r.attempts,
                     r.validation,
                     commented(&c.source),
+                    c.id,
                     r.source.trim_end()
                 );
                 exported += 1;
