@@ -172,7 +172,14 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> Shown {
 
 /// Language, evidence and claim of the node itself (a function, as the explorer lists it).
 pub fn own_status(snap: &Snapshot, id: NodeId) -> (Lang, Evidence, Option<Claim>) {
-    let Some(s) = snap.status(id) else { return (Lang::None, Evidence::None, None) };
+    match snap.status(id) {
+        Some(s) => status_shown(snap, s),
+        None => (Lang::None, Evidence::None, None),
+    }
+}
+
+/// [`own_status`] from the node's status row itself.
+pub fn status_shown(snap: &Snapshot, s: &argo_protocol::NodeStatus) -> (Lang, Evidence, Option<Claim>) {
     let lang = match s.accepted {
         Language::None => Lang::None,
         Language::C => Lang::C,

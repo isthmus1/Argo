@@ -1,6 +1,8 @@
 //! Project chrome: the file/function explorer over the ingested project. It navigates; nothing
 //! here edits the graph or starts work.
 
+use std::collections::{HashMap, HashSet};
+
 use rune_ui::{Color, Cursor, El, ScrollSpec, TextStyle, col, el, row, text, text_input};
 
 use crate::app::State;
@@ -69,10 +71,28 @@ impl Mark {
 /// Width of the explorer's right-hand status column, so dots and bubbles line up.
 const MARK_W: f32 = 16.0;
 
+/// Each listed function's evidence and claim, by node. The snapshot holds a status row for
+/// every graph node (tens of thousands) and finds one by scanning, so the explorer looks its
+/// functions up together in one pass rather than one scan per row on every frame.
+type Statuses = HashMap<argo_protocol::NodeId, (Evidence, Option<crate::model::Claim>)>;
+
+fn statuses(s: &State, proj: &project::Project) -> Statuses {
+    let Some(live) = s.live.as_ref() else { return Statuses::new() };
+    let listed: HashSet<argo_protocol::NodeId> = proj.modules.iter().flat_map(|m| m.functions.iter().map(|(id, _)| *id)).collect();
+    let mut out = Statuses::with_capacity(listed.len());
+    for st in &live.snap.status {
+        // The first row for a node is the one `Snapshot::status` finds.
+        if listed.contains(&st.node) && !out.contains_key(&st.node) {
+            let (_, evidence, claim) = crate::bridge::status_shown(&live.snap, st);
+            out.insert(st.node, (evidence, claim));
+        }
+    }
+    out
+}
+
 /// `id`'s mark and its tooltip, in SpacetimeDB mode only.
-fn mark(s: &State, id: argo_protocol::NodeId) -> Option<(Mark, String)> {
-    let live = s.live.as_ref()?;
-    let (_, evidence, claim) = crate::bridge::own_status(&live.snap, id);
+fn mark(st: &Statuses, id: argo_protocol::NodeId) -> Option<(Mark, String)> {
+    let (evidence, claim) = st.get(&id).copied().unwrap_or((Evidence::None, None));
     let mark = Mark::of(evidence, claim)?;
     let tip = match (mark, evidence) {
         (Mark::Working, _) => format!("Being translated by worker {}", claim.map_or(0, |c| c.worker)),
@@ -84,9 +104,9 @@ fn mark(s: &State, id: argo_protocol::NodeId) -> Option<(Mark, String)> {
 }
 
 /// The right-hand status column of a function row: its dot, or empty space.
-fn dot_slot(p: &Pal, s: &State, id: argo_protocol::NodeId) -> El {
+fn dot_slot(p: &Pal, st: &Statuses, id: argo_protocol::NodeId) -> El {
     let slot = row().w(MARK_W).h(MARK_W).items_center().justify_center();
-    match mark(s, id) {
+    match mark(st, id) {
         Some((m, tip)) => slot
             .child(el().size(8.0, 8.0).radius(4.0).fill(m.color(p)))
             .help(tip),
@@ -119,8 +139,8 @@ impl Tally {
 /// The right-hand status column of a folder row: a green check once every one of its functions
 /// has Rust pushed, and a blue bubble counting those being translated right now (rightmost),
 /// left out at zero.
-fn bubble_slot(p: &Pal, s: &State, functions: &[(argo_protocol::NodeId, String)]) -> El {
-    let t = Tally::of(functions.iter().map(|(id, _)| mark(s, *id).map(|(m, _)| m)));
+fn bubble_slot(p: &Pal, st: &Statuses, functions: &[(argo_protocol::NodeId, String)]) -> El {
+    let t = Tally::of(functions.iter().map(|(id, _)| mark(st, *id).map(|(m, _)| m)));
     let bubble = |n: usize, fill: Color, tip: String| {
         row()
             .h(14.0)
@@ -163,6 +183,7 @@ fn bubble_slot(p: &Pal, s: &State, functions: &[(argo_protocol::NodeId, String)]
 pub fn explorer(p: &Pal, s: &State) -> El {
     let Some(proj) = &s.project else { return el() };
     let current = project::current(s).map(|(id, _)| id);
+    let st = statuses(s, proj);
     let skipped: Vec<_> = proj.units.iter().filter(|u| u.skipped.is_some()).collect();
     let tip = if skipped.is_empty() {
         format!("All {} .c files are in the graph", proj.units.len())
@@ -261,7 +282,7 @@ pub fn explorer(p: &Pal, s: &State) -> El {
             );
         }
         // Last, so the dot is right-aligned in the same column on every row.
-        r = r.child(dot_slot(p, s, id));
+        r = r.child(dot_slot(p, &st, id));
         if on {
             r = r.fill(p.accent.alpha(0.16));
         }
@@ -305,7 +326,7 @@ pub fn explorer(p: &Pal, s: &State) -> El {
                             .font(TextStyle::new(10.5, 600.0))
                             .color(p.faint),
                     )
-                    .child(bubble_slot(p, s, &m.functions))
+                    .child(bubble_slot(p, &st, &m.functions))
                     .on_press(move |s: &mut State| {
                         s.forms.expanded = if s.forms.expanded == Some(id) {
                             None

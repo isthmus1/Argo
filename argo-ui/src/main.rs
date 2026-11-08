@@ -24,6 +24,8 @@ mod layout;
 mod model;
 mod overview;
 mod palette;
+#[cfg(all(test, feature = "frame-profile"))]
+mod perf;
 mod project;
 #[cfg(test)]
 mod scenes;

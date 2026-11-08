@@ -15,3 +15,11 @@ rune-ui.workspace = true
 # The C front end, used only by the whole-program view (`calls.rs`) to find calls in the C
 # source text the database stores. It never opens, clones or preprocesses a repository.
 argo-c = { package = "Argo", path = "../argo" }
+
+[features]
+# Rune's headless phase clocks, for the `perf` benchmark (`src/perf.rs`) only.
+frame-profile = ["rune-ui/frame-profile"]
+
+[dev-dependencies]
+# The benchmark drives Rune's renderer directly: waiting on the GPU names a wgpu type. Rune's own.
+wgpu = { version = "~30.0.1", default-features = false }

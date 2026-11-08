@@ -4,7 +4,7 @@
 use crate::app::{Item, MARGIN, State};
 use crate::model::{self, Claim, Evidence, Graph, Kind, Lang, Node, Pin, ROW, Ty};
 use crate::palette::Pal;
-use rune_ui::{Color, Cursor, Drag, El, LineCap, Path, Shape, TextStyle, Tx, canvas, col, el, row, text};
+use rune_ui::{Color, Cursor, Drag, El, LineCap, Path, Shape, Spring, TextStyle, Tx, canvas, col, el, memo, row, text};
 
 /// Pin labels' weight; their size follows the zoom (see [`label_size`]).
 const SOCKET_WEIGHT: f32 = 450.0;
@@ -86,6 +86,13 @@ struct Look {
     glow: f32,
 }
 
+impl Look {
+    /// Everything a card reads from its look, hashable.
+    fn key(&self) -> (bool, bool, u32, Option<u32>, u32, u32) {
+        (self.selected, self.hovered, self.badge_scale.to_bits(), self.labels.map(f32::to_bits), self.title.to_bits(), self.glow.to_bits())
+    }
+}
+
 /// The canvas filling `w`×`h`, with the world under the camera.
 pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
     let g = &s.view;
@@ -103,16 +110,33 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
         glow: if s.live.as_ref().is_some_and(|l| l.whole) { (1.0 / s.cam.zoom).clamp(1.0, 6.0) } else { 0.0 },
     };
 
+    // Frames, wires and cards are each built once per change and reused while it holds: panning,
+    // and zooming where the look holds still, rebuild the view every frame, and a thousand cards
+    // and their wires are most of it. Each reads only what its version hashes, and its handlers
+    // capture only its index.
     let mut world = vec![];
     for (i, f) in pl.frames.iter().enumerate() {
         if s.collapsed.get(i).copied().unwrap_or(false) || f[2] <= 0.0 {
             continue;
         }
-        world.push(frame(p, &g.groups[i], i, f[2], f[3], look(Item::Group(i))).absolute(o[0] + f[0], o[1] + f[1]));
+        let (gr, look) = (&g.groups[i], look(Item::Group(i)));
+        let version = (gr, i, f.map(f32::to_bits), o.map(f32::to_bits), look.key(), p.dark);
+        world.push(memo(format!("frame-{i}"), version, || frame(p, gr, i, f[2], f[3], look).absolute(o[0] + f[0], o[1] + f[1])));
     }
-    world.push(canvas(cached_wires(p, g, pl, o, focus)).size(ww, wh).absolute(0.0, 0.0));
+    let ink = cached_wires(p, g, pl, o, focus);
+    let version = (pl.generation, focus, p.dark, std::rc::Rc::as_ptr(&ink) as usize, [ww, wh].map(f32::to_bits));
+    world.push(memo("wires", version, || {
+        // Wires land at once when the focus restyles them, as one canvas's new drawing would;
+        // the camera still moves them all together, with the world.
+        el().size(ww, wh).absolute(0.0, 0.0).motion(Spring::NONE).children(ink.iter().map(|wire| {
+            canvas(wire.shape.clone()).key(wire.key.clone()).size(wire.size[0], wire.size[1])
+                .absolute(wire.at[0], wire.at[1]).pixel_snap(false)
+        }))
+    }));
     for (i, n) in g.nodes.iter().enumerate() {
-        world.push(node(p, n, i, pl.size[i], s.can_expand(i), look(Item::Node(i))).absolute(o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]));
+        let (size, at, expandable, look) = (pl.size[i], [o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]], s.can_expand(i), look(Item::Node(i)));
+        let version = (n, i, size.map(f32::to_bits), at.map(f32::to_bits), expandable, look.key(), p.dark);
+        world.push(memo(format!("node-{i}"), version, || node(p, n, i, size, expandable, look).absolute(at[0], at[1])));
     }
     let world = el().size(ww, wh).scale(s.cam.zoom).origin(0.0, 0.0).children(world).absolute(s.cam.pan[0], s.cam.pan[1]);
 
@@ -278,6 +302,8 @@ enum Piece {
 }
 
 impl Curve {
+    /// The curve as a Rune path: what [`Self::flattened`] must flatten exactly as Rune does.
+    #[cfg(test)]
     fn path(&self) -> Path {
         match *self {
             Curve::Cubic([a, c1, c2, b]) => Path::new().move_to(a).cubic_to(c1, c2, b),
@@ -296,6 +322,40 @@ impl Curve {
                 .line_to([b[0], below])
                 .cubic_to([b[0] - reach, below], [b[0] - reach, b[1]], b),
         }
+    }
+
+    /// [`Self::path`] as Rune flattens it (`rune::Path`, at Rune's pinned revision): the same
+    /// points, so stroking them draws exactly what `Shape::stroke_path` would, while their
+    /// bounding box sizes the wire's canvas. `flattened_as_rune_flattens` checks they agree.
+    fn flattened(&self) -> Vec<[f32; 2]> {
+        let mut pts = vec![];
+        match *self {
+            Curve::Cubic([a, c1, c2, b]) => {
+                pts.push(a);
+                flat_cubic(&mut pts, c1, c2, b);
+            }
+            Curve::Chain { a, ref pieces } => {
+                pts.push(a);
+                for pc in pieces {
+                    match *pc {
+                        Piece::Line(q) => pts.push(q),
+                        Piece::Cubic(c1, c2, q) => flat_cubic(&mut pts, c1, c2, q),
+                    }
+                }
+            }
+            Curve::Gutter { a, b, x, bend } => {
+                pts.extend([a, [x - bend, a[1]]]);
+                flat_cubic(&mut pts, [x, a[1]], [x, b[1]], [x + bend, b[1]]);
+                pts.push(b);
+            }
+            Curve::Routed { a, b, below, reach } => {
+                pts.push(a);
+                flat_cubic(&mut pts, [a[0] + reach, a[1]], [a[0] + reach, below], [a[0], below]);
+                pts.push([b[0], below]);
+                flat_cubic(&mut pts, [b[0] - reach, below], [b[0] - reach, b[1]], b);
+            }
+        }
+        pts
     }
 
     /// The same curve as a polyline, so it can be dashed and measured.
@@ -755,8 +815,15 @@ fn route(g: &Graph, pl: &crate::layout::Placed, o: [f32; 2]) -> Routing {
         let cubic = Curve::Cubic([a, [a[0] + dx + shift, a[1]], [b[0] - dx + shift, b[1]], b]);
         // An S-curve that would cut through other nodes (or a frame it doesn't end in) drops
         // down a gutter instead or, past several columns, threads the gaps between them.
-        let obstacles = obstacles(w, a, b);
-        if crosses(&cubic.points(), &obstacles) {
+        // Only obstacles overlapping the curve's bounding box can be crossed: test those, and
+        // gather every obstacle only for a curve that must detour.
+        let pts = cubic.points();
+        let bb = bbox(&pts);
+        let near = |r: &[f32; 4]| overlaps(*r, bb);
+        let blocked = rects.iter().enumerate().any(|(j, r)| j != w.from.0 && j != w.to.0 && near(r) && crosses(&pts, &[*r]))
+            || frames.iter().any(|f| near(f) && !within(f, a) && !within(f, b) && crosses(&pts, &[*f]));
+        if blocked {
+            let obstacles = obstacles(w, a, b);
             if let Some(c) = gutter_route(a, b, w.from, &obstacles, &mut gutter_lanes) {
                 return Some(c);
             }
@@ -770,52 +837,113 @@ fn route(g: &Graph, pl: &crate::layout::Placed, o: [f32; 2]) -> Routing {
     Routing { rects, frames, lanes, curves }
 }
 
+/// Every wire's [`Routing`], with each route as a polyline and the parts of its drawing that
+/// depend only on where things are, not on the focus.
+struct Routed {
+    routing: Routing,
+    routes: Vec<Vec<[f32; 2]>>,
+    /// Per wire, the short stretches beside a node's edge where it passes behind that node, in
+    /// drawing order, each with whether an expanded frame (rather than the canvas) is behind it.
+    behind: Vec<Vec<(Vec<[f32; 2]>, bool)>>,
+    /// Per wire, where its direction arrow goes (point and tangent), if it gets one.
+    arrows: Vec<Option<([f32; 2], [f32; 2])>>,
+}
+
+thread_local! {
+    /// The last routing and the layout generation it was routed for.
+    static ROUTED: std::cell::RefCell<Option<(u64, std::rc::Rc<Routed>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// [`route`], reused while the layout stays the same: routes depend only on where things are,
+/// so a hover or selection (which changes how wires are drawn) never routes them again.
+fn cached_route(g: &Graph, pl: &crate::layout::Placed, o: [f32; 2]) -> std::rc::Rc<Routed> {
+    if pl.generation != 0
+        && let Some(r) = ROUTED.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == pl.generation).map(|(_, r)| r.clone()))
+    {
+        return r;
+    }
+    let routing = route(g, pl, o);
+    let routes: Vec<Vec<[f32; 2]>> = routing.curves.iter().map(|c| c.points()).collect();
+    let boxes: Vec<[f32; 4]> = routes.iter().map(|r| bbox(r)).collect();
+    let Routing { rects, frames, lanes, .. } = &routing;
+    let in_frame = |pt: [f32; 2]| frames.iter().any(|f| pt[0] > f[0] && pt[0] < f[2] && pt[1] > f[1] && pt[1] < f[3]);
+    let behind = g.wires.iter().enumerate().map(|(i, w)| {
+        let mut out = vec![];
+        // The nodes it doesn't plug into, in order; one clear of its bounding box can't be crossed.
+        let others = rects.iter().enumerate().filter(|&(j, r)| j != w.from.0 && j != w.to.0 && overlaps(*r, boxes[i]));
+        for (_, &r) in others {
+            for (at, entering) in rect_crossings(&routes[i], r) {
+                let (s0, s1) = if entering { (at - BEHIND_GAP, at + 1.0) } else { (at - 1.0, at + BEHIND_GAP) };
+                let piece = sub_polyline(&routes[i], s0, s1);
+                if piece.len() > 1 {
+                    let edge = in_frame(piece[if entering { 0 } else { piece.len() - 1 }]);
+                    out.push((piece, edge));
+                }
+            }
+        }
+        out
+    }).collect();
+    let arrows = g.wires.iter().enumerate().map(|(i, w)| {
+        if !wants_arrow(&routes[i]) {
+            return None;
+        }
+        // Clear of other wires. Wires sharing a socket run together there, so they don't push
+        // each other's arrows. Lane-mates run alongside on purpose; their arrows are staggered
+        // along them instead.
+        let pair = |j: usize| (g.wires[j].from.0, g.wires[j].to.0);
+        let bundled = |j: usize| g.wires[j].from == w.from || g.wires[j].to == w.to || (lanes[i].is_some() && lanes[j].is_some() && pair(j) == pair(i));
+        Some(arrow_spot(i, &routes, &boxes, bundled, lanes[i].map_or(0.5, |l| l.arrow)))
+    }).collect();
+    let r = std::rc::Rc::new(Routed { routing, routes, behind, arrows });
+    ROUTED.with(|c| *c.borrow_mut() = Some((pl.generation, r.clone())));
+    r
+}
+
+/// Whether two `[x0, y0, x1, y1]` boxes overlap or touch.
+fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1]
+}
+
 /// What a wire drawing was drawn for: (layout generation, focus, dark).
 type WiresKey = (u64, Option<Item>, bool);
 
 thread_local! {
     /// The last wire drawing and its key.
-    static WIRES: std::cell::RefCell<Option<(WiresKey, Shape)>> = const { std::cell::RefCell::new(None) };
+    static WIRES: std::cell::RefCell<Option<(WiresKey, std::rc::Rc<Vec<WireInk>>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// [`wires`], reused while the layout, focus and theme stay the same. Wires are drawn in world
 /// space, so panning and zooming (which rebuild the view every frame) never re-route them.
-fn cached_wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
+fn cached_wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> std::rc::Rc<Vec<WireInk>> {
     let key = (pl.generation, focus, p.dark);
     if pl.generation != 0
-        && let Some(sh) = WIRES.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, sh)| sh.clone()))
+        && let Some(ink) = WIRES.with(|c| c.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, ink)| ink.clone()))
     {
-        return sh;
+        return ink;
     }
-    let sh = wires(p, g, pl, o, focus);
-    WIRES.with(|c| *c.borrow_mut() = Some((key, sh.clone())));
-    sh
+    let ink = std::rc::Rc::new(wires(p, g, pl, o, focus));
+    WIRES.with(|c| *c.borrow_mut() = Some((key, ink.clone())));
+    ink
 }
 
-fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
-    let mut s = Shape::new();
+fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Vec<WireInk> {
+    let mut out = Vec::with_capacity(g.wires.len());
     let touches = |w: &model::Wire| match focus {
         Some(Item::Node(i)) => w.from.0 == i || w.to.0 == i,
         Some(Item::Group(gi)) => g.nodes[w.from.0].group == Some(gi) || g.nodes[w.to.0].group == Some(gi),
         None => true,
     };
     // Route every wire first, in a fixed order, so lanes don't jump as the focus changes.
-    let Routing { rects, frames, lanes, curves } = route(g, pl, o);
-    let others = |w: &model::Wire| -> Vec<[f32; 4]> {
-        rects.iter().enumerate().filter(|&(j, _)| j != w.from.0 && j != w.to.0).map(|(_, &r)| r).collect()
-    };
-    let routes: Vec<Vec<[f32; 2]>> = curves.iter().map(|c| c.points()).collect();
-    let boxes: Vec<[f32; 4]> = routes.iter().map(|r| bbox(r)).collect();
+    let routed = cached_route(g, pl, o);
+    let Routed { routing: Routing { curves, .. }, routes, behind, arrows, .. } = &*routed;
     // What shows behind a wire: the canvas, or an expanded frame's fill over it.
     let framed = p.framed();
-    let backdrop = |pt: [f32; 2]| {
-        if frames.iter().any(|f| pt[0] > f[0] && pt[0] < f[2] && pt[1] > f[1] && pt[1] < f[3]) { framed } else { p.canvas }
-    };
 
     // Faded wires first, then data, exec on top.
     let mut order: Vec<usize> = (0..g.wires.len()).collect();
     order.sort_by_key(|&i| (touches(&g.wires[i]), g.wire_ty(&g.wires[i]) == Ty::Exec));
     for i in order {
+        let mut s = Pen::default();
         let w = &g.wires[i];
         let ty = g.wire_ty(w);
         let exec = ty == Ty::Exec;
@@ -840,9 +968,9 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
             // A loop's way back is dashed, so it never reads as forward flow.
             for dash in dashes(&routes[i], 9.0, 6.0) {
                 if let Some((out, c)) = under {
-                    s = s.stroke(dash.clone(), width + 2.0 * out, c);
+                    s.stroke(dash.clone(), width + 2.0 * out, LineCap::Round, c);
                 }
-                s = s.stroke(dash, width, core);
+                s.stroke(dash, width, LineCap::Round, core);
             }
         } else if let Curve::Cubic([a, _, _, b]) = curves[i]
             && (a[1] - b[1]).abs() < 0.5
@@ -850,43 +978,102 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
             // A level wire is one straight stroke: flattened into many short pieces, the curve's
             // joints blend twice and read as a striped ladder at 1x.
             if let Some((out, c)) = under {
-                s = s.line(a, b, width + 2.0 * out, LineCap::Round, c);
+                s.stroke(vec![a, b], width + 2.0 * out, LineCap::Round, c);
             }
-            s = s.line(a, b, width, LineCap::Round, core);
+            s.stroke(vec![a, b], width, LineCap::Round, core);
         } else {
-            let path = curves[i].path();
             if let Some((out, c)) = under {
-                s = s.stroke_path(&path, width + 2.0 * out, LineCap::Round, c);
+                s.curve(&curves[i], width + 2.0 * out, c);
             }
-            s = s.stroke_path(&path, width, LineCap::Round, core);
+            s.curve(&curves[i], width, core);
         }
         // Where it still passes behind a node, mask a short stretch beside the node's edge.
         let mask = width + 2.0 * under.map_or(0.0, |u| u.0) + 2.0;
-        for r in others(w) {
-            for (at, entering) in rect_crossings(&routes[i], r) {
-                let (s0, s1) = if entering { (at - BEHIND_GAP, at + 1.0) } else { (at - 1.0, at + BEHIND_GAP) };
-                let piece = sub_polyline(&routes[i], s0, s1);
-                if piece.len() > 1 {
-                    let c = backdrop(piece[if entering { 0 } else { piece.len() - 1 }]);
-                    s = s.stroke_with(piece, false, mask, LineCap::Butt, c);
-                }
-            }
+        for (piece, in_frame) in &behind[i] {
+            s.stroke(piece.clone(), mask, LineCap::Butt, if *in_frame { framed } else { p.canvas });
         }
-        if !wants_arrow(&routes[i]) {
+        let Some(spot) = arrows[i] else {
+            out.extend(s.ink(i));
             continue;
-        }
+        };
         // One direction arrow along the route, clear of other wires: its outline, then its core.
-        // Wires sharing a socket run together there, so they don't push each other's arrows.
-        // Lane-mates run alongside on purpose; their arrows are staggered along them instead.
-        let pair = |j: usize| (g.wires[j].from.0, g.wires[j].to.0);
-        let bundled = |j: usize| g.wires[j].from == w.from || g.wires[j].to == w.to || (lanes[i].is_some() && lanes[j].is_some() && pair(j) == pair(i));
-        let tri = arrow(arrow_spot(i, &routes, &boxes, bundled, lanes[i].map_or(0.5, |l| l.arrow)), width, exec);
+        let tri = arrow(spot, width, exec);
         if let Some((out, c)) = under {
-            s = s.fill(grow_triangle(tri, out).to_vec(), c);
+            s.fill(grow_triangle(tri, out).to_vec(), c);
         }
-        s = s.fill(tri.to_vec(), core);
+        s.fill(tri.to_vec(), core);
+        out.extend(s.ink(i));
     }
-    s
+    out
+}
+
+/// One wire's drawing as its own canvas: `shape` in points from `at`, the canvas's top-left in
+/// canvas space, and `size` holding everything it paints. A single canvas for every wire would
+/// paint every segment of every wire each frame, however little of the graph is on screen:
+/// Rune culls whole elements that fall outside the window, not the pieces of a shape. One
+/// canvas per wire, in drawing order, paints only the wires in view, exactly as before.
+#[derive(Clone)]
+struct WireInk {
+    /// `wire-{index}`, the canvas's key.
+    key: String,
+    at: [f32; 2],
+    size: [f32; 2],
+    shape: Shape,
+}
+
+/// One stroke or fill of a wire, in canvas space.
+enum Mark {
+    Stroke(Vec<[f32; 2]>, f32, LineCap, Color),
+    Fill(Vec<[f32; 2]>, Color),
+}
+
+/// Collects one wire's strokes and fills, in order, and the box they paint in.
+#[derive(Default)]
+struct Pen {
+    marks: Vec<Mark>,
+    reach: Option<[f32; 4]>,
+}
+
+impl Pen {
+    /// Grow the box by `pts`, padded by `pad` on every side.
+    fn cover(&mut self, pts: &[[f32; 2]], pad: f32) {
+        if pts.is_empty() {
+            return;
+        }
+        let b = bbox(pts);
+        let b = [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad];
+        self.reach = Some(self.reach.map_or(b, |r| [r[0].min(b[0]), r[1].min(b[1]), r[2].max(b[2]), r[3].max(b[3])]));
+    }
+
+    fn stroke(&mut self, pts: Vec<[f32; 2]>, width: f32, cap: LineCap, c: Color) {
+        self.cover(&pts, width / 2.0 + 1.0);
+        self.marks.push(Mark::Stroke(pts, width, cap, c));
+    }
+
+    /// The curve as a rounded stroke, flattened as `Shape::stroke_path` would.
+    fn curve(&mut self, curve: &Curve, width: f32, c: Color) {
+        self.stroke(curve.flattened(), width, LineCap::Round, c);
+    }
+
+    fn fill(&mut self, pts: Vec<[f32; 2]>, c: Color) {
+        self.cover(&pts, 1.0);
+        self.marks.push(Mark::Fill(pts, c));
+    }
+
+    /// The canvas: placed at a whole point, so moving every coordinate to it is exact.
+    fn ink(self, wire: usize) -> Option<WireInk> {
+        let r = self.reach?;
+        let at = [r[0].floor(), r[1].floor()];
+        let local = |pts: Vec<[f32; 2]>| pts.into_iter().map(|q| [q[0] - at[0], q[1] - at[1]]).collect::<Vec<_>>();
+        let mut shape = Shape::new();
+        for m in self.marks {
+            shape = match m {
+                Mark::Stroke(pts, width, cap, c) => shape.stroke_with(local(pts), false, width, cap, c),
+                Mark::Fill(pts, c) => shape.fill(local(pts), c),
+            };
+        }
+        Some(WireInk { key: format!("wire-{wire}"), at, size: [r[2] - at[0], r[3] - at[1]], shape })
+    }
 }
 
 /// A wire's stroke width at rest: exec wires a solid stroke a little heavier than data wires.
@@ -1141,6 +1328,23 @@ fn grow_triangle(t: [[f32; 2]; 3], by: f32) -> [[f32; 2]; 3] {
     let ic = [(la * t[0][0] + lb * t[1][0] + lc * t[2][0]) / per, (la * t[0][1] + lb * t[1][1] + lc * t[2][1]) / per];
     let k = (2.0 * area / per + by) / (2.0 * area / per);
     t.map(|p| [ic[0] + (p[0] - ic[0]) * k, ic[1] + (p[1] - ic[1]) * k])
+}
+
+/// A cubic from the last point of `out` through `c1`, `c2` to `p`, flattened into `out` as
+/// `rune::Path::cubic_to` does: as many segments as its control polygon's length asks for at
+/// Rune's 0.1 pt tolerance (1 to 256), at even `t`, in the same arithmetic.
+fn flat_cubic(out: &mut Vec<[f32; 2]>, c1: [f32; 2], c2: [f32; 2], p: [f32; 2]) {
+    const TOLERANCE: f32 = 0.1;
+    let dist = |a: [f32; 2], b: [f32; 2]| ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    let a = *out.last().expect("starts somewhere");
+    let length = dist(a, c1) + dist(c1, c2) + dist(c2, p);
+    let n = ((length / TOLERANCE).sqrt() * 0.5).ceil().clamp(1.0, 256.0) as usize;
+    for i in 1..=n {
+        let t = i as f32 / n as f32;
+        let u = 1.0 - t;
+        let (b0, b1, b2, b3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        out.push([b0 * a[0] + b1 * c1[0] + b2 * c2[0] + b3 * p[0], b0 * a[1] + b1 * c1[1] + b2 * c2[1] + b3 * p[1]]);
+    }
 }
 
 /// A cubic Bézier sampled at 17 evenly spaced `t`, appended to `out`.
@@ -1463,6 +1667,27 @@ fn socket(p: &Pal, ty: Ty, [x, y]: [f32; 2]) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flattened_as_rune_flattens() {
+        // Wires stroke `Curve::flattened` in place of `Shape::stroke_path(&curve.path())`: the
+        // points must be Rune's own, or the wires would draw a different curve.
+        let curves = [
+            Curve::Cubic([[3.25, 7.5], [140.0, 7.5], [-60.0, 912.75], [1830.5, 911.0]]),
+            Curve::Cubic([[0.0, 0.0], [0.01, 0.0], [0.02, 0.0], [0.03, 0.0]]),
+            Curve::Routed { a: [512.3, 40.1], b: [96.7, 88.9], below: 640.25, reach: BACK_REACH },
+            Curve::Gutter { a: [10.0, 20.0], b: [900.0, 700.0], x: 455.5, bend: GUTTER_BEND },
+            Curve::Chain {
+                a: [1.0, 2.0],
+                pieces: vec![Piece::Line([50.0, 2.0]), Piece::Cubic([80.0, 2.0], [80.0, 300.0], [110.0, 300.0]), Piece::Line([4000.0, 300.0])],
+            },
+        ];
+        for c in curves {
+            let pts = c.flattened();
+            let again = pts[1..].iter().fold(Path::new().move_to(pts[0]), |p, &q| p.line_to(q));
+            assert_eq!(c.path(), again);
+        }
+    }
 
     #[test]
     fn corner_chips_are_concentric_with_equal_insets() {

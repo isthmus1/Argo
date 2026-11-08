@@ -317,6 +317,7 @@ dependencies = [
  "argo-protocol",
  "rune",
  "spacetimedb-sdk",
+ "wgpu",
 ]
 
 [[package]]
@@ -3637,6 +3638,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "procwatch"
+version = "0.1.0"
+source = "git+https://github.com/anomalyco/rune?rev=c762af1427930c90c845c260ef551397529c5eee#c762af1427930c90c845c260ef551397529c5eee"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4187,6 +4196,7 @@ dependencies = [
  "png 0.18.1",
  "pollster",
  "portable-atomic",
+ "procwatch",
  "raw-window-handle",
  "raw-window-metal",
  "resvg",
