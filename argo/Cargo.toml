@@ -5,6 +5,7 @@ edition = "2024"
 
 
 [dependencies]
+clang = { version = "2.1.0", features = ["runtime"] }
 rucc-ast = "=0.30.15"
 rucc-base = "=0.30.15"
 rucc-diag = "=0.30.15"
@@ -12,3 +13,6 @@ rucc-lex = "=0.30.15"
 rucc-parse = "=0.30.15"
 rucc-session = "=0.30.15"
 rucc-target = "=0.30.15"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt"] }

@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::fmt::{self, Write};
+use std::path::Path;
 
 use rucc_ast::{Ast, Decl, DeclId};
 use rucc_base::Interner;
@@ -12,23 +12,32 @@ use rucc_target::{TargetInfo, Triple};
 const STD: Std = Std::C11;
 const GNU: bool = true;
 const TARGET: &str = "x86_64-unknown-linux-gnu";
-fn main() -> ExitCode {
-    let path = std::env::args()
-        .nth(1)
-        .map_or_else(|| PathBuf::from("tests/fixture.c"), PathBuf::from);
 
-    match run(&path) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("error: {message}");
-            ExitCode::FAILURE
-        }
+/// What parsing one translation unit produced.
+#[derive(Debug, Clone)]
+pub struct Report {
+    /// The human-readable report: header, declarations, diagnostics, and the
+    /// tree printed back out as C.
+    pub output: String,
+    /// Whether any fatal diagnostic was reported.
+    pub failed: bool,
+}
+
+/// Parse the C file at `path` and print its report to stdout.
+pub fn run(path: &Path) -> Result<(), String> {
+    let source = read_source(path)?;
+    let name = path.display().to_string();
+    let report = parse_source(&name, &source)?;
+    print!("{}", report.output);
+    if report.failed {
+        Err(format!("{name} reported, no graph built"))
+    } else {
+        Ok(())
     }
 }
 
-fn run(path: &Path) -> Result<(), String> {
-    let source = read_source(path)?;
-
+/// Parse C `source` held in memory. `name` labels it in the report.
+pub fn parse_source(name: &str, source: &[u8]) -> Result<Report, String> {
     let triple: Triple = TARGET
         .parse()
         .map_err(|_| format!("the target triple {TARGET} does not parse"))?;
@@ -38,7 +47,7 @@ fn run(path: &Path) -> Result<(), String> {
     // "is this identifier a keyword" a range check rather than a hash lookup.
     let keywords = Keywords::new(&mut interner, STD, GNU);
 
-    let (pp_tokens, lex_diagnostics) = tokenize(&source, 0, Options::new(), &mut interner);
+    let (pp_tokens, lex_diagnostics) = tokenize(source, 0, Options::new(), &mut interner);
     let cx = Convert {
         keywords: &keywords,
         interner: &interner,
@@ -56,47 +65,64 @@ fn run(path: &Path) -> Result<(), String> {
         .chain(parsed.diagnostics.iter())
         .collect();
 
-    report_header(
-        path,
-        &source,
+    let mut output = String::new();
+    write_report(
+        &mut output,
+        name,
+        source,
         pp_tokens.len(),
         tokens.tokens.len(),
         &diagnostics,
-    );
-    report_declarations(&parsed.ast, &interner, &source);
-    report_diagnostics(&diagnostics, &source);
+        &parsed.ast,
+        &interner,
+    )
+    .map_err(|e| format!("cannot format the report: {e}"))?;
 
-    println!("\n=== rucc_ast::print: the tree written back out as C ===");
-    print!("{}", rucc_ast::print(&parsed.ast, &interner));
-
-    if parsed.failed() {
-        Err(format!("{} reported, no graph built", path.display()))
-    } else {
-        Ok(())
-    }
+    Ok(Report {
+        output,
+        failed: parsed.failed(),
+    })
 }
 
-/// The phase-7 input: the file's bytes.
-///
-/// `rucc-pp` replaces this. Until then a file with a directive in it comes back
-/// as a lexer or parser diagnostic rather than as a wrong tree, which is the
-/// failure mode we want while the fixture is small.
+#[allow(clippy::too_many_arguments)]
+fn write_report(
+    out: &mut String,
+    name: &str,
+    source: &[u8],
+    pp_tokens: usize,
+    tokens: usize,
+    diagnostics: &[&Diagnostic],
+    ast: &Ast,
+    interner: &Interner,
+) -> fmt::Result {
+    report_header(out, name, source, pp_tokens, tokens, diagnostics)?;
+    report_declarations(out, ast, interner, source)?;
+    report_diagnostics(out, diagnostics, source)?;
+    writeln!(
+        out,
+        "\n=== rucc_ast::print: the tree written back out as C ==="
+    )?;
+    write!(out, "{}", rucc_ast::print(ast, interner))
+}
+
 fn read_source(path: &Path) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 fn report_header(
-    path: &Path,
+    out: &mut String,
+    name: &str,
     source: &[u8],
     pp_tokens: usize,
     tokens: usize,
     diagnostics: &[&Diagnostic],
-) {
+) -> fmt::Result {
     let errors = diagnostics.iter().filter(|d| d.severity.is_fatal()).count();
-    println!("file:        {} ({} bytes)", path.display(), source.len());
-    println!("dialect:     {STD:?} + gnu, target {TARGET}");
-    println!("tokens:      {pp_tokens} pp-tokens -> {tokens} tokens");
-    println!("diagnostics: {} ({} fatal)", diagnostics.len(), errors);
+    writeln!(out, "file:        {} ({} bytes)", name, source.len())?;
+    writeln!(out, "dialect:     {STD:?} + gnu, target {TARGET}")?;
+    writeln!(out, "tokens:      {pp_tokens} pp-tokens -> {tokens} tokens")?;
+    writeln!(out, "diagnostics: {} ({} fatal)", diagnostics.len(), errors)?;
+    Ok(())
 }
 
 /// One row per top-level declaration: the boundary nodes of the graph.
@@ -104,33 +130,42 @@ fn report_header(
 /// `DeclId` is four bytes, so this is also the identity a graph record would
 /// store. The span column is where a source-located diagnostic or a canvas
 /// selection comes from.
-fn report_declarations(ast: &Ast, interner: &Interner, source: &[u8]) {
+fn report_declarations(
+    out: &mut String,
+    ast: &Ast,
+    interner: &Interner,
+    source: &[u8],
+) -> fmt::Result {
     let counts = ast.counts();
     let top_level = ast.top_level();
-    println!(
+    writeln!(
+        out,
         "\ntop level:   {} declarations, {} exprs, {} stmts, {} params",
         top_level.len(),
         counts.exprs,
         counts.stmts,
         counts.params
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "\n{:<4} {:<14} {:<34} {:<12} detail",
         "id", "kind", "name", "span"
-    );
+    )?;
     for &id in top_level {
         let (kind, name) = describe(ast, interner, id);
         let span = ast.decl_span(id);
         let (line, column) = line_column(source, span.lo);
-        println!(
+        writeln!(
+            out,
             "{:<4} {:<14} {:<34} {:<12} line {line}, column {column}, {} bytes",
             id.index(),
             kind,
             truncate(&name, 34),
             format!("{}..{}", span.lo, span.hi),
             span.hi.saturating_sub(span.lo),
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// What a declaration is, in the vocabulary the block templates use.
@@ -166,26 +201,29 @@ fn declarator_name(ast: &Ast, interner: &Interner, id: rucc_ast::DeclaratorId) -
     }
 }
 
-fn report_diagnostics(diagnostics: &[&Diagnostic], source: &[u8]) {
+fn report_diagnostics(out: &mut String, diagnostics: &[&Diagnostic], source: &[u8]) -> fmt::Result {
     if diagnostics.is_empty() {
-        return;
+        return Ok(());
     }
-    println!("\n--- diagnostics ---");
+    writeln!(out, "\n--- diagnostics ---")?;
     for diagnostic in diagnostics {
         let (line, column) = line_column(source, diagnostic.span.lo);
         let code = diagnostic.code.map_or("", |code| code);
-        println!(
+        writeln!(
+            out,
             "{:<7} {:<6} {line}:{column}  {}",
             diagnostic.severity, code, diagnostic.message
-        );
+        )?;
         for child in &diagnostic.children {
             let (line, column) = line_column(source, child.span.lo);
-            println!(
+            writeln!(
+                out,
                 "{:<7} {:<6} {line}:{column}  {}",
                 child.severity, "", child.message
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 /// `BytePos` to a 1-based line and column.
