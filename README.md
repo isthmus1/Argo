@@ -122,6 +122,17 @@ refused attaches again. Attaching is open to anyone who can reach the port, like
 itself. `--proxy-port` moves it, `--model-url` points it at another OpenAI-compatible API; it is
 off (with a message) when `OPENROUTER_API_KEY` is unset.
 
+**Recording and replay.** The proxy also stores every exchange it forwards in the database's
+`model_exchange` table: the worker, the chunk and claim it was for (the worker sends them as
+`x-argo-chunk`/`x-argo-generation`), when it was sent and answered, its tokens and cost, the
+reply, and the request as sent upstream. To keep the table small, a request keeps only the
+messages added since the previous turn of its conversation (`prefix` says how many came before).
+`argo-server --replay argo --module argo-replay [--speed 100]` plays a recorded run into a fresh
+database on the same host: the program, then every claim, result and exchange at its recorded
+time, 100x faster by default. No model is asked and nothing is compiled. Point the GUI at
+`--module argo-replay` to watch. Add `--server http://host:port` to replay into a host that is
+already running (the recording's own server, say); the server then exits when the replay ends.
+
 Candidates are submitted as *unvalidated* until the compile/link/C-test `Validator` lands.
 
 ## Parser and graph prototype

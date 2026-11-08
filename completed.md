@@ -27,6 +27,15 @@
 - Rust that passes every check is saved as `Unvalidated`, because nothing runs the program or its tests yet.
 - **Model proxy:** only `argo-server` holds the OpenRouter key and picks the model. Each worker attaches to the server's proxy (port 3101) and gets its own key and the model; the proxy forwards its requests as that model (optionally pinned to one provider) with the real key and logs requests, tokens and cost per worker and overall to `usage.log` in the data dir.
 
+## Recording and replay
+- The model proxy records every request it forwards and the reply in SpacetimeDB (`model_exchange`):
+  worker, chunk, claim generation, times, tokens, cost. A request keeps only the messages added since
+  the previous turn of its conversation.
+- `argo-server --replay argo --module argo-replay [--speed 100]` plays a recorded run (program, claims,
+  results, model exchanges) into a fresh database at 100x by default, for the UI to watch with
+  `--module argo-replay`. Nothing is translated or compiled again. Runs from before recording existed
+  replay their claims and results without exchanges.
+
 ## Compile helpers (`argo/src/comp`)
 - `comp::compiles(rust)`: compiles one Rust snippet on its own.
 - `comp::run_with_c(c, &Replacement)`: replaces a C function, at its byte range, with Rust, then links and runs the program.

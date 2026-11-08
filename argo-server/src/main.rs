@@ -14,7 +14,12 @@
 //! the I/O.
 //!
 //! A local host also gets the model [`proxy`] on `--proxy-port` (the database's port + 1):
-//! workers attach there for a key of their own instead of holding the provider's.
+//! workers attach there for a key of their own instead of holding the provider's. The server
+//! keeps its owner connection open and [`recorder`] stores every exchange through the proxy in
+//! `model_exchange`.
+//!
+//! `--replay FROM` ingests no repository: it republishes `--module` empty and plays the run
+//! recorded in `FROM` into it ([`replay`]), then keeps serving (or, with `--server`, exits).
 //!
 //! Unix-only: children run in their own process groups and are stopped by signal ([`group`]),
 //! and SIGINT/SIGTERM are handled through `tokio::signal::unix`. Linux additionally kills them
@@ -38,6 +43,8 @@ mod ingest;
 mod interrupts;
 mod loader;
 mod proxy;
+mod recorder;
+mod replay;
 mod repo;
 #[cfg(test)]
 mod scratch;
@@ -79,7 +86,7 @@ async fn run(args: Args) -> ExitCode {
         let outcome = match Endpoint::remote(server) {
             // Nothing to stop afterwards: the host isn't ours.
             Ok(at) => tokio::select! {
-                r = setup(&args, &at, async { Ok(()) }) => r,
+                r = setup(&args, &at, async { Ok(()) }) => r.map(|conn| conn.close()),
                 why = interrupts.recv() => Err(format!("{why}; stopped")),
             },
             Err(e) => Err(e),
@@ -90,7 +97,12 @@ async fn run(args: Args) -> ExitCode {
         };
     }
     let data_dir = args.data_dir();
-    let proxy = match proxy(&args, &data_dir) {
+    // A replay asks no model, and its exchanges are already recorded.
+    let proxy = match args.replay.is_some() {
+        true => Ok(None),
+        false => proxy(&args, &data_dir),
+    };
+    let proxy = match proxy {
         Ok(proxy) => proxy,
         Err(e) => return fail(&e),
     };
@@ -143,14 +155,18 @@ fn proxy(args: &Args, data_dir: &std::path::Path) -> Result<Option<Proxy>, Strin
 /// Serve the model proxy and bring the host up while the repository loads, ingest, then keep
 /// serving. Never returns `Ok`: a running server ends by being interrupted or by its host exiting.
 async fn serve(args: &Args, host: &Host, proxy: Option<Proxy>) -> Result<(), String> {
+    let exchanges = proxy.as_ref().map(Proxy::record);
     let database = async {
-        setup(args, &Endpoint::local(args.port), host.ready()).await?;
+        let conn = setup(args, &Endpoint::local(args.port), host.ready()).await?;
         eprintln!(
             "argo-server: serving {} database {}; Ctrl-C to stop",
             endpoint::advertised("ws", args.listen, args.port),
             args.module
         );
-        std::future::pending::<Result<(), String>>().await
+        match exchanges {
+            Some(rx) => recorder::record(&conn, rx).await,
+            None => std::future::pending::<Result<(), String>>().await,
+        }
     };
     let proxy = async {
         match proxy {
@@ -162,12 +178,16 @@ async fn serve(args: &Args, host: &Host, proxy: Option<Proxy>) -> Result<(), Str
 }
 
 /// Publish the module to `at` once `ready`, loading the repository meanwhile, then take
-/// ownership and ingest it.
+/// ownership and ingest it (or, with `--replay`, play the recording in). Returns the owner's
+/// connection, which records the proxy's exchanges.
 async fn setup(
     args: &Args,
     at: &Endpoint,
     ready: impl Future<Output = Result<(), String>>,
-) -> Result<(), String> {
+) -> Result<conn::Conn, String> {
+    if let Some(from) = &args.replay {
+        return setup_replay(args, at, ready, from).await;
+    }
     let up = async {
         ready.await?;
         cli::publish(&at.cli, &args.module_path, &args.module, args.delete_data).await
@@ -180,20 +200,72 @@ async fn setup(
         ingest::ingest(&conn, &loaded, args.fresh).await
     }
     .await;
-    // The server has nothing more to say to the database.
-    conn.close();
-    ingest::report(&loaded, &outcome?);
+    let sent = match outcome {
+        Ok(sent) => sent,
+        Err(e) => {
+            conn.close();
+            return Err(e);
+        }
+    };
+    ingest::report(&loaded, &sent);
     eprintln!(
         "argo-server: workers and the GUI connect to {} database {}",
         at.ws, args.module
     );
-    // The owner identity was this run's anonymous connection, now closed; say how to get it back.
+    owner_hint(args, at);
+    Ok(conn)
+}
+
+/// `--replay FROM`: a fresh `--module` on the same host, then the recording played into it.
+async fn setup_replay(
+    args: &Args,
+    at: &Endpoint,
+    ready: impl Future<Output = Result<(), String>>,
+    from: &str,
+) -> Result<conn::Conn, String> {
+    if *from == args.module {
+        return Err(format!(
+            "--replay {from} would replay into itself; pick another --module"
+        ));
+    }
+    ready.await?;
+    // Every replay starts from nothing: this module's earlier replay is dropped.
+    cli::publish(&at.cli, &args.module_path, &args.module, true).await?;
+    let (conn, me) = conn::connect(&at.ws, &args.module).await?;
+    let (source, _) = match conn::connect(&at.ws, from).await {
+        Ok(source) => source,
+        Err(e) => {
+            conn.close();
+            return Err(format!("the recording {from}: {e}"));
+        }
+    };
+    eprintln!(
+        "argo-server: the GUI watches the replay at {} database {}",
+        at.ws, args.module
+    );
+    let outcome = async {
+        cli::grant(&at.cli, &args.module, me).await?;
+        replay::replay(&conn, &source, from, args.speed()).await
+    }
+    .await;
+    source.close();
+    match outcome {
+        Ok(()) => Ok(conn),
+        Err(e) => {
+            conn.close();
+            Err(e)
+        }
+    }
+}
+
+/// The owner is this run's anonymous connection, gone when the server stops; say how to take
+/// ownership for `requeue` and the like.
+fn owner_hint(args: &Args, at: &Endpoint) {
     eprintln!(
         "argo-server: for requeue, first `spacetime call --server {} {} grant_ownership \
          '{{\"__identity__\": \"0x<your CLI identity>\"}}'`",
         at.cli, args.module
     );
-    Ok(())
 }
 
 fn fail(e: &str) -> ExitCode {

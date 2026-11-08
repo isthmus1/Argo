@@ -3,7 +3,9 @@
 //! Bearer <key>`) instead of to the provider. The proxy checks the key, forwards the request with
 //! the server's model and provider pin and the provider key from this server's environment
 //! ([`upstream`]), and logs each request's tokens and cost per worker and overall (`usage.log` in
-//! the data dir, see [`usage`]).
+//! the data dir, see [`usage`]). With [`Proxy::record`] it also hands each exchange (request,
+//! reply, claim and timing, see [`record`]) to the server, which stores it in `model_exchange`
+//! for replay.
 //!
 //! Workers never hold the provider key, so nothing a worker runs, or a model talks it into
 //! printing, can leak it. A worker key opens only this proxy's completion endpoint, only until
@@ -11,6 +13,7 @@
 //! keys scope and account for usage; they don't keep strangers out.
 
 mod keys;
+mod record;
 #[cfg(test)]
 mod tests;
 mod upstream;
@@ -19,8 +22,8 @@ mod usage;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
@@ -32,6 +35,9 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use keys::Workers;
+use record::Conversations;
+pub use record::{Claim, Exchange};
+use tokio::sync::mpsc;
 pub use upstream::Upstream;
 use usage::{Log, Tokens};
 
@@ -52,11 +58,14 @@ pub struct Proxy {
 struct State {
     upstream: Upstream,
     ledger: Mutex<Ledger>,
+    /// Where exchanges go to be recorded, once [`Proxy::record`] asked for them.
+    recorder: OnceLock<mpsc::UnboundedSender<Exchange>>,
 }
 
 struct Ledger {
     workers: Workers,
     log: Log,
+    conversations: Conversations,
 }
 
 impl State {
@@ -78,9 +87,30 @@ impl Proxy {
             "proxy started, forwarding to {to}; totals start at zero"
         ));
         let workers = Workers::default();
-        let ledger = Mutex::new(Ledger { workers, log });
-        let state = Arc::new(State { upstream, ledger });
+        let conversations = Conversations::default();
+        let ledger = Mutex::new(Ledger {
+            workers,
+            log,
+            conversations,
+        });
+        let recorder = OnceLock::new();
+        let state = Arc::new(State {
+            upstream,
+            ledger,
+            recorder,
+        });
         Ok(Proxy { listener, state })
+    }
+
+    /// Every exchange from now on, in the order they were answered. The receiver buffers them
+    /// until the server has a database connection to record them with; asked for once.
+    pub fn record(&self) -> mpsc::UnboundedReceiver<Exchange> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        assert!(
+            self.state.recorder.set(tx).is_ok(),
+            "the proxy is recorded once"
+        );
+        rx
     }
 
     /// Where requests go and as what.
@@ -138,7 +168,7 @@ async fn attach(state: &State, req: Request<Incoming>) -> Reply {
         Err(reply) => return reply,
     };
     let mut ledger = state.ledger();
-    let Ledger { workers, log } = &mut *ledger;
+    let Ledger { workers, log, .. } = &mut *ledger;
     match workers.attach(label(&body)) {
         Ok((key, worker)) => {
             log.line(&format!("attach {} {}", worker.name(), worker.label));
@@ -157,6 +187,7 @@ async fn complete(state: &State, req: Request<Incoming>) -> Reply {
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok()?.strip_prefix("Bearer "))
         .map(str::to_string);
+    let claim = claim_of(req.headers());
     let Some(key) = key.filter(|k| state.ledger().workers.get(k).is_some()) else {
         // The worker's cue to attach again: its key died with a previous server run.
         let why = "unknown worker key; POST /attach for a new one";
@@ -170,32 +201,61 @@ async fn complete(state: &State, req: Request<Incoming>) -> Reply {
         Ok(body) => body,
         Err(why) => return text(StatusCode::BAD_REQUEST, &why),
     };
+    let sent_at = SystemTime::now();
     let started = Instant::now();
-    let forwarded = state.upstream.complete(body).await;
+    let forwarded = state.upstream.complete(body.clone()).await;
     let ms = started.elapsed().as_millis();
     let mut via = "?".to_string();
-    let (reply, status, tokens) = match forwarded {
+    let (reply, status, tokens, response) = match forwarded {
         Err(why) => (
             text(StatusCode::BAD_GATEWAY, &why),
             "unreachable".into(),
             None,
+            why,
         ),
         // Not the worker's key, so not a 401 to the worker, which would only attach again.
         Ok((s @ (401 | 403), _)) => {
             let why = format!("the provider refused argo-server's key ({s})");
-            (text(StatusCode::BAD_GATEWAY, &why), s.to_string(), None)
+            (
+                text(StatusCode::BAD_GATEWAY, &why),
+                s.to_string(),
+                None,
+                why,
+            )
         }
         Ok((s, body)) => {
             let tokens = Tokens::of(&body);
             via = served_by(&body);
+            let response = String::from_utf8_lossy(&body).into_owned();
             let status = StatusCode::from_u16(s).unwrap_or(StatusCode::BAD_GATEWAY);
-            (respond(status, body), s.to_string(), tokens)
+            (respond(status, body), s.to_string(), tokens, response)
         }
     };
+    let answered_at = SystemTime::now();
     let ok = status.starts_with('2');
     let mut ledger = state.ledger();
-    let Ledger { workers, log } = &mut *ledger;
+    let Ledger {
+        workers,
+        log,
+        conversations,
+    } = &mut *ledger;
     if let Some(worker) = workers.record(&key, ok, tokens) {
+        if let Some(recorder) = state.recorder.get() {
+            // The rewritten body parsed before, so it parses again.
+            let sent: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            let (prefix, request) = conversations.delta(&worker.name(), claim, &sent);
+            let _ = recorder.send(Exchange {
+                worker: worker.name(),
+                claim,
+                sent_at,
+                answered_at,
+                status: status.parse().unwrap_or(0),
+                tokens,
+                prefix,
+                request,
+                response,
+            });
+        }
         let spent = tokens.map_or("?".into(), |t| t.to_string());
         let (name, usage) = (worker.name(), worker.usage);
         log.line(&format!(
@@ -204,6 +264,15 @@ async fn complete(state: &State, req: Request<Incoming>) -> Reply {
         ));
     }
     reply
+}
+
+/// The claim a worker's request says it is for (`x-argo-chunk`, `x-argo-generation`).
+fn claim_of(headers: &hyper::HeaderMap) -> Claim {
+    let number = |name: &str| headers.get(name)?.to_str().ok()?.parse().ok();
+    Claim {
+        chunk: number("x-argo-chunk"),
+        generation: number("x-argo-generation").and_then(|g: u64| u32::try_from(g).ok()),
+    }
 }
 
 /// The body, at most `max` bytes.

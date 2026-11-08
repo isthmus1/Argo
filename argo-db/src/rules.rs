@@ -4,8 +4,8 @@
 use std::cmp::Reverse;
 
 pub use crate::limits::{
-    LEASE_MICROS, MAX_BATCH_BYTES, MAX_BATCH_ROWS, MAX_LOG_BYTES, MAX_MODEL_BYTES, MAX_RUST_BYTES,
-    ROW_OVERHEAD, row_bytes,
+    LEASE_MICROS, MAX_BATCH_BYTES, MAX_BATCH_ROWS, MAX_EXCHANGE_BYTES, MAX_LOG_BYTES,
+    MAX_MODEL_BYTES, MAX_RUST_BYTES, ROW_OVERHEAD, row_bytes,
 };
 use crate::tables::RustStatus;
 

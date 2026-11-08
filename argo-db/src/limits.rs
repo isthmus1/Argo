@@ -19,6 +19,9 @@ pub const ROW_OVERHEAD: usize = 128;
 pub const MAX_LOG_BYTES: usize = 128 << 10;
 /// Submitted Rust source (§4: 1 MiB per source file).
 pub const MAX_RUST_BYTES: usize = 1 << 20;
+/// A recorded model request (its new messages) or reply. The proxy takes requests up to 8 MiB;
+/// a delta past this is refused, and the proxy reports it rather than stopping.
+pub const MAX_EXCHANGE_BYTES: usize = 4 << 20;
 /// A model name: every subscriber receives it, so it stays small.
 pub const MAX_MODEL_BYTES: usize = 256;
 /// `claim_next`'s rejections that clear by themselves, which a worker waits out rather than

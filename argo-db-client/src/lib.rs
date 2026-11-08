@@ -24,12 +24,13 @@ mod rows;
 mod status;
 
 pub use bindings::{
-    CChunk, ChunkKind, DbConnection, RemoteDbContext, RustChunk, RustStatus, Validation,
+    CChunk, ChunkKind, DbConnection, ModelExchange, RemoteDbContext, RustChunk, RustStatus,
+    Validation,
 };
 pub use error::Error;
 pub use limits::{
-    LEASE_MICROS, MAX_BATCH_BYTES, MAX_BATCH_ROWS, MAX_LOG_BYTES, MAX_MODEL_BYTES, MAX_RUST_BYTES,
-    NONE_FREE, NOT_SEALED, ROW_OVERHEAD,
+    LEASE_MICROS, MAX_BATCH_BYTES, MAX_BATCH_ROWS, MAX_EXCHANGE_BYTES, MAX_LOG_BYTES,
+    MAX_MODEL_BYTES, MAX_RUST_BYTES, NONE_FREE, NOT_SEALED, ROW_OVERHEAD,
 };
 pub use rebuild::{Structure, origin, rebuild};
 pub use records::{Origin, Unit};

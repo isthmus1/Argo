@@ -90,7 +90,8 @@ impl Db {
             .on_applied(move |_| {
                 let _ = tx.send(());
             })
-            .subscribe_to_all_tables();
+            // Not `model_exchange`: the recorded model traffic is large and none of ours.
+            .subscribe(["SELECT * FROM c_chunk", "SELECT * FROM rust_chunk"]);
         timeout(WAIT, rx)
             .await
             .map_err(|_| "subscription never applied")?

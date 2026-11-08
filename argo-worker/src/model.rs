@@ -83,6 +83,17 @@ pub trait Model {
     ) -> impl Future<Output = Result<Reply, ModelError>>;
 }
 
+/// Headers naming the claim a proxied request is for, so `argo-server` can record each agent's
+/// conversation under its chunk (`model_exchange`).
+pub const CHUNK_HEADER: &str = "x-argo-chunk";
+pub const GENERATION_HEADER: &str = "x-argo-generation";
+
+tokio::task_local! {
+    /// The claim (chunk, generation) the agent on this task is working: set around
+    /// `agent::translate`, unset for the startup tool check.
+    pub static CLAIM: (u64, u32);
+}
+
 /// The OpenRouter key `--direct` mode reads.
 const KEY_VAR: &str = "OPENROUTER_API_KEY";
 /// OpenRouter's OpenAI-compatible API, which `--direct` mode sends to (`/v1/chat/completions`
@@ -154,7 +165,14 @@ impl Model for Nemotron {
         let (base, key) = self.endpoint()?;
         let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
         let body = wire::request(model, messages, tools);
-        let send = self.client.post(url).bearer_auth(key).json(&body).send();
+        let mut send = self.client.post(url).bearer_auth(key).json(&body);
+        if let (Access::Proxy(_), Ok((chunk, generation))) = (&self.access, CLAIM.try_with(|c| *c))
+        {
+            send = send
+                .header(CHUNK_HEADER, chunk)
+                .header(GENERATION_HEADER, generation);
+        }
+        let send = send.send();
         let response = match tokio::time::timeout(self.timeout, send).await {
             Err(_) => {
                 return Err(ModelError::Reply(format!(
