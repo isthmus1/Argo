@@ -1262,9 +1262,12 @@ mod tests {
                 let r = s.item_rect(sel);
                 assert!(inside(r, free), "{}: selection {r:?} outside {free:?}", s.scene);
             }
+            // Only claims in view count: one below or above the free area may line up with
+            // its right edge without being cut by it.
             for item in s.claims() {
                 let r = s.item_rect(item);
-                assert!(!(r[0] < right - 0.5 && r[0] + r[2] > right + 0.5), "{}: {item:?} {r:?} straddles {right}", s.scene);
+                let straddles = r[0] < right - 0.5 && r[0] + r[2] > right + 0.5;
+                assert!(!(straddles && overlaps(r, free)), "{}: {item:?} {r:?} straddles {right}", s.scene);
             }
         }
     }
