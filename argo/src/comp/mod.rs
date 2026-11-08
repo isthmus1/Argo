@@ -5,14 +5,44 @@ pub mod model;
 
 pub use model::Replacement;
 
-/// Swap the C function definition at `replacement.span` for its declaration,
-/// link in the Rust that implements it, and run the program.
-pub fn run_with_c(c: &str, replacement: &Replacement) -> Result<(), String> {
-    let c = replace(c, replacement)?;
+/// Compile one Rust snippet on its own, as the static library it would be linked in as. The
+/// error is rustc's output. Nothing is linked, so `extern "C"` functions it calls needn't exist.
+///
+/// Edition 2021 accepts both `#[no_mangle]` and `#[unsafe(no_mangle)]`, and plain
+/// `extern "C" { ... }` blocks, whichever the model writes.
+pub fn compiles(rust: &str) -> Result<(), String> {
+    let dir = scratch()?;
+    std::fs::write(dir.join("snippet.rs"), rust).map_err(|e| e.to_string())?;
+    let result = run(
+        "rustc",
+        Command::new("rustc")
+            .args([
+                "--edition=2021",
+                "--crate-type=staticlib",
+                "--crate-name=snippet",
+                "-o",
+            ])
+            .arg(dir.join("libsnippet.a"))
+            .arg(dir.join("snippet.rs")),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// A fresh directory per call, so parallel calls don't overwrite each other's files.
+fn scratch() -> Result<std::path::PathBuf, String> {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     let n = CALLS.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("argo-comp-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Swap the C function definition at `replacement.span` for its declaration,
+/// link in the Rust that implements it, and run the program.
+pub fn run_with_c(c: &str, replacement: &Replacement) -> Result<(), String> {
+    let c = replace(c, replacement)?;
+    let dir = scratch()?;
     std::fs::write(dir.join("snippet.rs"), &replacement.rust).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("main.c"), c).map_err(|e| e.to_string())?;
 
@@ -161,5 +191,30 @@ pub extern "C" fn add(a: i32, b: i32) -> i32 { a - b }
 
         assert_eq!(snippet.range, add_span());
         assert_eq!(snippet.text, &C[add_span()]);
+    }
+
+    #[test]
+    fn a_snippet_that_compiles_on_its_own() {
+        let rust = r#"
+extern "C" {
+    fn helper(x: i32) -> i32;
+}
+
+#[no_mangle]
+pub extern "C" fn add(a: i32, b: i32) -> i32 {
+    unsafe { helper(a) + b }
+}
+"#;
+        assert_eq!(compiles(rust), Ok(()));
+    }
+
+    #[test]
+    fn a_snippet_that_does_not_compile_reports_rustc_errors() {
+        let rust = r#"
+#[no_mangle]
+pub extern "C" fn add(a: i32, b: i32) -> i32 { a + c }
+"#;
+        let err = compiles(rust).unwrap_err();
+        assert!(err.contains("cannot find value `c`"), "{err}");
     }
 }

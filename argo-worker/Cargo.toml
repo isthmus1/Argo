@@ -7,6 +7,8 @@ publish.workspace = true
 description = "Claims C chunks from SpacetimeDB, asks nemotron for extern \"C\" Rust, submits it."
 
 [dependencies]
+# The compile check: `argo_c::comp::compiles`.
+argo-c = { package = "Argo", path = "../argo" }
 argo-db-client = { path = "../argo-db-client" }
 # Nemotron (OpenAI-compatible chat completions): `iterator::nemo::complete` and `getLines`.
 iterator = { path = "../iterator" }

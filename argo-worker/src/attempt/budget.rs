@@ -7,6 +7,7 @@ pub(super) const OUTAGES: u32 = 8;
 /// The longest pause between outages.
 const MAX_PAUSE: Duration = Duration::from_secs(60);
 
+#[derive(Clone)]
 pub struct Budget {
     /// At least 1.
     pub max_attempts: u32,
@@ -16,6 +17,7 @@ pub struct Budget {
     pub backoff: Duration,
 }
 
+#[derive(Clone)]
 pub struct Escalation {
     pub model: String,
     /// Failed attempts before switching.

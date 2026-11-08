@@ -324,6 +324,7 @@ dependencies = [
 name = "argo-worker"
 version = "0.1.0"
 dependencies = [
+ "Argo",
  "argo-db-client",
  "clap",
  "iterator",

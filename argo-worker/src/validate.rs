@@ -1,6 +1,7 @@
 //! The seam for the compile/link/C-test pipeline (ARCHITECTURE.md §5.8 steps 4–5, §5.9), which
 //! teammates are building. A [`Validator`] judges one candidate; the retry loop decides what to
-//! do with the verdict. Until a real one exists, [`Unvalidated`] says so and never claims a pass.
+//! do with the verdict. [`CompileCheck`] is the first step of it: the candidate must compile.
+//! [`Unvalidated`] checks nothing and never claims a pass.
 
 use std::future::Future;
 use std::path::Path;
@@ -43,5 +44,89 @@ pub struct Unvalidated;
 impl Validator for Unvalidated {
     async fn validate(&self, _: &Candidate<'_>) -> Verdict {
         Verdict::Unvalidated("not compiled, linked or tested: no validator is configured".into())
+    }
+}
+
+/// Compiles each candidate on its own with `rustc` (`argo_c::comp::compiles`). A candidate that
+/// doesn't compile is `Failed`, and rustc's errors go back to the model. One that compiles is
+/// still `Unvalidated`: it isn't linked into the C program or tested yet.
+pub struct CompileCheck;
+
+impl CompileCheck {
+    /// Whether `rustc` can be run, checked before claiming anything: without it every candidate
+    /// would fail and use up every chunk's attempts.
+    pub fn available() -> Result<(), String> {
+        match std::process::Command::new("rustc")
+            .arg("--version")
+            .output()
+        {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(format!("rustc --version failed ({})", out.status)),
+            Err(e) => Err(format!("cannot run rustc: {e}")),
+        }
+    }
+}
+
+impl Validator for CompileCheck {
+    async fn validate(&self, candidate: &Candidate<'_>) -> Verdict {
+        let source = candidate.source.to_string();
+        // rustc takes a while; off this task, so the claim's heartbeat keeps running.
+        match tokio::task::spawn_blocking(move || argo_c::comp::compiles(&source)).await {
+            Ok(Ok(())) => {
+                Verdict::Unvalidated("compiled on its own with rustc; not linked or tested".into())
+            }
+            Ok(Err(log)) => Verdict::Failed(log),
+            Err(e) => Verdict::Failed(format!("the compile check did not finish: {e}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod compile_tests {
+    use argo_db_client::{CChunk, ChunkKind};
+
+    use super::*;
+
+    fn chunk() -> CChunk {
+        CChunk {
+            id: 1,
+            node: Some(1),
+            parent: None,
+            name: "add".into(),
+            kind: ChunkKind::Function,
+            translatable: true,
+            depth: 0,
+            descendants: 0,
+            path: "a.c".into(),
+            line_start: 1,
+            line_end: 1,
+            ingested: "a.i".into(),
+            byte_lo: 0,
+            byte_hi: 0,
+            source: "int add(int a, int b) { return a + b; }".into(),
+            records: String::new(),
+        }
+    }
+
+    async fn verdict(source: &str) -> Verdict {
+        let chunk = chunk();
+        let candidate = Candidate {
+            chunk: &chunk,
+            source,
+            checkout: None,
+        };
+        CompileCheck.validate(&candidate).await
+    }
+
+    #[tokio::test]
+    async fn compiling_rust_is_unvalidated_and_broken_rust_fails_with_rustc_errors() {
+        assert!(CompileCheck::available().is_ok());
+        let good = "#[no_mangle]\npub extern \"C\" fn add(a: i32, b: i32) -> i32 { a + b }";
+        assert!(matches!(verdict(good).await, Verdict::Unvalidated(_)));
+        let bad = "#[no_mangle]\npub extern \"C\" fn add(a: i32, b: i32) -> i32 { a + c }";
+        match verdict(bad).await {
+            Verdict::Failed(log) => assert!(log.contains("cannot find value `c`"), "{log}"),
+            other => panic!("{other:?}"),
+        }
     }
 }
