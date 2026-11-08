@@ -1,0 +1,2719 @@
+{
+  "graph": {
+    "schema_version": 1,
+    "revision": {
+      "id": 1,
+      "project": 1,
+      "parent": null,
+      "analysis": "interfaces",
+      "state": {
+        "state": "frozen",
+        "hash": "8e60db03e34b1984faa07d329e2038070bf19f5f11b44765106bbe022a191d02"
+      }
+    },
+    "files": [
+      {
+        "id": 1,
+        "path": "fixtures/compute/compute.c",
+        "sha256": "c336af5f4949cbe07c4e01ef2d07482a5006f088d9c0b58be9645c8709b1ed2a"
+      }
+    ],
+    "nodes": [
+      {
+        "id": 0,
+        "logical": "fixture",
+        "instance": null,
+        "parent": null,
+        "order": 0,
+        "kind": {
+          "kind": "program"
+        },
+        "template": "argo.program",
+        "name": "fixture",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 1,
+        "logical": "fixture/compute_c",
+        "instance": null,
+        "parent": 0,
+        "order": 0,
+        "kind": {
+          "kind": "module"
+        },
+        "template": "argo.module",
+        "name": "compute.c",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 0,
+            "hi": 397
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 2,
+        "logical": "fixture/compute_c/uint32_t",
+        "instance": null,
+        "parent": 1,
+        "order": 0,
+        "kind": {
+          "kind": "type",
+          "of": "alias"
+        },
+        "template": "c.typedef",
+        "name": "uint32_t",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 97,
+            "hi": 127
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 3,
+        "logical": "fixture/compute_c/normalize",
+        "instance": null,
+        "parent": 1,
+        "order": 1,
+        "kind": {
+          "kind": "function"
+        },
+        "template": "c.function",
+        "name": "normalize",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 129,
+            "hi": 183
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": [
+            {
+              "role": "signature",
+              "range": {
+                "file": 1,
+                "lo": 129,
+                "hi": 159
+              }
+            }
+          ]
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 4,
+        "logical": "fixture/compute_c/normalize/Input",
+        "instance": null,
+        "parent": 3,
+        "order": 0,
+        "kind": {
+          "kind": "group_input"
+        },
+        "template": "argo.group_input",
+        "name": "Input",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 5,
+        "logical": "fixture/compute_c/normalize/return_x___255",
+        "instance": null,
+        "parent": 3,
+        "order": 1,
+        "kind": {
+          "kind": "sequence"
+        },
+        "template": "c.sequence",
+        "name": "return x & 255",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 166,
+            "hi": 181
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 6,
+        "logical": "fixture/compute_c/normalize/Output",
+        "instance": null,
+        "parent": 3,
+        "order": 2,
+        "kind": {
+          "kind": "group_output"
+        },
+        "template": "argo.group_output",
+        "name": "Output",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 7,
+        "logical": "fixture/compute_c/step",
+        "instance": null,
+        "parent": 1,
+        "order": 2,
+        "kind": {
+          "kind": "function"
+        },
+        "template": "c.function",
+        "name": "step",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 185,
+            "hi": 259
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": [
+            {
+              "role": "signature",
+              "range": {
+                "file": 1,
+                "lo": 185,
+                "hi": 224
+              }
+            }
+          ]
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 8,
+        "logical": "fixture/compute_c/step/Input",
+        "instance": null,
+        "parent": 7,
+        "order": 0,
+        "kind": {
+          "kind": "group_input"
+        },
+        "template": "argo.group_input",
+        "name": "Input",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 9,
+        "logical": "fixture/compute_c/step/return_normalize_acc___i",
+        "instance": null,
+        "parent": 7,
+        "order": 1,
+        "kind": {
+          "kind": "sequence"
+        },
+        "template": "c.sequence",
+        "name": "return normalize(acc + i)",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 231,
+            "hi": 257
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "logical": "fixture/compute_c/step/Output",
+        "instance": null,
+        "parent": 7,
+        "order": 2,
+        "kind": {
+          "kind": "group_output"
+        },
+        "template": "argo.group_output",
+        "name": "Output",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 11,
+        "logical": "fixture/compute_c/step/return_normalize_acc___i/Input",
+        "instance": null,
+        "parent": 9,
+        "order": 0,
+        "kind": {
+          "kind": "group_input"
+        },
+        "template": "argo.group_input",
+        "name": "Input",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 12,
+        "logical": "fixture/compute_c/step/return_normalize_acc___i/acc___i",
+        "instance": null,
+        "parent": 9,
+        "order": 1,
+        "kind": {
+          "kind": "expression"
+        },
+        "template": "c.expression",
+        "name": "acc + i",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 248,
+            "hi": 255
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": false,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "logical": "fixture/compute_c/step/return_normalize_acc___i/normalize",
+        "instance": null,
+        "parent": 9,
+        "order": 2,
+        "kind": {
+          "kind": "call"
+        },
+        "template": "c.call",
+        "name": "normalize",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 238,
+            "hi": 256
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": false,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 14,
+        "logical": "fixture/compute_c/step/return_normalize_acc___i/Output",
+        "instance": null,
+        "parent": 9,
+        "order": 3,
+        "kind": {
+          "kind": "group_output"
+        },
+        "template": "argo.group_output",
+        "name": "Output",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 15,
+        "logical": "fixture/compute_c/compute",
+        "instance": null,
+        "parent": 1,
+        "order": 3,
+        "kind": {
+          "kind": "function"
+        },
+        "template": "c.function",
+        "name": "compute",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 261,
+            "hi": 396
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": [
+            {
+              "role": "signature",
+              "range": {
+                "file": 1,
+                "lo": 261,
+                "hi": 289
+              }
+            }
+          ]
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 16,
+        "logical": "fixture/compute_c/compute/Input",
+        "instance": null,
+        "parent": 15,
+        "order": 0,
+        "kind": {
+          "kind": "group_input"
+        },
+        "template": "argo.group_input",
+        "name": "Input",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 17,
+        "logical": "fixture/compute_c/compute/acc___0",
+        "instance": null,
+        "parent": 15,
+        "order": 1,
+        "kind": {
+          "kind": "sequence"
+        },
+        "template": "c.sequence",
+        "name": "acc = 0",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 296,
+            "hi": 313
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 18,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n",
+        "instance": null,
+        "parent": 15,
+        "order": 2,
+        "kind": {
+          "kind": "loop",
+          "of": "for"
+        },
+        "template": "c.for",
+        "name": "for i in 0..n",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 318,
+            "hi": 378
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 19,
+        "logical": "fixture/compute_c/compute/return_acc",
+        "instance": null,
+        "parent": 15,
+        "order": 3,
+        "kind": {
+          "kind": "sequence"
+        },
+        "template": "c.sequence",
+        "name": "return acc",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 383,
+            "hi": 394
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 20,
+        "logical": "fixture/compute_c/compute/Output",
+        "instance": null,
+        "parent": 15,
+        "order": 4,
+        "kind": {
+          "kind": "group_output"
+        },
+        "template": "argo.group_output",
+        "name": "Output",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 21,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/Input",
+        "instance": null,
+        "parent": 18,
+        "order": 0,
+        "kind": {
+          "kind": "group_input"
+        },
+        "template": "argo.group_input",
+        "name": "Input",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 22,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/for",
+        "instance": null,
+        "parent": 18,
+        "order": 1,
+        "kind": {
+          "kind": "dispatch",
+          "of": "loop"
+        },
+        "template": "argo.dispatch.loop",
+        "name": "for",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 318,
+            "hi": 350
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": [
+            {
+              "role": "initializer",
+              "range": {
+                "file": 1,
+                "lo": 323,
+                "hi": 337
+              }
+            },
+            {
+              "role": "condition",
+              "range": {
+                "file": 1,
+                "lo": 339,
+                "hi": 344
+              }
+            },
+            {
+              "role": "step",
+              "range": {
+                "file": 1,
+                "lo": 346,
+                "hi": 349
+              }
+            }
+          ]
+        },
+        "work_unit": false,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 23,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i",
+        "instance": null,
+        "parent": 18,
+        "order": 2,
+        "kind": {
+          "kind": "sequence"
+        },
+        "template": "c.sequence",
+        "name": "acc = step(acc, i)",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 359,
+            "hi": 378
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": true,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 24,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/Output",
+        "instance": null,
+        "parent": 18,
+        "order": 3,
+        "kind": {
+          "kind": "group_output"
+        },
+        "template": "argo.group_output",
+        "name": "Output",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 25,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i/Input",
+        "instance": null,
+        "parent": 23,
+        "order": 0,
+        "kind": {
+          "kind": "group_input"
+        },
+        "template": "argo.group_input",
+        "name": "Input",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      },
+      {
+        "id": 26,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i/step",
+        "instance": null,
+        "parent": 23,
+        "order": 1,
+        "kind": {
+          "kind": "call"
+        },
+        "template": "c.call",
+        "name": "step",
+        "provenance": {
+          "range": {
+            "file": 1,
+            "lo": 365,
+            "hi": 377
+          },
+          "expansion": null,
+          "instantiation": null,
+          "parts": []
+        },
+        "work_unit": false,
+        "effects": [
+          {
+            "effect": "pure"
+          }
+        ]
+      },
+      {
+        "id": 27,
+        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i/Output",
+        "instance": null,
+        "parent": 23,
+        "order": 2,
+        "kind": {
+          "kind": "group_output"
+        },
+        "template": "argo.group_output",
+        "name": "Output",
+        "provenance": null,
+        "work_unit": false,
+        "effects": []
+      }
+    ],
+    "pins": [
+      {
+        "node": 3,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 3,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 3,
+        "key": "param.x",
+        "label": "x",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 3,
+        "key": "return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 4,
+        "key": "exec.in",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 4,
+        "key": "param.x",
+        "label": "x",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 5,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 5,
+        "key": "live.x",
+        "label": "x",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 5,
+        "key": "exit.return",
+        "label": "return",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "return"
+          }
+        },
+        "origin": "control_exit"
+      },
+      {
+        "node": 5,
+        "key": "live.return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 6,
+        "key": "exec.then",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 6,
+        "key": "return",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 7,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 7,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 7,
+        "key": "param.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 7,
+        "key": "param.i",
+        "label": "i",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 7,
+        "key": "return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 8,
+        "key": "exec.in",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 8,
+        "key": "param.acc",
+        "label": "acc",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 8,
+        "key": "param.i",
+        "label": "i",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 9,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 9,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 9,
+        "key": "live.i",
+        "label": "i",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 9,
+        "key": "exit.return",
+        "label": "return",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "return"
+          }
+        },
+        "origin": "control_exit"
+      },
+      {
+        "node": 9,
+        "key": "live.return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 10,
+        "key": "exec.then",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 10,
+        "key": "return",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 11,
+        "key": "exec.in",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 11,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 11,
+        "key": "live.i",
+        "label": "i",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 12,
+        "key": "operand.0",
+        "label": "a",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 12,
+        "key": "operand.1",
+        "label": "b",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 12,
+        "key": "value",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 13,
+        "key": "param.x",
+        "label": "x",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 13,
+        "key": "return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 14,
+        "key": "exit.return",
+        "label": "return",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "return"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 14,
+        "key": "live.return",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 15,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 15,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 15,
+        "key": "param.n",
+        "label": "n",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 15,
+        "key": "return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "signature"
+      },
+      {
+        "node": 16,
+        "key": "exec.in",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 16,
+        "key": "param.n",
+        "label": "n",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 17,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 17,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 17,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 18,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 18,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 18,
+        "key": "live.n",
+        "label": "n",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 18,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "in_out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 19,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 19,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 19,
+        "key": "exit.return",
+        "label": "return",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "return"
+          }
+        },
+        "origin": "control_exit"
+      },
+      {
+        "node": 19,
+        "key": "live.return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 20,
+        "key": "exec.then",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 20,
+        "key": "return",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 21,
+        "key": "exec.in",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 21,
+        "key": "live.n",
+        "label": "n",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 21,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 22,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 22,
+        "key": "exec.next",
+        "label": "next",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "backedge"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 22,
+        "key": "body",
+        "label": "loop body",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "body"
+          }
+        },
+        "origin": "header"
+      },
+      {
+        "node": 22,
+        "key": "completed",
+        "label": "completed",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "completed"
+          }
+        },
+        "origin": "header"
+      },
+      {
+        "node": 22,
+        "key": "live.n",
+        "label": "n",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 22,
+        "key": "init.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 22,
+        "key": "next.acc",
+        "label": "next acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 22,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 22,
+        "key": "live.i",
+        "label": "index",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 23,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 23,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "syntax"
+      },
+      {
+        "node": 23,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "in_out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 23,
+        "key": "live.i",
+        "label": "i",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "liveness"
+      },
+      {
+        "node": 24,
+        "key": "exec.then",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 24,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 25,
+        "key": "exec.in",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 25,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 25,
+        "key": "live.i",
+        "label": "i",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 26,
+        "key": "exec.in",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "entry"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 26,
+        "key": "exec.then",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 26,
+        "key": "param.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 26,
+        "key": "param.i",
+        "label": "i",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 26,
+        "key": "return",
+        "label": "",
+        "direction": "out",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 27,
+        "key": "exec.then",
+        "label": "",
+        "direction": "in",
+        "kind": {
+          "pin": "exec",
+          "flow": {
+            "flow": "then"
+          }
+        },
+        "origin": "mirror"
+      },
+      {
+        "node": 27,
+        "key": "live.acc",
+        "label": "acc",
+        "direction": "in",
+        "kind": {
+          "pin": "value",
+          "ty": {
+            "type": "int",
+            "bits": 32,
+            "signed": false
+          }
+        },
+        "origin": "mirror"
+      }
+    ],
+    "edges": [
+      {
+        "id": 0,
+        "relation": {
+          "kind": "type_use",
+          "user": 3,
+          "ty": 2
+        }
+      },
+      {
+        "id": 1,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 4,
+            "key": "exec.in"
+          },
+          "to": {
+            "node": 5,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 2,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 4,
+            "key": "param.x"
+          },
+          "to": {
+            "node": 5,
+            "key": "live.x"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 5,
+            "key": "exit.return"
+          },
+          "to": {
+            "node": 6,
+            "key": "exec.then"
+          }
+        }
+      },
+      {
+        "id": 4,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 5,
+            "key": "live.return"
+          },
+          "to": {
+            "node": 6,
+            "key": "return"
+          }
+        }
+      },
+      {
+        "id": 5,
+        "relation": {
+          "kind": "type_use",
+          "user": 7,
+          "ty": 2
+        }
+      },
+      {
+        "id": 6,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 8,
+            "key": "exec.in"
+          },
+          "to": {
+            "node": 9,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 7,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 8,
+            "key": "param.acc"
+          },
+          "to": {
+            "node": 9,
+            "key": "live.acc"
+          }
+        }
+      },
+      {
+        "id": 8,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 8,
+            "key": "param.i"
+          },
+          "to": {
+            "node": 9,
+            "key": "live.i"
+          }
+        }
+      },
+      {
+        "id": 9,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 9,
+            "key": "exit.return"
+          },
+          "to": {
+            "node": 10,
+            "key": "exec.then"
+          }
+        }
+      },
+      {
+        "id": 10,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 9,
+            "key": "live.return"
+          },
+          "to": {
+            "node": 10,
+            "key": "return"
+          }
+        }
+      },
+      {
+        "id": 11,
+        "relation": {
+          "kind": "call",
+          "site": 13,
+          "callee": 3
+        }
+      },
+      {
+        "id": 12,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 11,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 12,
+            "key": "operand.0"
+          }
+        }
+      },
+      {
+        "id": 13,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 11,
+            "key": "live.i"
+          },
+          "to": {
+            "node": 12,
+            "key": "operand.1"
+          }
+        }
+      },
+      {
+        "id": 14,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 12,
+            "key": "value"
+          },
+          "to": {
+            "node": 13,
+            "key": "param.x"
+          }
+        }
+      },
+      {
+        "id": 15,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 13,
+            "key": "return"
+          },
+          "to": {
+            "node": 14,
+            "key": "live.return"
+          }
+        }
+      },
+      {
+        "id": 16,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 11,
+            "key": "exec.in"
+          },
+          "to": {
+            "node": 14,
+            "key": "exit.return"
+          }
+        }
+      },
+      {
+        "id": 17,
+        "relation": {
+          "kind": "type_use",
+          "user": 15,
+          "ty": 2
+        }
+      },
+      {
+        "id": 18,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 16,
+            "key": "exec.in"
+          },
+          "to": {
+            "node": 17,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 19,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 17,
+            "key": "exec.then"
+          },
+          "to": {
+            "node": 18,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 20,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 18,
+            "key": "exec.then"
+          },
+          "to": {
+            "node": 19,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 21,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 19,
+            "key": "exit.return"
+          },
+          "to": {
+            "node": 20,
+            "key": "exec.then"
+          }
+        }
+      },
+      {
+        "id": 22,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 16,
+            "key": "param.n"
+          },
+          "to": {
+            "node": 18,
+            "key": "live.n"
+          }
+        }
+      },
+      {
+        "id": 23,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 17,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 18,
+            "key": "live.acc"
+          }
+        }
+      },
+      {
+        "id": 24,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 18,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 19,
+            "key": "live.acc"
+          }
+        }
+      },
+      {
+        "id": 25,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 19,
+            "key": "live.return"
+          },
+          "to": {
+            "node": 20,
+            "key": "return"
+          }
+        }
+      },
+      {
+        "id": 26,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 21,
+            "key": "exec.in"
+          },
+          "to": {
+            "node": 22,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 27,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 22,
+            "key": "body"
+          },
+          "to": {
+            "node": 23,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 28,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 23,
+            "key": "exec.then"
+          },
+          "to": {
+            "node": 22,
+            "key": "exec.next"
+          }
+        }
+      },
+      {
+        "id": 29,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 22,
+            "key": "completed"
+          },
+          "to": {
+            "node": 24,
+            "key": "exec.then"
+          }
+        }
+      },
+      {
+        "id": 30,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 21,
+            "key": "live.n"
+          },
+          "to": {
+            "node": 22,
+            "key": "live.n"
+          }
+        }
+      },
+      {
+        "id": 31,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 21,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 22,
+            "key": "init.acc"
+          }
+        }
+      },
+      {
+        "id": 32,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 22,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 23,
+            "key": "live.acc"
+          }
+        }
+      },
+      {
+        "id": 33,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 22,
+            "key": "live.i"
+          },
+          "to": {
+            "node": 23,
+            "key": "live.i"
+          }
+        }
+      },
+      {
+        "id": 34,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 23,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 22,
+            "key": "next.acc"
+          }
+        }
+      },
+      {
+        "id": 35,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 22,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 24,
+            "key": "live.acc"
+          }
+        }
+      },
+      {
+        "id": 36,
+        "relation": {
+          "kind": "call",
+          "site": 26,
+          "callee": 7
+        }
+      },
+      {
+        "id": 37,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 25,
+            "key": "exec.in"
+          },
+          "to": {
+            "node": 26,
+            "key": "exec.in"
+          }
+        }
+      },
+      {
+        "id": 38,
+        "relation": {
+          "kind": "exec",
+          "from": {
+            "node": 26,
+            "key": "exec.then"
+          },
+          "to": {
+            "node": 27,
+            "key": "exec.then"
+          }
+        }
+      },
+      {
+        "id": 39,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 25,
+            "key": "live.acc"
+          },
+          "to": {
+            "node": 26,
+            "key": "param.acc"
+          }
+        }
+      },
+      {
+        "id": 40,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 25,
+            "key": "live.i"
+          },
+          "to": {
+            "node": 26,
+            "key": "param.i"
+          }
+        }
+      },
+      {
+        "id": 41,
+        "relation": {
+          "kind": "data",
+          "from": {
+            "node": 26,
+            "key": "return"
+          },
+          "to": {
+            "node": 27,
+            "key": "live.acc"
+          }
+        }
+      }
+    ],
+    "layouts": []
+  },
+  "sources": [
+    {
+      "id": 1,
+      "path": "fixtures/compute/compute.c",
+      "sha256": "c336af5f4949cbe07c4e01ef2d07482a5006f088d9c0b58be9645c8709b1ed2a",
+      "text": "/* ARCHITECTURE.md section 5.6 worked fixture. Unsigned 32-bit values; test domain n = 0..32. */\ntypedef unsigned int uint32_t;\n\nuint32_t normalize(uint32_t x)\n{\n    return x & 255;\n}\n\nuint32_t step(uint32_t acc, uint32_t i)\n{\n    return normalize(acc + i);\n}\n\nuint32_t compute(uint32_t n)\n{\n    uint32_t acc = 0;\n    for (uint32_t i = 0; i < n; i++)\n        acc = step(acc, i);\n    return acc;\n}\n"
+    }
+  ],
+  "status": [
+    {
+      "node": 0,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 1,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 2,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 3,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 4,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 5,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 6,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 7,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 8,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 9,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 10,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 11,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 12,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 13,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 14,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 15,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 16,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 17,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 18,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 19,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 20,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 21,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 22,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 23,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 24,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 25,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 26,
+      "accepted": "c",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    },
+    {
+      "node": 27,
+      "accepted": "none",
+      "implementation": null,
+      "evidence": [],
+      "candidate": null,
+      "claim": null,
+      "collapsed": false
+    }
+  ],
+  "edge_status": [],
+  "workers": [
+    {
+      "id": 1,
+      "label": "worker 1",
+      "model": "fixture",
+      "online": true
+    },
+    {
+      "id": 2,
+      "label": "worker 2",
+      "model": "fixture",
+      "online": true
+    }
+  ],
+  "jobs": [],
+  "attempts": [],
+  "implementations": [],
+  "reports": [],
+  "annotations": []
+}
