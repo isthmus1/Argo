@@ -402,6 +402,7 @@ fn decorate(p: &Pal, mut e: El, [w, h]: [f32; 2], radius: f32, evidence: Evidenc
     let badge = match evidence {
         Evidence::None => return e,
         Evidence::Accepted => ("✓", p.ok),
+        Evidence::Unvalidated => ("?", p.pending),
         Evidence::Rejected => ("!", p.bad),
     };
     e.child(el().size(18.0, 18.0).radius(9.0).fill(badge.1).border(2.0, p.canvas).center()

@@ -19,7 +19,8 @@ pub struct Project {
     pub name: String,
     /// What was opened: a git reference or a local directory.
     pub source: String,
-    pub root: PathBuf,
+    /// Where the code was read: the local checkout, or (SpacetimeDB mode) the recorded commit.
+    pub checkout: String,
     pub units: Vec<Unit>,
     pub flags: Vec<String>,
     /// Modules (original files) that define functions, sorted by path.
@@ -243,28 +244,14 @@ fn install(s: &mut State, opened: Opened, source: String) {
         .iter()
         .find(|n| n.kind == NodeKind::Program)
         .map_or_else(|| "project".into(), |n| n.name.clone());
-    // Start at `main` in a .c file if there is one, else the first function of the first .c file.
-    let first = modules
-        .iter()
-        .filter(|m| m.name.ends_with(".c"))
-        .flat_map(|m| &m.functions)
-        .find(|(_, n)| n == "main")
-        .or_else(|| {
-            modules
-                .iter()
-                .filter(|m| m.name.ends_with(".c"))
-                .flat_map(|m| &m.functions)
-                .next()
-        })
-        .or_else(|| modules.iter().flat_map(|m| &m.functions).next())
-        .map(|(id, _)| *id);
+    let first = entry(&modules);
     let forms = std::mem::take(&mut s.forms);
     let mut next = State::from_snapshot("project", snap, None, HashSet::new(), vec![]);
     next.forms = forms;
     next.project = Some(Project {
         name,
         source,
-        root: opened.root,
+        checkout: opened.root.display().to_string(),
         units: opened.units,
         flags: opened.flags,
         modules,
@@ -276,7 +263,24 @@ fn install(s: &mut State, opened: Opened, source: String) {
     }
 }
 
-fn index(snap: &Snapshot) -> Vec<Module> {
+/// The function to show first: `main` in a .c file if there is one, else the first function of
+/// the first .c file, else the first function.
+pub(crate) fn entry(modules: &[Module]) -> Option<NodeId> {
+    let c_files = || {
+        modules
+            .iter()
+            .filter(|m| m.name.ends_with(".c"))
+            .flat_map(|m| &m.functions)
+    };
+    c_files()
+        .find(|(_, n)| n == "main")
+        .or_else(|| c_files().next())
+        .or_else(|| modules.iter().flat_map(|m| &m.functions).next())
+        .map(|(id, _)| *id)
+}
+
+/// Modules (files) that define functions, with their functions, sorted by path.
+pub(crate) fn index(snap: &Snapshot) -> Vec<Module> {
     let nodes = &snap.graph.nodes;
     let mut modules: Vec<Module> = nodes
         .iter()

@@ -29,6 +29,8 @@ pub struct Pal {
     pub bool_: Color,
     pub ptr: Color,
     pub ok: Color,
+    /// An unjudged result: neither green (no report backs it) nor red (nothing failed).
+    pub pending: Color,
     pub bad: Color,
 }
 
@@ -127,6 +129,7 @@ fn dark_pal() -> Pal {
         bool_: h("#d6588a"),
         ptr: h("#6b8fd6"),
         ok: h("#6ee7a0"),
+        pending: h("#f2c45a"),
         bad: h("#ff8a80"),
     }
 }
@@ -156,6 +159,7 @@ fn light_pal() -> Pal {
         bool_: h("#b8406e"),
         ptr: h("#3f63b0"),
         ok: h("#067647"),
+        pending: h("#9a6700"),
         bad: h("#b42318"),
     }
 }
