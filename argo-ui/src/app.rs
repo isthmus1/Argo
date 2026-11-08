@@ -51,7 +51,7 @@ const COVER_COST: f32 = 80.0;
 /// Most candidate pans per axis the view solver tries.
 const MAX_CANDS: usize = 160;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Item {
     /// A node in the view graph.
     Node(usize),

@@ -10,7 +10,7 @@ pub enum Ty {
     Call,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Kind {
     GroupIn,
     GroupOut,
@@ -79,7 +79,7 @@ impl Kind {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Lang {
     /// Structural graph nodes (group I/O, locals, assignments) have no implementation language.
     None,
@@ -87,7 +87,7 @@ pub enum Lang {
     Rust,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Evidence {
     None,
     Accepted,
@@ -98,7 +98,7 @@ pub enum Evidence {
 }
 
 /// An agent's claim: which worker, and whether it is executing or queued.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Claim {
     pub worker: u8,
     pub active: bool,
@@ -106,7 +106,7 @@ pub struct Claim {
 
 /// One declared effect of a node, as the protocol records it (§5.6). Only protocol data carries
 /// these; mock scenes leave them out and the card falls back to effects inferred from shape.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Effect {
     Pure,
     StateRead,
@@ -137,7 +137,7 @@ impl Effect {
 }
 
 /// Why the latest candidate was rejected, from the report that rejected it.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Rejection {
     /// Failure category in words: `mismatch`, `build`, `timeout` …
     pub failure: &'static str,
@@ -146,14 +146,14 @@ pub struct Rejection {
     pub counterexample: Option<Counterexample>,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Counterexample {
     pub input: String,
     pub expected: String,
     pub actual: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct Pin {
     pub label: String,
     pub ty: Ty,
@@ -161,7 +161,7 @@ pub struct Pin {
     pub spelled: Option<[String; 2]>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct Node {
     pub kind: Kind,
     pub title: String,
@@ -191,7 +191,7 @@ pub struct Wire {
 
 /// An expanded node group, drawn as a frame around its members. Frames exist only for expanded
 /// groups and carry no semantics; wires connect straight to the members' pins.
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct Group {
     pub title: String,
     /// Drawn with a dashed outline: a file in the whole-program view, a grouping rather than a
