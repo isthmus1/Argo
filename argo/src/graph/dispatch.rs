@@ -11,7 +11,8 @@ impl<T: Template> Builder<'_, T> {
         match region {
             ChildRegion::Syntax(node) => self.syntax(node, parent),
             ChildRegion::Sequence(nodes) => {
-                self.insert(sequence::expand(&nodes)?, parent, "sequence")
+                let template = sequence::template(&nodes);
+                self.insert(sequence::expand(&nodes)?, parent, template)
             }
             ChildRegion::CaseGroup { labels, statements } => {
                 self.insert(cases::expand(&labels, &statements)?, parent, "case_group")

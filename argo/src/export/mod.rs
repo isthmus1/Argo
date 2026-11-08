@@ -183,7 +183,8 @@ impl ProgramBuilder {
             let in_function = body
                 .and_then(|(_, f)| f.and_then(|f| kind.get(&f)))
                 .is_some_and(|(k, _)| *k == NodeKind::Function);
-            if in_function && !n.kind.is_synthesized() {
+            let declarations = n.template.as_str() == format!("c.{}", crate::graph::DECLARATIONS);
+            if in_function && !n.kind.is_synthesized() && !declarations {
                 n.work_unit = true;
             }
         }
