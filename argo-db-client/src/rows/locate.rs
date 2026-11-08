@@ -26,6 +26,8 @@ pub fn blank(id: u64, kind: ChunkKind, parent: Option<u64>) -> CChunk {
         byte_hi: 0,
         source: String::new(),
         records: String::new(),
+        rust: String::new(),
+        c_call: String::new(),
     }
 }
 

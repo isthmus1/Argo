@@ -171,8 +171,23 @@ impl ProgramBuilder {
         }
     }
 
+    /// The graph, with each statement-level piece of a function body (its sequences, loops,
+    /// branches and switches: what opening the function shows) a work unit of its own, so it
+    /// gets its own row and is translated by itself before the function as a whole.
     pub fn finish(self) -> argo_protocol::Graph {
-        self.b.finish()
+        let mut graph = self.b.finish();
+        let kind: HashMap<NodeId, (NodeKind, Option<NodeId>)> =
+            graph.nodes.iter().map(|n| (n.id, (n.kind, n.parent))).collect();
+        for n in &mut graph.nodes {
+            let body = n.parent.and_then(|p| kind.get(&p)).filter(|(k, _)| *k == NodeKind::Scope);
+            let in_function = body
+                .and_then(|(_, f)| f.and_then(|f| kind.get(&f)))
+                .is_some_and(|(k, _)| *k == NodeKind::Function);
+            if in_function && !n.kind.is_synthesized() {
+                n.work_unit = true;
+            }
+        }
+        graph
     }
 }
 

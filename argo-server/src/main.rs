@@ -118,7 +118,7 @@ async fn run(args: Args) -> ExitCode {
 
 /// The model proxy, bound, when this machine has the provider's endpoint and key to give it.
 fn proxy(args: &Args, data_dir: &std::path::Path) -> Result<Option<Proxy>, String> {
-    let upstream = Upstream::from_env(&args.model_url, &args.model, args.model_provider.as_deref());
+    let upstream = Upstream::from_env(&args.model_url, &args.model, args.provider());
     let upstream = match upstream {
         Ok(upstream) => upstream,
         Err(why) => {

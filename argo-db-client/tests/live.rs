@@ -112,7 +112,7 @@ fn submit(worker: &DbConnection, chunk: u64, generation: u32, model: &str) -> Re
     let unvalidated = Validation::Unvalidated;
     call(|f| {
         let r = &worker.reducers;
-        r.submit_rust_then(chunk, generation, source, model, 1, unvalidated, log, f)
+        r.submit_rust_then(chunk, generation, source, String::new(), model, 1, unvalidated, log, f)
             .unwrap()
     })
 }

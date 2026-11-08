@@ -125,6 +125,8 @@ mod tests {
             byte_hi: 4,
             source: "f(){}".into(),
             records: "{}".into(),
+            rust: String::new(),
+            c_call: String::new(),
         };
         let frame = encode(Loaded {
             origin: origin.clone(),

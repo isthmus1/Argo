@@ -1604,26 +1604,24 @@ const STACK_STEP: f32 = 6.0;
 /// arc (see [`corner_inset`]), so it sits the same way on any radius.
 fn decorate(p: &Pal, mut e: El, [w, h]: [f32; 2], radius: f32, evidence: Evidence, claim: Option<Claim>, look: Look) -> El {
     let k = corner_inset(radius.min(w / 2.0).min(h / 2.0));
+    // The claiming worker's avatar, top-left; that work is going on shows as the blue dot below.
     if let Some(c) = claim {
-        if c.active && !look.selected && !look.hovered {
-            let pad = 6.0;
-            e = e.child(el().size(w + 2.0 * pad, h + 2.0 * pad).absolute(-pad, -pad).radius(radius + pad)
-                .border(2.0, p.worker(c.worker)).border_dash(6.0, 4.0));
-        }
         let d = 20.0;
         e = e.child(avatar(p, c.worker, c.active, d).scale(look.badge_scale).absolute(k - d / 2.0, k - d / 2.0));
     }
-    let badge = match evidence {
-        Evidence::None => return e,
-        Evidence::Accepted => ("✓", p.ok),
-        Evidence::Unvalidated => ("?", p.pending),
-        Evidence::Rejected => ("!", p.bad),
+    // Every view marks a function (or a call, by its callee) as the explorer does: a blue dot
+    // while it is being translated, a plain green check once its Rust is pushed, a red dot if it
+    // failed.
+    use crate::dialogs::Mark;
+    let Some(mark) = Mark::of(evidence, claim) else { return e };
+    let d = 16.0;
+    let glyph = match mark {
+        Mark::Done => el().size(d, d).center()
+            .child(text("✓").font(TextStyle::new(15.0, 850.0)).color(mark.color(p))),
+        Mark::Working | Mark::Failed => el().size(d, d).center()
+            .child(el().size(11.0, 11.0).radius(5.5).fill(mark.color(p)).border(2.0, p.canvas)),
     };
-    let d = 18.0;
-    e.child(el().size(d, d).radius(d / 2.0).fill(badge.1).border(2.0, p.canvas).center()
-        .child(text(badge.0).font(TextStyle::new(10.5, 750.0)).color(if p.dark { p.canvas } else { Color::WHITE }))
-        .scale(look.badge_scale)
-        .absolute(w - k - d / 2.0, k - d / 2.0))
+    e.child(glyph.scale(look.badge_scale).absolute(w - k - d / 2.0, k - d / 2.0))
 }
 
 /// How far the middle of a corner arc of `radius` sits in from the bounding corner, along each

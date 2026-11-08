@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use argo_db_client::RustChunk;
+use argo_db_client::{CChunk, ChunkKind, RustChunk};
 
 use super::Worker;
 use crate::attempt::{Outcome, translate};
 use crate::claim::Claim;
+use crate::job::Job;
 use crate::model::Model;
 use crate::prompt;
 use crate::validate::Validator;
@@ -32,9 +33,13 @@ impl<M: Model, V: Validator> Worker<M, V> {
             "argo-worker: claimed chunk {id} `{}` (generation {})",
             chunk.name, claim.generation
         );
+        // A piece of a function is checked inside its function; the flags compile the project.
+        let function = self.function_of(&chunk);
+        let flags = self.db.ingested().ok().flatten().map(|o| o.flags).unwrap_or_default();
+        let job = Job::new(&chunk, function.as_ref(), checkout, &flags);
         let outcome = tokio::select! {
-            outcome = translate(&self.model, &self.validator, &self.budget, &chunk, checkout,
-                |feedback| prompt::build(&chunk, checkout, feedback)) => outcome,
+            outcome = translate(&self.model, &self.validator, &self.budget, &job,
+                |feedback| prompt::for_job(&job, feedback)) => outcome,
             lost = claim.keep() => {
                 eprintln!("argo-worker: lost chunk {id}: {lost}");
                 return Ok(());
@@ -60,5 +65,18 @@ impl<M: Model, V: Validator> Worker<M, V> {
             Err(why) => eprintln!("argo-worker: chunk {id} {summary}, not recorded: {why}"),
         }
         Ok(())
+    }
+
+    /// The function row a `Region` row is inside: the nearest `Function` up its parents.
+    fn function_of(&self, chunk: &CChunk) -> Option<CChunk> {
+        let mut at = chunk.parent;
+        for _ in 0..64 {
+            let row = self.db.chunk(at?)?;
+            if row.kind == ChunkKind::Function {
+                return Some(row);
+            }
+            at = row.parent;
+        }
+        None
     }
 }

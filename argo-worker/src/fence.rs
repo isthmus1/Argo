@@ -31,9 +31,38 @@ pub fn strip(reply: &str) -> String {
     code.join("\n\n").trim().to_string()
 }
 
+/// The C in `reply`: its blocks tagged `c`, joined in order; `None` when there are none.
+pub fn c_blocks(reply: &str) -> Option<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut open: Option<(bool, Vec<&str>)> = None;
+    for line in reply.lines() {
+        let fence = line.trim_start().strip_prefix("```");
+        match (&mut open, fence) {
+            (None, Some(tag)) => open = Some((tag.trim().eq_ignore_ascii_case("c"), Vec::new())),
+            (None, None) => {}
+            (Some((_, block)), None) => block.push(line),
+            (Some((c, block)), Some(_)) => {
+                if *c {
+                    out.push(block.join("\n"));
+                }
+                open = None;
+            }
+        }
+    }
+    (!out.is_empty()).then(|| out.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::strip;
+
+    #[test]
+    fn c_blocks_are_read_apart_from_the_rust() {
+        let reply = "```rust\nfn f() {}\n```\n```c\nf();\n```";
+        assert_eq!(super::c_blocks(reply).as_deref(), Some("f();"));
+        assert_eq!(strip(reply), "fn f() {}");
+        assert_eq!(super::c_blocks("```rust\nfn f() {}\n```"), None);
+    }
 
     #[test]
     fn unfenced_reply_is_kept_trimmed() {

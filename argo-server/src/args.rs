@@ -6,7 +6,10 @@ use argo_c::project::git::GitRef;
 use clap::Parser;
 
 /// The OpenRouter model workers use unless `--model` says otherwise: free, rate-limited.
-const MODEL: &str = "nvidia/nemotron-3.5-lightning:free";
+/// Nemotron 3.5 Lightning, the paid endpoint: the free one can't be pinned to a provider.
+const MODEL: &str = "nvidia/nemotron-3.5-lightning";
+/// Fireworks serves Lightning fastest on OpenRouter (about 358 tokens/s median vs 222 next).
+const PROVIDER: &str = "fireworks";
 
 /// Where `argo-db` lives in this checkout; the default module project to build and publish.
 const MODULE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../argo-db");
@@ -38,14 +41,13 @@ pub struct Args {
     #[arg(long, conflicts_with = "server")]
     pub proxy_port: Option<u16>,
     /// The OpenRouter model every worker uses: workers are told it when they attach, and the
-    /// proxy sends every request as it. For speed, the paid `nvidia/nemotron-3.5-lightning` with
-    /// `--model-provider fireworks`.
+    /// proxy sends every request as it.
     #[arg(long, default_value = MODEL, value_parser = model_name, conflicts_with = "server")]
     pub model: String,
-    /// Pin every request to this OpenRouter provider (a slug, e.g. `fireworks`), with no fallback
-    /// to others; by default OpenRouter picks.
-    #[arg(long, value_name = "SLUG", conflicts_with = "server")]
-    pub model_provider: Option<String>,
+    /// Pin every request to this OpenRouter provider (a slug), with no fallback to others.
+    /// `any` lets OpenRouter pick.
+    #[arg(long, value_name = "SLUG", default_value = PROVIDER, conflicts_with = "server")]
+    pub model_provider: String,
     /// The OpenAI-compatible API the proxy forwards to with `OPENROUTER_API_KEY`.
     #[arg(long, value_name = "URL", default_value = iterator::nemo::OPENROUTER, conflicts_with = "server")]
     pub model_url: String,
@@ -110,6 +112,11 @@ impl Args {
     }
 
     /// Extra preprocessor flags, in the form `argo::project::Options` takes.
+    /// The provider every proxied request is pinned to; `None` for `--model-provider any`.
+    pub fn provider(&self) -> Option<&str> {
+        Some(self.model_provider.as_str()).filter(|p| *p != "any")
+    }
+
     pub fn flags(&self) -> Vec<String> {
         let defines = self.defines.iter().map(|d| format!("-D{d}"));
         let includes = self.includes.iter().map(|i| format!("-I{}", i.display()));
@@ -207,11 +214,12 @@ mod tests {
         assert!(!a.loader, "hidden");
         assert_eq!(a.checkout_dir(), a.data_dir().join("checkout"));
         assert_eq!(a.proxy_port(), Ok(3101));
-        assert_eq!(a.model, "nvidia/nemotron-3.5-lightning:free");
+        assert_eq!(a.model, "nvidia/nemotron-3.5-lightning");
         assert_eq!(
-            (a.model_provider, a.model_url.as_str()),
-            (None, "https://openrouter.ai/api")
+            (a.provider(), a.model_url.as_str()),
+            (Some("fireworks"), "https://openrouter.ai/api")
         );
+        assert_eq!(parse(&["r", "--model-provider", "any"]).provider(), None);
         let demo = parse(&[
             "r",
             "--model",
@@ -219,12 +227,10 @@ mod tests {
             "--model-provider",
             "fireworks",
         ]);
-        assert_eq!(demo.model_provider.as_deref(), Some("fireworks"));
+        assert_eq!(demo.provider(), Some("fireworks"));
         assert!(Args::try_parse_from(["argo-server", "r", "--model", ""]).is_err());
         assert!(
-            parse(&["r", "--server", "maincloud"])
-                .model_provider
-                .is_none(),
+            Args::try_parse_from(["argo-server", "r", "--server", "maincloud"]).is_ok(),
             "defaults don't conflict"
         );
         let p = parse(&["r", "--port", "4000", "--proxy-port", "5000"]);

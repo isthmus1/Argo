@@ -57,7 +57,8 @@ pub fn ingest_rows(ctx: &ReducerContext, rows: Vec<CChunk>) -> Result<(), String
     let table = ctx.db.c_chunk();
     for row in rows {
         match table.id().find(row.id) {
-            Some(old) if old == row => {}
+            // A translation written since doesn't make a replayed row differ.
+            Some(old) if old.ingested() == row.ingested() => {}
             _ if c.sealed => return Err(format!("ingest is sealed; row {} differs", row.id)),
             Some(_) => drop(table.id().update(row)),
             None => drop(table.insert(row)),

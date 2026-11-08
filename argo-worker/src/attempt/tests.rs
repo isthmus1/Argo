@@ -84,6 +84,8 @@ fn chunk() -> CChunk {
         byte_hi: 40,
         source: "int add(int a, int b) { return a + b; }".into(),
         records: "{}".into(),
+        rust: String::new(),
+        c_call: String::new(),
     }
 }
 
@@ -108,7 +110,8 @@ fn prompt(feedback: Option<&str>) -> String {
 }
 
 async fn run(model: &Script, v: &Verdicts, b: &Budget) -> Outcome {
-    translate(model, v, b, &chunk(), None, prompt).await
+    let chunk = chunk();
+    translate(model, v, b, &crate::job::Job::function(&chunk, None, &[]), prompt).await
 }
 
 #[tokio::test]
@@ -119,6 +122,7 @@ async fn first_unvalidated_candidate_is_submitted_without_fences() {
     );
     let Outcome::Done {
         source,
+        c,
         model: used,
         attempts,
         validation,
@@ -127,6 +131,7 @@ async fn first_unvalidated_candidate_is_submitted_without_fences() {
     else {
         panic!("expected Done");
     };
+    assert_eq!(c, None, "a whole function has no C call");
     assert!(source.starts_with("#[no_mangle]") && source.ends_with("a + b }"));
     assert_eq!(
         (used.as_str(), attempts, validation),

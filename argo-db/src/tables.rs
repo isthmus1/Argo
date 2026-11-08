@@ -60,6 +60,18 @@ pub struct CChunk {
     pub source: String,
     /// JSON protocol records this chunk owns (see `argo-db-client`).
     pub records: String,
+    /// The Rust this chunk was translated to, written by `submit_rust` (empty until then): the
+    /// row's code and its translation side by side. `rust_chunk` keeps the claim and its history.
+    pub rust: String,
+    /// For a piece of a function (a `Region`): the C that replaces it, a call to the Rust.
+    pub c_call: String,
+}
+
+impl CChunk {
+    /// The row as ingested: equal for re-ingest even after its translation was written.
+    pub fn ingested(&self) -> CChunk {
+        CChunk { rust: String::new(), c_call: String::new(), ..self.clone() }
+    }
 }
 
 #[derive(SpacetimeType, Clone, Copy, Debug, PartialEq, Eq)]

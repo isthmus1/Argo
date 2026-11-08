@@ -54,9 +54,15 @@ pub async fn ingest(conn: &Conn, loaded: &Loaded, fresh: bool) -> Result<Sent, S
 /// The rows the database doesn't hold exactly, in order.
 fn missing(rows: &[CChunk], present: &HashMap<u64, CChunk>) -> Vec<CChunk> {
     rows.iter()
-        .filter(|r| present.get(&r.id) != Some(r))
+        // A translation written into a row since (`rust`, `c_call`) doesn't make it differ.
+        .filter(|r| present.get(&r.id).map(ingested) != Some(ingested(r)))
         .cloned()
         .collect()
+}
+
+/// A row as ingested, without the translation `submit_rust` writes into it.
+fn ingested(r: &CChunk) -> CChunk {
+    CChunk { rust: String::new(), c_call: String::new(), ..r.clone() }
 }
 
 /// The `c_chunk` rows the database already holds. Subscribed only for this look, so the
@@ -117,6 +123,8 @@ mod tests {
             byte_hi: source.len() as u32,
             source: source.into(),
             records: String::new(),
+            rust: String::new(),
+            c_call: String::new(),
         }
     }
 

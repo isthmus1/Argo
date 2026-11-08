@@ -38,7 +38,7 @@ fn field_label(p: &Pal, s: &str) -> El {
 
 /// A function's translation state, as the explorer marks it with a dot at the row's right end.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mark {
+pub(crate) enum Mark {
     /// A worker is translating it right now: blue.
     Working,
     /// Rust was pushed for it: green.
@@ -50,7 +50,7 @@ enum Mark {
 impl Mark {
     /// From the function's evidence and claim. An active claim wins: a requeued function being
     /// translated again shows as in progress.
-    fn of(evidence: Evidence, claim: Option<crate::model::Claim>) -> Option<Mark> {
+    pub(crate) fn of(evidence: Evidence, claim: Option<crate::model::Claim>) -> Option<Mark> {
         match (claim, evidence) {
             (Some(c), _) if c.active => Some(Mark::Working),
             (_, Evidence::Accepted | Evidence::Unvalidated) => Some(Mark::Done),
@@ -59,7 +59,7 @@ impl Mark {
         }
     }
 
-    fn color(self, p: &Pal) -> Color {
+    pub(crate) fn color(self, p: &Pal) -> Color {
         match self {
             Mark::Working => p.accent,
             Mark::Done => p.ok,
@@ -79,13 +79,40 @@ type Statuses = HashMap<argo_protocol::NodeId, (Evidence, Option<crate::model::C
 fn statuses(s: &State, proj: &project::Project) -> Statuses {
     let Some(live) = s.live.as_ref() else { return Statuses::new() };
     let listed: HashSet<argo_protocol::NodeId> = proj.modules.iter().flat_map(|m| m.functions.iter().map(|(id, _)| *id)).collect();
-    let mut out = Statuses::with_capacity(listed.len());
+    // The listed functions' pieces too: each is a row of its own, translated before the function.
+    let wanted: HashSet<argo_protocol::NodeId> = listed
+        .iter()
+        .flat_map(|f| live.pieces.get(f).into_iter().flatten().copied())
+        .chain(listed.iter().copied())
+        .collect();
+    let mut raw = Statuses::with_capacity(wanted.len());
     for st in &live.snap.status {
         // The first row for a node is the one `Snapshot::status` finds.
-        if listed.contains(&st.node) && !out.contains_key(&st.node) {
+        if wanted.contains(&st.node) && !raw.contains_key(&st.node) {
             let (_, evidence, claim) = crate::bridge::status_shown(&live.snap, st);
-            out.insert(st.node, (evidence, claim));
+            raw.insert(st.node, (evidence, claim));
         }
+    }
+    // A function as the explorer shows it: in progress while any of its pieces is being
+    // translated, and done once every piece is, before its own row is.
+    let mut out = Statuses::with_capacity(listed.len());
+    for &f in &listed {
+        let own = raw.get(&f).copied().unwrap_or((Evidence::None, None));
+        let pieces: Vec<_> = live.pieces.get(&f).into_iter().flatten().map(|p| raw.get(p).copied().unwrap_or((Evidence::None, None))).collect();
+        let effective = match Mark::of(own.0, own.1) {
+            Some(Mark::Working) => own,
+            mark => match pieces.iter().find_map(|(_, c)| c.filter(|c| c.active)) {
+                Some(c) => (own.0, Some(c)),
+                None if mark.is_none()
+                    && !pieces.is_empty()
+                    && pieces.iter().all(|(e, c)| Mark::of(*e, *c) == Some(Mark::Done)) =>
+                {
+                    (Evidence::Unvalidated, None)
+                }
+                None => own,
+            },
+        };
+        out.insert(f, effective);
     }
     out
 }

@@ -6,6 +6,7 @@ pub mod checkout;
 pub mod claim;
 pub mod db;
 pub mod fence;
+pub mod job;
 pub mod log;
 pub mod model;
 pub mod prompt;

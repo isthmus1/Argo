@@ -25,6 +25,8 @@ pub struct CChunk {
     pub byte_hi: u32,
     pub source: String,
     pub records: String,
+    pub rust: String,
+    pub c_call: String,
 }
 
 impl __sdk::InModule for CChunk {
@@ -51,6 +53,8 @@ pub struct CChunkCols {
     pub byte_hi: __sdk::__query_builder::Col<CChunk, u32>,
     pub source: __sdk::__query_builder::Col<CChunk, String>,
     pub records: __sdk::__query_builder::Col<CChunk, String>,
+    pub rust: __sdk::__query_builder::Col<CChunk, String>,
+    pub c_call: __sdk::__query_builder::Col<CChunk, String>,
 }
 
 impl __sdk::__query_builder::HasCols for CChunk {
@@ -73,6 +77,8 @@ impl __sdk::__query_builder::HasCols for CChunk {
             byte_hi: __sdk::__query_builder::Col::new(table_name, "byte_hi"),
             source: __sdk::__query_builder::Col::new(table_name, "source"),
             records: __sdk::__query_builder::Col::new(table_name, "records"),
+            rust: __sdk::__query_builder::Col::new(table_name, "rust"),
+            c_call: __sdk::__query_builder::Col::new(table_name, "c_call"),
         }
     }
 }

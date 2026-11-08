@@ -3,13 +3,12 @@
 //! silent switch, §5.8); after `max_attempts` the chunk is given up. An unavailable endpoint is
 //! waited out instead, and if it stays down the chunk is left to its lease, never failed.
 
-use std::path::Path;
-
-use argo_db_client::{CChunk, Validation};
+use argo_db_client::Validation;
 use tokio::time::sleep;
 
 use crate::log::{MAX_LOG_BYTES, tail};
 use crate::model::{Model, ModelError};
+use crate::job::Job;
 use crate::validate::{Candidate, Validator, Verdict};
 use crate::{fence, shape};
 
@@ -23,6 +22,8 @@ pub enum Outcome {
     /// Never `Validation::Failed`: a failing candidate is retried, not submitted.
     Done {
         source: String,
+        /// For a piece of a function: the C call that replaces it.
+        c: Option<String>,
         model: String,
         attempts: u32,
         validation: Validation,
@@ -43,8 +44,7 @@ pub async fn translate(
     model: &impl Model,
     validator: &impl Validator,
     budget: &Budget,
-    chunk: &CChunk,
-    checkout: Option<&Path>,
+    job: &Job<'_>,
     prompt: impl Fn(Option<&str>) -> String,
 ) -> Outcome {
     let mut log = String::new();
@@ -53,12 +53,13 @@ pub async fn translate(
     while failures < budget.max_attempts {
         let (attempts, name) = (failures + 1, budget.model(failures));
         let request = prompt(feedback.as_deref());
-        match once(model, validator, name, &request, chunk, checkout).await {
-            Ok((source, validation, text)) => {
+        match once(model, validator, name, &request, job).await {
+            Ok((source, c, validation, text)) => {
                 log.push_str(&format!("attempt {attempts} ({name}): {text}\n"));
                 let (model, log) = (name.to_string(), tail(&log, MAX_LOG_BYTES));
                 return Outcome::Done {
                     source,
+                    c,
                     model,
                     attempts,
                     validation,
@@ -88,25 +89,35 @@ pub async fn translate(
     }
 }
 
-/// One attempt: the candidate, what validation established and its log; or why it failed.
+/// One attempt: the candidate (and, for a piece, the C that replaces it), what validation
+/// established and its log; or why it failed.
 async fn once(
     model: &impl Model,
     validator: &impl Validator,
     name: &str,
     prompt: &str,
-    chunk: &CChunk,
-    checkout: Option<&Path>,
-) -> Result<(String, Validation, String), ModelError> {
-    let source = fence::strip(&model.complete(name, prompt).await?);
-    shape::check(chunk, &source).map_err(ModelError::Reply)?;
+    job: &Job<'_>,
+) -> Result<(String, Option<String>, Validation, String), ModelError> {
+    let reply = model.complete(name, prompt).await?;
+    let source = fence::strip(&reply);
+    let c = match &job.piece {
+        None => None,
+        Some(_) => Some(fence::c_blocks(&reply).ok_or_else(|| {
+            ModelError::Reply("no ```c block: give the C that replaces the TARGET lines".into())
+        })?),
+    };
+    shape::check(job.chunk, job.symbol(), &source).map_err(ModelError::Reply)?;
     let candidate = Candidate {
-        chunk,
+        chunk: job.chunk,
         source: &source,
-        checkout,
+        checkout: job.checkout,
+        flags: job.flags,
+        symbol: job.symbol(),
+        c: c.as_deref(),
     };
     match validator.validate(&candidate).await {
-        Verdict::Passed(log) => Ok((source, Validation::Passed, log)),
-        Verdict::Unvalidated(log) => Ok((source, Validation::Unvalidated, log)),
+        Verdict::Passed(log) => Ok((source, c, Validation::Passed, log)),
+        Verdict::Unvalidated(log) => Ok((source, c, Validation::Unvalidated, log)),
         Verdict::Failed(log) => Err(ModelError::Reply(format!("validation failed:\n{log}"))),
     }
 }

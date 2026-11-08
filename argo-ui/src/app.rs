@@ -2,7 +2,7 @@
 //! and selection. Live updates change claims and evidence in place, so layout, camera and
 //! selection survive them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use argo_protocol::{NodeId, Snapshot};
 
@@ -145,6 +145,9 @@ pub struct Live {
     pub whole: bool,
     /// Calls between functions, worked out once per structure for the whole-program view.
     pub(crate) calls: Option<std::sync::Arc<Vec<(NodeId, NodeId)>>>,
+    /// Each function's pieces that are rows of their own (work units inside it), so the explorer
+    /// shows a function as worked on while any of its pieces is.
+    pub(crate) pieces: HashMap<NodeId, Vec<NodeId>>,
     /// View node index → protocol node (see [`bridge::Projection::origin`]).
     pub(crate) origin: Vec<NodeId>,
     pub(crate) frames: Vec<NodeId>,
@@ -152,6 +155,23 @@ pub struct Live {
 
 fn open_all_requested() -> bool {
     std::env::var("ARGO_OPEN").is_ok_and(|v| v == "all")
+}
+
+/// Each function's work-unit descendants (its pieces with rows of their own).
+fn pieces(snap: &Snapshot) -> HashMap<NodeId, Vec<NodeId>> {
+    let by_id: HashMap<NodeId, &argo_protocol::Node> = snap.graph.nodes.iter().map(|n| (n.id, n)).collect();
+    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for n in snap.graph.nodes.iter().filter(|n| n.work_unit && n.kind != argo_protocol::NodeKind::Function) {
+        let mut up = n.parent;
+        while let Some(p) = up.and_then(|p| by_id.get(&p)) {
+            if p.kind == argo_protocol::NodeKind::Function {
+                out.entry(p.id).or_default().push(n.id);
+                break;
+            }
+            up = p.parent;
+        }
+    }
+    out
 }
 
 /// Every node inside `container`, at any depth.
@@ -263,7 +283,8 @@ impl State {
     /// A protocol snapshot: show `container`'s level with `open` drawn in place.
     pub fn from_snapshot(snap: Snapshot, container: Option<NodeId>, open: HashSet<NodeId>) -> State {
         let mut s = State::empty(vec![]);
-        s.live = Some(Live { snap, container, open, whole: false, calls: None, origin: vec![], frames: vec![] });
+        let pieces = pieces(&snap);
+        s.live = Some(Live { snap, container, open, whole: false, calls: None, pieces, origin: vec![], frames: vec![] });
         s.reproject();
         s.relayout();
         s.fit();

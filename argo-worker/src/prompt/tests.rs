@@ -28,6 +28,8 @@ fn chunk(path: &str) -> CChunk {
         byte_hi: 1,
         source: "int add(int a, int b) { return a + b; }".into(),
         records: "{}".into(),
+        rust: String::new(),
+        c_call: String::new(),
     }
 }
 

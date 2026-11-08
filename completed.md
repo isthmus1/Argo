@@ -46,13 +46,9 @@ Add `--fresh` to replace a different repository already in the database. The loc
 keeps its data in `~/.local/state/argo-server/3100`.
 
 Give the server an OpenRouter key (`OPENROUTER_API_KEY=...`) and it also runs the model proxy for
-workers on port 3101 (`--proxy-port`), logging usage to `usage.log` in the data dir. It uses the
-free `nvidia/nemotron-3.5-lightning:free` by default; for the demo, the paid model pinned to
-Fireworks for speed:
-```sh
-./target/release/argo-server <repo> --listen 0.0.0.0 \
-  --model nvidia/nemotron-3.5-lightning --model-provider fireworks
-```
+workers on port 3101 (`--proxy-port`), logging usage to `usage.log` in the data dir. Every request
+goes to `nvidia/nemotron-3.5-lightning` on Fireworks only (OpenRouter's fastest provider for it,
+no fallback); `--model` and `--model-provider` (`any` for OpenRouter's choice) change that.
 
 **2. Workers: translate rows with Nemotron**
 ```sh

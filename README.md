@@ -83,11 +83,10 @@ terminal per process:
 ```sh
 # Server: starts SpacetimeDB on 127.0.0.1:3100, publishes argo-db, ingests the repository's C
 # chunks, and stops the database on Ctrl-C. `--fresh` replaces a different ingested commit.
-# With an OpenRouter key it also runs the model proxy on port 3101, on the free Nemotron 3.5
-# Lightning by default; for the demo, the paid one pinned to Fireworks (fast) as shown.
+# With an OpenRouter key it also runs the model proxy on port 3101: Nemotron 3.5 Lightning, pinned
+# to Fireworks (its fastest provider) with no fallback. `--model`/`--model-provider` (`any`) change it.
 export OPENROUTER_API_KEY=...
 cargo run --release -p argo-server -- ~/src/project            # or a git URL[#ref]; -D/-I flags
-#   [--model nvidia/nemotron-3.5-lightning --model-provider fireworks]
 
 # Workers (any number): each clones the recorded commit, claims chunks and submits Rust. No key
 # and no model: each attaches to the server's model proxy (the --db host, port + 1) for a key of

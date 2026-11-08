@@ -18,6 +18,12 @@ pub struct Candidate<'a> {
     /// or `git worktree`), since any file left here, ignored ones included, makes the worker
     /// refuse the clone at its next claim (`checkout::Checkout::sync`).
     pub checkout: Option<&'a Path>,
+    /// The project's preprocessor flags, for compiling its C.
+    pub flags: &'a [String],
+    /// The function the Rust exports.
+    pub symbol: &'a str,
+    /// For a piece of a function: the C that replaces it (a call to `symbol`).
+    pub c: Option<&'a str>,
 }
 
 /// What a validator established. Each carries the log fed back into the next prompt (on
@@ -47,9 +53,12 @@ impl Validator for Unvalidated {
     }
 }
 
-/// Compiles each candidate on its own with `rustc` (`argo_c::comp::compiles`). A candidate that
-/// doesn't compile is `Failed`, and rustc's errors go back to the model. One that compiles is
-/// still `Unvalidated`: it isn't linked into the C program or tested yet.
+/// Swaps each candidate into the project's real C (`argo_c::comp::check_in_project`): the row's
+/// lines in its original file are replaced (a function by its declaration, a piece by the C call
+/// the model wrote), that `.c` file is compiled with the project's flags, the Rust is compiled,
+/// and the two are linked. Any failure is `Failed`, its compiler output going back to the model.
+/// Without a clone (no commit recorded) the Rust is only compiled on its own. A pass is still
+/// `Unvalidated`: nothing is run or tested yet.
 pub struct CompileCheck;
 
 impl CompileCheck {
@@ -70,15 +79,45 @@ impl CompileCheck {
 impl Validator for CompileCheck {
     async fn validate(&self, candidate: &Candidate<'_>) -> Verdict {
         let source = candidate.source.to_string();
-        // rustc takes a while; off this task, so the claim's heartbeat keeps running.
-        match tokio::task::spawn_blocking(move || argo_c::comp::compiles(&source)).await {
-            Ok(Ok(())) => {
-                Verdict::Unvalidated("compiled on its own with rustc; not linked or tested".into())
-            }
+        let in_project = in_project(candidate);
+        // rustc and cc take a while; off this task, so the claim's heartbeat keeps running.
+        let verdict = tokio::task::spawn_blocking(move || match in_project {
+            Some((root, unit, flags, r)) => argo_c::comp::check_in_project(&root, &unit, &flags, &r)
+                .map(|()| format!("compiled and linked into {} with the C around it; not run or tested", unit.display())),
+            None => argo_c::comp::compiles(&source)
+                .map(|()| "compiled on its own with rustc: the project's C isn't available to link against; not tested".into()),
+        })
+        .await;
+        match verdict {
+            Ok(Ok(log)) => Verdict::Unvalidated(log),
             Ok(Err(log)) => Verdict::Failed(log),
             Err(e) => Verdict::Failed(format!("the compile check did not finish: {e}")),
         }
     }
+}
+
+/// What `comp::check_in_project` needs: the clone, the `.c` file the row was compiled in (its
+/// ingested `<file>.i`), the flags, and the replacement at the row's original lines.
+fn in_project(c: &Candidate<'_>) -> Option<(std::path::PathBuf, std::path::PathBuf, Vec<String>, argo_c::comp::Replacement)> {
+    let root = c.checkout?;
+    let chunk = c.chunk;
+    if chunk.path.is_empty() || chunk.line_start == 0 {
+        return None;
+    }
+    let unit = Path::new(chunk.ingested.strip_suffix(".i")?).with_extension("c");
+    if !root.join(&unit).is_file() {
+        return None;
+    }
+    let text = std::fs::read_to_string(root.join(&chunk.path)).ok()?;
+    let span = argo_c::comp::line_span(&text, chunk.line_start, chunk.line_end)?;
+    let r = argo_c::comp::Replacement {
+        file: chunk.path.clone().into(),
+        span,
+        rust: c.source.to_string(),
+        c: c.c.map(str::to_string),
+        symbol: c.symbol.to_string(),
+    };
+    Some((root.to_path_buf(), unit, c.flags.to_vec(), r))
 }
 
 #[cfg(test)]
@@ -105,6 +144,8 @@ mod compile_tests {
             byte_hi: 0,
             source: "int add(int a, int b) { return a + b; }".into(),
             records: String::new(),
+            rust: String::new(),
+            c_call: String::new(),
         }
     }
 
@@ -114,6 +155,9 @@ mod compile_tests {
             chunk: &chunk,
             source,
             checkout: None,
+            flags: &[],
+            symbol: "add",
+            c: None,
         };
         CompileCheck.validate(&candidate).await
     }

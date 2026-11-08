@@ -44,6 +44,8 @@ fn c(id: u64, translatable: bool) -> CChunk {
         byte_hi: 1,
         source: String::new(),
         records: "{}".into(),
+        rust: String::new(),
+        c_call: String::new(),
     }
 }
 

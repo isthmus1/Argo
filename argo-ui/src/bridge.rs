@@ -321,6 +321,16 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         })
         .collect();
 
+    // A function's Input stands for the function on its own level: it carries the function's
+    // status (the explorer's mark, the worker's ring and avatar), so the canvas shows whether the
+    // model is on the function in view.
+    if let Some(c) = container.filter(|&c| ix.node(c).is_some_and(|n| n.kind == P::Function)) {
+        let (lang, evidence, claim) = own_status(snap, c);
+        for n in nodes.iter_mut().filter(|n| n.kind == Kind::GroupIn) {
+            (n.lang, n.evidence, n.claim) = (lang, evidence, claim);
+        }
+    }
+
     // One Output per exit path, like UE5's repeated Return nodes: each `return` ends right next to
     // the statement that returns instead of in one long merge. The protocol node is shared.
     for vi in 0..nodes.len() {

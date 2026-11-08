@@ -6,7 +6,7 @@ use spacetimedb::{ReducerContext, reducer};
 use crate::claim::held;
 use crate::owner::owner;
 use crate::rules::{MAX_LOG_BYTES, MAX_MODEL_BYTES, MAX_RUST_BYTES, check_len};
-use crate::tables::{RustChunk, RustStatus, Validation, rust_chunk};
+use crate::tables::{CChunk, RustChunk, RustStatus, Validation, c_chunk, rust_chunk};
 
 /// Publish generated Rust for a held claim: `Claimed → Done`. A failed validation is not a
 /// result; report it with `fail_chunk` (or retry) instead.
@@ -17,6 +17,7 @@ pub fn submit_rust(
     chunk_id: u64,
     generation: u32,
     source: String,
+    c_call: String,
     model: String,
     attempts: u32,
     validation: Validation,
@@ -30,6 +31,11 @@ pub fn submit_rust(
         return Err("empty Rust source".into());
     }
     check_len("source", &source, MAX_RUST_BYTES)?;
+    check_len("c_call", &c_call, MAX_RUST_BYTES)?;
+    // The translation beside its C, in the chunk's own row.
+    if let Some(chunk) = ctx.db.c_chunk().id().find(chunk_id) {
+        ctx.db.c_chunk().id().update(CChunk { rust: source.clone(), c_call, ..chunk });
+    }
     check_len("model", &model, MAX_MODEL_BYTES)?;
     check_len("log", &log, MAX_LOG_BYTES)?;
     ctx.db.rust_chunk().chunk().update(RustChunk {
@@ -74,6 +80,9 @@ pub fn requeue(ctx: &ReducerContext, chunk_id: u64) -> Result<(), String> {
     owner(ctx)?;
     if !ctx.db.rust_chunk().chunk().delete(chunk_id) {
         return Err(format!("chunk {chunk_id} has no Rust row"));
+    }
+    if let Some(chunk) = ctx.db.c_chunk().id().find(chunk_id) {
+        ctx.db.c_chunk().id().update(CChunk { rust: String::new(), c_call: String::new(), ..chunk });
     }
     Ok(())
 }

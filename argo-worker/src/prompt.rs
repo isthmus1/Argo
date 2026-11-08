@@ -6,6 +6,7 @@ use std::path::{Component, Path};
 use argo_db_client::CChunk;
 use iterator::nemo::getLines;
 
+use crate::job::{Job, Piece};
 use crate::log::tail;
 
 /// Lines of the original file shown on each side of the chunk.
@@ -29,9 +30,74 @@ name that is a Rust keyword is spelled as a raw identifier (`fn r#type`).
 - The Rust must compile.
 ";
 
-/// The prompt for `chunk`. `checkout` is the clone at the ingested commit, if there is one.
-/// The rules assume a function: the C front end makes only functions work units. A translatable
-/// `Region` (fixtures only, so far) has no C symbol and will need its own outlining rules here.
+/// The prompt for a job: a whole function's, or [`piece`]'s for a piece of one.
+pub fn for_job(job: &Job<'_>, feedback: Option<&str>) -> String {
+    match &job.piece {
+        Some(p) => piece(job.chunk, p, job.checkout, feedback),
+        None => build(job.chunk, job.checkout, feedback),
+    }
+}
+
+/// The rules for a piece of a function: it becomes its own exported Rust function, and the C
+/// lines it was are replaced by a call to it.
+const PIECE_RULES: &str = "\
+Move the TARGET lines of the C function below out into their own Rust function, so they can be \
+replaced in the C program by a call to it.
+- Answer with exactly two fenced blocks: first ```rust, then ```c. Nothing else.
+- The ```rust block: `#[no_mangle] pub extern \"C\" fn SYMBOL(...)` doing exactly what the \
+TARGET lines do. Pass each local variable or parameter the lines read as an argument, and each \
+one they assign as a pointer. Use `core::ffi` scalar types, raw pointers and `#[repr(C)]` \
+types for C structs (or `*mut core::ffi::c_void` when only passed through). Declare every C \
+function or global the lines use in an `extern \"C\"` block. Never let a panic unwind across \
+the boundary.
+- The ```c block: the C that replaces the TARGET lines, word for word in their place: a \
+prototype `T SYMBOL(...);` for the Rust function, then the call. Keep any declaration the rest \
+of the function still uses (`int x = SYMBOL(...);`), and keep any `return`, `break`, \
+`continue` or `goto` the lines had, driven by what the call returns.
+- Both must compile: the C in its place inside the original file, the Rust on its own.
+";
+
+/// The prompt for a piece of a function (a `Region` row).
+fn piece(chunk: &CChunk, p: &Piece<'_>, checkout: Option<&Path>, feedback: Option<&str>) -> String {
+    let mut out = format!("{PIECE_RULES}\nSYMBOL: `{}`\n", p.symbol);
+    out.push_str(&format!(
+        "\nTHE WHOLE FUNCTION (preprocessed C, for reference; do NOT output it):\n{}\n",
+        p.function.source
+    ));
+    let lines = checkout.and_then(|root| lines_of(chunk, root));
+    out.push_str(&format!(
+        "\nTARGET (lines {}-{} of {}, exactly as the file has them; these are replaced):\n{}\n",
+        chunk.line_start,
+        chunk.line_end,
+        chunk.path,
+        lines.as_deref().unwrap_or(&chunk.source)
+    ));
+    if let Some(log) = feedback {
+        out.push_str(&format!(
+            "\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Fix this:\n{}\n",
+            tail(log, FEEDBACK_BYTES)
+        ));
+    }
+    out
+}
+
+/// The row's own original lines, as the file in the clone has them.
+fn lines_of(chunk: &CChunk, root: &Path) -> Option<String> {
+    let path = Path::new(&chunk.path);
+    let plain = path.components().all(|c| matches!(c, Component::Normal(_)));
+    if chunk.path.is_empty() || !plain || chunk.line_start == 0 {
+        return None;
+    }
+    let real = root.join(path).canonicalize().ok()?;
+    if !real.starts_with(root.canonicalize().ok()?) {
+        return None;
+    }
+    let file = std::fs::read_to_string(real).ok()?;
+    Some(getLines(&file, chunk.line_start, chunk.line_end))
+}
+
+/// The prompt for a whole function's row. `checkout` is the clone at the ingested commit, if
+/// there is one.
 pub fn build(chunk: &CChunk, checkout: Option<&Path>, feedback: Option<&str>) -> String {
     let mut out = format!("{RULES}\nSymbol: `{}`\n", chunk.name);
     if let Some(text) = checkout.and_then(|root| original(chunk, root)) {
