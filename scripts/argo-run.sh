@@ -51,48 +51,6 @@ die() { printf 'argo-run: %s\n' "$*" >&2; exit 1; }
 
 usage() { awk 'NR > 1 { if (/^set -euo/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; }
 
-# Start "$@" detached: its own session (so it outlives the shell and ignores the shell's
-# process group), stdio to $LOG_DIR/$name.log. Prints the pid.
-detach() {
-    local name="$1"; shift
-    local log="$LOG_DIR/$name.log"
-    if command -v python3 >/dev/null; then
-        # setsid through the kernel, which macOS's coreutils cannot do for us.
-        python3 - "$log" "$@" <<'PY'
-import os, sys
-log, argv = sys.argv[1], sys.argv[2:]
-pid = os.fork()
-if pid == 0:
-    os.setsid()
-    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    os.dup2(fd, 1); os.dup2(fd, 2)
-    os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
-    try:
-        os.execvp(argv[0], argv)
-    finally:
-        os._exit(127)
-print(pid)
-PY
-    elif command -v setsid >/dev/null; then
-        setsid nohup "$@" >"$log" 2>&1 </dev/null & echo $!
-    else
-        nohup "$@" >"$log" 2>&1 </dev/null & echo $!
-    fi
-}
-
-listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
-
-# Wait up to $2 seconds for TCP port $1 to accept connections.
-wait_port() {
-    local port="$1" want="${2:-60}" i=0
-    while [ "$i" -lt "$want" ]; do
-        listening "$port" && return 0
-        sleep 1
-        i=$((i + 1))
-    done
-    return 1
-}
-
 # The OpenRouter key, never stored in this script: the environment if it is already there,
 # else what the user's zsh exports (asked in an interactive shell, so ~/.zshrc is read), else a
 # key file. Only a value that looks like a key is taken, since rc files print things too.
@@ -117,12 +75,41 @@ openrouter_key() {
 
 pid_of() { cat "$PID_DIR/$1.pid" 2>/dev/null || true; }
 
-# How many workers in the pool have connected so far, counted from the log's own lines.
-connected() {
-    local n
-    n="$(grep -c 'connected as ' "$LOG_DIR/workers.log" 2>/dev/null || true)"
-    printf '%s' "${n:-0}"
+# Start "$@" in the background, in its own session where the machine allows it (so it outlives
+# the terminal as much as this script), with its output in $LOG_DIR/$name.log. Its pid goes to
+# $PID_DIR/$name.pid; nothing here waits for it.
+launch() {
+    local name="$1"; shift
+    local log="$LOG_DIR/$name.log"
+    if command -v python3 >/dev/null; then
+        # The kernel's setsid, which macOS has no command-line tool for.
+        python3 - "$log" "$@" >"$PID_DIR/$name.pid" <<'__ARGO_DETACH__'
+import os, sys
+log, argv = sys.argv[1], sys.argv[2:]
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    os.dup2(fd, 1); os.dup2(fd, 2)
+    os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+    try:
+        os.execvp(argv[0], argv)
+    finally:
+        os._exit(127)
+print(pid)
+__ARGO_DETACH__
+    elif command -v setsid >/dev/null; then
+        setsid "$@" >"$log" 2>&1 </dev/null &
+        echo $! >"$PID_DIR/$name.pid"
+        disown 2>/dev/null || true
+    else
+        nohup "$@" >"$log" 2>&1 </dev/null &
+        echo $! >"$PID_DIR/$name.pid"
+        disown 2>/dev/null || true
+    fi
 }
+
+listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 alive() { [ -n "$(pid_of "$1")" ] && kill -0 "$(pid_of "$1")" 2>/dev/null; }
 
@@ -222,47 +209,27 @@ case "$CMD" in
         [ "$CLEAR" = 1 ] && SERVER_ARGS+=(--fresh --delete-data)
 
         say "server:  ingest $REPO, database $MODULE on 127.0.0.1:$PORT"
-        OPENROUTER_API_KEY="$KEY" detach server "$BIN/argo-server" "${SERVER_ARGS[@]}" >"$PID_DIR/server.pid"
-
-        # The module is built and published, then the repository parsed and sent: the port
-        # comes up early, so wait for the log to say the database is serving instead.
+        OPENROUTER_API_KEY="$KEY" launch server "$BIN/argo-server" "${SERVER_ARGS[@]}"
+        # The module is built and the repository ingested before the database serves; the port
+        # opens long before that, so give the server time to say it is serving, then go on
+        # regardless: a slow ingest is the workers' problem to wait out, not the script's.
         i=0
-        until grep -q 'database .*; Ctrl-C to stop' "$LOG_DIR/server.log" 2>/dev/null; do
-            if grep -qi 'publish failed\|manual migration' "$LOG_DIR/server.log" 2>/dev/null; then
-                say ""
-                tail -n 6 "$LOG_DIR/server.log" >&2
-                die "publish failed (a module whose schema no longer matches the data?) — rerun with --clear"
-            fi
-            i=$((i + 1))
-            if [ "$i" -gt "${ARGO_WAIT:-180}" ]; then
-                tail -n 10 "$LOG_DIR/server.log" >&2
-                die "the server did not come up in ${ARGO_WAIT:-180}s (see $LOG_DIR/server.log)"
-            fi
+        until grep -q 'database .*; Ctrl-C to stop' "$LOG_DIR/server.log" 2>/dev/null || [ "$i" -ge 90 ]; do
             sleep 1
+            i=$((i + 1))
         done
+        if grep -qi 'publish failed\|manual migration' "$LOG_DIR/server.log" 2>/dev/null; then
+            tail -n 6 "$LOG_DIR/server.log" >&2
+            die "publish failed (a module whose schema no longer matches the data?) — rerun with --clear"
+        fi
         say "         up: pid $(pid_of server), log $LOG_DIR/server.log"
 
         DB="ws://127.0.0.1:$PORT"
-        detach workers "$BIN/argo-worker" --db "$DB" --module "$MODULE" --jobs "$JOBS" >"$PID_DIR/workers.pid"
-        # Each worker connects, clones the repository and claims on its own, so the pool takes a
-        # while to be all there: wait until one connection line per worker has been written.
-        i=0
-        while [ "$(connected)" -lt "$JOBS" ]; do
-            i=$((i + 1))
-            if [ "$i" -gt "${ARGO_WAIT:-180}" ]; then
-                say "warning: $(connected) of $JOBS workers connected in ${ARGO_WAIT:-180}s — see $LOG_DIR/workers.log"
-                break
-            fi
-            if ! kill -0 "$(pid_of workers)" 2>/dev/null; then
-                tail -n 10 "$LOG_DIR/workers.log" >&2 || true
-                die "the worker pool exited before it was up (see $LOG_DIR/workers.log)"
-            fi
-            sleep 1
-        done
-        say "workers: $(connected) of $JOBS connected, one pool, pid $(pid_of workers), log $LOG_DIR/workers.log"
+        launch workers "$BIN/argo-worker" --db "$DB" --module "$MODULE" --jobs "$JOBS"
+        say "workers: $JOBS in one pool, pid $(pid_of workers), log $LOG_DIR/workers.log"
 
         if [ "$UI" = 1 ]; then
-            detach ui "$BIN/argo-ui" --db "$DB" --module "$MODULE" >"$PID_DIR/ui.pid"
+            launch ui "$BIN/argo-ui" --db "$DB" --module "$MODULE"
             say "ui:      pid $(pid_of ui), log $LOG_DIR/ui.log"
         fi
         say ""
