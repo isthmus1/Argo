@@ -13,5 +13,3 @@ argo-db-client = { path = "../argo-db-client" }
 spacetimedb-sdk.workspace = true
 rune-ui.workspace = true
 serde_json.workspace = true
-# The C front end (package `Argo`, library `main`): preprocess, parse and export a project.
-argo-c = { package = "Argo", path = "../argo" }

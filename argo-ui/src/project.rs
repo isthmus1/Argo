@@ -1,25 +1,19 @@
-//! An opened C project: loading it in the background (clone, preprocess, parse, export), the
-//! file/function index the explorer shows, and the dialogs around it.
+//! The ingested project as the explorer shows it: its file/function index, the function on the
+//! canvas, and the explorer's own fields. Everything here comes from the database's rows.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::mpsc::{Receiver, channel};
 
-use argo_c::project::{self as cproj, Opened, Options, Step, Unit, git::GitRef};
+use argo_db_client::Unit;
 use argo_protocol::{NodeId, NodeKind, Snapshot};
-use rune_ui::{TextEdit, Waker};
+use rune_ui::TextEdit;
 
 use crate::app::State;
 
-/// Wakes the window when a background load reports progress.
-pub static WAKER: OnceLock<Waker> = OnceLock::new();
-
 pub struct Project {
     pub name: String,
-    /// What was opened: a git reference or a local directory.
+    /// The repository as given to `argo-server`: a git URL or a path.
     pub source: String,
-    /// Where the code was read: the local checkout, or (SpacetimeDB mode) the recorded commit.
+    /// What was read: the recorded commit, or why there is none.
     pub checkout: String,
     pub units: Vec<Unit>,
     pub flags: Vec<String>,
@@ -49,218 +43,12 @@ impl Project {
     }
 }
 
-/// Editable fields and choices behind the dialogs and the explorer, kept across reloads.
+/// The explorer's fields, kept across reloads.
+#[derive(Default)]
 pub struct Forms {
-    pub url: TextEdit,
-    pub rev: TextEdit,
-    pub flags: TextEdit,
     pub filter: TextEdit,
-    pub error: Option<String>,
-    pub scope: Scope,
     /// The module expanded in the explorer.
     pub expanded: Option<NodeId>,
-}
-
-impl Default for Forms {
-    fn default() -> Self {
-        Forms {
-            url: TextEdit::new(""),
-            rev: TextEdit::new(""),
-            flags: TextEdit::new(""),
-            filter: TextEdit::new(""),
-            error: None,
-            scope: Scope::Function,
-            expanded: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Modal {
-    Open,
-    Loading,
-    Rewrite,
-    NotImplemented,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Scope {
-    Function,
-    File,
-    Project,
-}
-
-/// A load running on a background thread.
-pub struct Loader {
-    rx: Receiver<Msg>,
-    pub title: String,
-    pub step: String,
-    pub progress: Option<(usize, usize)>,
-}
-
-enum Msg {
-    Step(Step),
-    Done(Box<Result<Opened, String>>, String),
-}
-
-/// What to open: a local directory, or a git reference (with the revision field overriding one
-/// written into the URL).
-fn target(spec: &str, rev: &str) -> Result<(Option<PathBuf>, GitRef), String> {
-    let spec = spec.trim();
-    if spec.is_empty() {
-        return Err("Enter a git URL or a local directory.".into());
-    }
-    let path = PathBuf::from(spec.strip_prefix("~/").map_or(spec.to_string(), |rest| {
-        std::env::var("HOME").map_or(spec.to_string(), |h| format!("{h}/{rest}"))
-    }));
-    let mut r = GitRef::parse(spec);
-    if !rev.trim().is_empty() {
-        r.rev = Some(rev.trim().to_string());
-    }
-    Ok((path.is_dir().then_some(path), r))
-}
-
-fn options(flags: &str) -> Options {
-    Options {
-        flags: flags.split_whitespace().map(str::to_string).collect(),
-        ..Options::default()
-    }
-}
-
-fn run(
-    spec: &str,
-    rev: &str,
-    flags: &str,
-    progress: &(dyn Fn(Step) + Sync),
-) -> Result<Opened, String> {
-    let (local, r) = target(spec, rev)?;
-    let opts = options(flags);
-    match local {
-        Some(dir) => {
-            let name = std::fs::canonicalize(&dir)
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_else(|| "project".into());
-            cproj::open(&dir, &name, &opts, progress)
-        }
-        None => cproj::open_git(&r, &opts, progress),
-    }
-}
-
-/// Open the project named by the dialog's fields on a background thread.
-pub fn start(s: &mut State) {
-    let (spec, rev, flags) = (
-        s.forms.url.text.clone(),
-        s.forms.rev.text.clone(),
-        s.forms.flags.text.clone(),
-    );
-    if let Err(e) = target(&spec, &rev) {
-        s.forms.error = Some(e);
-        return;
-    }
-    let (tx, rx) = channel();
-    let title = GitRef::parse(spec.trim()).name();
-    let source = spec.trim().to_string();
-    std::thread::spawn(move || {
-        let wake = || {
-            if let Some(w) = WAKER.get() {
-                w();
-            }
-        };
-        let progress = |step: Step| {
-            let _ = tx.send(Msg::Step(step));
-            wake();
-        };
-        let result = run(&spec, &rev, &flags, &progress);
-        let _ = tx.send(Msg::Done(Box::new(result), source));
-        wake();
-    });
-    s.forms.error = None;
-    s.loader = Some(Loader {
-        rx,
-        title: format!("Opening {title}"),
-        step: "Starting".into(),
-        progress: None,
-    });
-    s.modal = Some(Modal::Loading);
-}
-
-/// Apply background progress; true when something changed.
-pub fn poll(s: &mut State) -> bool {
-    let Some(loader) = &mut s.loader else {
-        return false;
-    };
-    let mut changed = false;
-    let mut done = None;
-    while let Ok(msg) = loader.rx.try_recv() {
-        changed = true;
-        match msg {
-            Msg::Step(step) => {
-                loader.progress = None;
-                loader.step = match step {
-                    Step::Fetching(m) => m,
-                    Step::Scanning => "Finding .c files".into(),
-                    Step::Checking { done, total } => {
-                        loader.progress = Some((done, total));
-                        format!("Preprocessing and parsing each file · {done} / {total}")
-                    }
-                    Step::Combining { units } => {
-                        format!("Combining {units} files into one translation unit")
-                    }
-                    Step::Parsing => "Parsing the combined source".into(),
-                    Step::Building => "Building the graph".into(),
-                };
-            }
-            Msg::Done(result, source) => done = Some((*result, source)),
-        }
-    }
-    if let Some((result, source)) = done {
-        s.loader = None;
-        match result {
-            Ok(opened) => install(s, opened, source),
-            Err(e) => {
-                s.forms.error = Some(e);
-                s.modal = Some(Modal::Open);
-            }
-        }
-    }
-    changed
-}
-
-/// Open synchronously (command line and headless captures).
-pub fn open_now(s: &mut State, spec: &str, rev: &str, flags: &str) -> Result<(), String> {
-    let opened = run(spec, rev, flags, &|_| {})?;
-    install(s, opened, spec.trim().to_string());
-    Ok(())
-}
-
-/// Show an opened project: index its files and functions and open its entry point.
-fn install(s: &mut State, opened: Opened, source: String) {
-    let snap = opened.snapshot;
-    let modules = index(&snap);
-    let name = snap
-        .graph
-        .nodes
-        .iter()
-        .find(|n| n.kind == NodeKind::Program)
-        .map_or_else(|| "project".into(), |n| n.name.clone());
-    let first = entry(&modules);
-    let forms = std::mem::take(&mut s.forms);
-    let mut next = State::from_snapshot("project", snap, None, HashSet::new(), vec![]);
-    next.forms = forms;
-    next.project = Some(Project {
-        name,
-        source,
-        checkout: opened.root.display().to_string(),
-        units: opened.units,
-        flags: opened.flags,
-        modules,
-    });
-    next.modal = None;
-    *s = next;
-    if let Some(f) = first {
-        open_function(s, f);
-    }
 }
 
 /// The function to show first: `main` in a .c file if there is one, else the first function of
@@ -333,101 +121,25 @@ pub fn current(s: &State) -> Option<(NodeId, String)> {
     Some((id, n.name.clone()))
 }
 
-/// The open dialog's fields, prefilled from a command line `spec`.
-pub fn prefill(forms: &mut Forms, spec: &str, flags: &[String]) {
-    let r = GitRef::parse(spec);
-    let local = PathBuf::from(spec).is_dir();
-    forms.url = TextEdit::new(if local {
-        spec.to_string()
-    } else {
-        r.url.clone()
-    });
-    forms.rev = TextEdit::new(if local {
-        String::new()
-    } else {
-        r.rev.unwrap_or_default()
-    });
-    forms.flags = TextEdit::new(flags.join(" "));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn wait(s: &mut State) {
-        let t = std::time::Instant::now();
-        while s.loader.is_some() && t.elapsed().as_secs() < 60 {
-            poll(s);
-            std::thread::sleep(std::time::Duration::from_millis(20));
+    fn module(id: u64, name: &str, functions: &[(u64, &str)]) -> Module {
+        Module {
+            id: NodeId(id),
+            name: name.into(),
+            functions: functions.iter().map(|&(i, n)| (NodeId(i), n.into())).collect(),
         }
-        assert!(s.loader.is_none(), "load finished");
     }
 
     #[test]
-    fn a_background_load_installs_the_project_and_opens_a_function() {
-        if !std::process::Command::new("cc")
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-        {
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("argo-ui-load-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.c"), "int helper(int x) { return x + 1; }\nint main(void) { if (helper(1)) return 0; return 1; }\n").unwrap();
-        std::fs::write(dir.join("b.c"), "#include <argo_missing.h>\n").unwrap();
-
-        let mut s = State::load("fixture");
-        s.forms.url = TextEdit::new(dir.display().to_string());
-        start(&mut s);
-        assert_eq!(s.modal, Some(Modal::Loading));
-        wait(&mut s);
-
-        assert_eq!(s.modal, None);
-        let p = s.project.as_ref().expect("project installed");
-        assert_eq!((p.included(), p.units.len(), p.function_count()), (1, 2, 2));
-        assert_eq!(
-            current(&s).map(|(_, n)| n).as_deref(),
-            Some("main"),
-            "opens main first"
-        );
-        assert_eq!(s.view.crumbs.last().map(String::as_str), Some("main"));
-        assert!(
-            s.view.nodes.iter().any(|n| n.title.starts_with("if (")),
-            "the body is drawn"
-        );
-
-        let helper = p.modules[0]
-            .functions
-            .iter()
-            .find(|(_, n)| n == "helper")
-            .unwrap()
-            .0;
-        open_function(&mut s, helper);
-        assert_eq!(current(&s).map(|(_, n)| n).as_deref(), Some("helper"));
-        assert_eq!(
-            s.forms.url.text,
-            dir.display().to_string(),
-            "the dialog keeps what was typed"
-        );
-    }
-
-    #[test]
-    fn a_failed_load_returns_to_the_dialog_with_the_error() {
-        let mut s = State::load("fixture");
-        start(&mut s);
-        assert_eq!(s.modal, None, "an empty field never starts");
-        assert!(s.forms.error.is_some());
-
-        s.forms.url = TextEdit::new("file:///argo/definitely/not/a/repo");
-        start(&mut s);
-        wait(&mut s);
-        assert_eq!(s.modal, Some(Modal::Open));
-        assert!(
-            s.forms.error.as_deref().is_some_and(|e| e.contains("git")),
-            "{:?}",
-            s.forms.error
-        );
-        assert!(s.project.is_none());
+    fn without_main_the_first_c_function_shows_else_the_first_function() {
+        let h = module(1, "a.h", &[(10, "inline_helper")]);
+        let c = module(2, "b.c", &[(20, "run"), (21, "stop")]);
+        assert_eq!(entry(&[h, c]), Some(NodeId(20)), "a .c file wins over a header");
+        let h = module(1, "a.h", &[(10, "inline_helper")]);
+        assert_eq!(entry(&[h]), Some(NodeId(10)), "only headers: their first function");
+        assert_eq!(entry(&[]), None);
     }
 }

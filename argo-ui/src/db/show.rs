@@ -1,8 +1,7 @@
-//! Rows onto the canvas through the same live-snapshot path a C project or snapshot file uses.
+//! Rows onto the canvas: the rebuilt snapshot, the explorer's index, and where the user was.
 
 use std::collections::HashSet;
 
-use argo_c::project::Unit;
 use argo_db_client::Origin;
 use argo_protocol::{NodeId, NodeKind, Snapshot};
 
@@ -57,7 +56,7 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
         .iter()
         .find(|n| n.kind == NodeKind::Program)
         .map_or_else(|| origin.locator.clone(), |n| n.name.clone());
-    let mut next = State::from_snapshot("db", snap, None, HashSet::new(), vec![]);
+    let mut next = State::from_snapshot(snap, None, HashSet::new());
     next.project = Some(Project {
         name,
         source: origin.locator.clone(),
@@ -70,14 +69,7 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
             },
             |c| format!("commit {c}"),
         ),
-        units: origin
-            .units
-            .iter()
-            .map(|u| Unit {
-                path: u.path.clone(),
-                skipped: u.skipped.clone(),
-            })
-            .collect(),
+        units: origin.units.clone(),
         flags: origin.flags.clone(),
         modules,
     });

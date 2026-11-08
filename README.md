@@ -75,7 +75,10 @@ The golden target is ambitious; an incomplete golden gate must be reported as in
 ## Run it
 
 Needs the `spacetime` CLI (2.0.x, matching `spacetimedb-sdk`), git, a C preprocessor, and the
-`wasm32-unknown-unknown` Rust target. Use one terminal per process:
+`wasm32-unknown-unknown` Rust target. `argo-server` is Unix-only (Linux, macOS): it manages its
+children through process groups and signals. Only on Linux are they also killed if the server
+itself is SIGKILLed; elsewhere a host left behind is reported on the next start. Use one
+terminal per process:
 
 ```sh
 # Server: starts SpacetimeDB on 127.0.0.1:3100, publishes argo-db, ingests the repository's C
@@ -87,10 +90,15 @@ export OPENAI_BASE_URL=https://integrate.api.nvidia.com OPENAI_API_KEY=... OPENA
 cargo run --release -p argo-worker -- --db ws://127.0.0.1:3100 --module argo \
   [--max-attempts 3] [--escalation-model M --escalate-after 2] [--once]
 
-# GUI: watches the rows live, read-only; it never clones or parses the repository.
+# GUI: watches the rows live, read-only; it never clones or parses the repository. The database
+# is its only data source: without --db (or ARGO_DB) it prints its usage and exits.
 cargo run --release -p argo-ui -- --db ws://127.0.0.1:3100 --module argo
-# Headless capture: add `--snap out.png`; ARGO_FUNCTION=name picks the function shown.
+# Headless capture: add `--snap out.png`; ARGO_FUNCTION=name picks the function shown,
+# ARGO_OPEN=all opens its constructs, ARGO_HOVER=title hovers a node.
 ```
+
+`scripts/render-mocks.sh` and `scripts/render-understand.sh` capture the GUI the same way: they
+serve a small sample project (`scripts/sample-db.sh`) on their own port with data under `target/`.
 
 `OPENAI_BASE_URL` is the host without `/v1`; the client appends `/v1/chat/completions`.
 Candidates are submitted as *unvalidated* until the compile/link/C-test `Validator` lands.
@@ -133,8 +141,7 @@ shorter. Focused checks: `cargo fmt -p Argo --check`, `cargo test --locked -p Ar
 ### Open a whole C project
 
 ```sh
-# A git reference (cloned into a temporary folder) or a local directory:
-cargo run --release -p argo-ui -- https://example.com/project.git#v1.0 -DNAME=value
+# A local directory (argo-server also takes a git URL[#ref] and -D/-I flags, see "Run it"):
 cargo run --release -p Argo -- --protocol-json ~/src/project > target/project.json
 ```
 
@@ -144,7 +151,7 @@ its own; the ones that preprocess and parse are combined into one translation un
 line markers put every function back under its original file. Files that fail (missing
 headers, undefined build macros) are listed with the reason instead of failing the
 project. `-D`/`-I` flags come from the Makefile's `CFLAGS`/`CPPFLAGS`/`DEFINES` lines,
-then from the command line or the app's Open dialog (Ctrl+O).
+then from the command line.
 
 ### Export a syntax graph
 

@@ -129,7 +129,7 @@ pub fn own_status(snap: &Snapshot, id: NodeId) -> (Lang, Evidence, Option<Claim>
 
 /// Whether a claim's attempt outlived its lease: its worker stopped renewing it (it died or lost
 /// its connection), so nothing is being translated until another worker reclaims the node. A zero
-/// lease is unknown (the fixture and snapshot files record none).
+/// lease is unknown (none was recorded).
 pub fn lease_expired(snap: &Snapshot, attempt: AttemptId) -> bool {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
     snap.attempts.iter().find(|a| a.id == attempt).is_some_and(|a| a.lease_expires_ms != 0 && u128::from(a.lease_expires_ms) <= now)

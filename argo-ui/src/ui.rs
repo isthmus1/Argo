@@ -1,6 +1,6 @@
 //! Floating chrome over a full-bleed canvas. Read-only: the UI visualizes agent work recorded in
-//! SpacetimeDB; it offers navigation and inspection, never editing. Opening a project and
-//! requesting a rewrite live in `dialogs`.
+//! SpacetimeDB; it offers navigation and inspection, never editing. The explorer lives in
+//! `dialogs`.
 
 use std::collections::HashSet;
 
@@ -23,16 +23,6 @@ pub const H: f32 = 920.0;
 pub(crate) const M: f32 = 16.0;
 const DETAIL_W: f32 = 380.0;
 const HOVER_W: f32 = 340.0;
-
-const RUST_SOURCE: &[&str] = &[
-    "pub fn step(acc: u32, i: u32) -> u32 {",
-    "    normalize(acc.wrapping_add(i))",
-    "}",
-    "",
-    "fn normalize(x: u32) -> u32 {",
-    "    x & 0xff",
-    "}",
-];
 
 /// Canvas area not covered by floating panels: x, y, w, h.
 pub fn free_area(detail_open: bool, explorer: bool) -> [f32; 4] {
@@ -61,7 +51,7 @@ pub fn view(p: &Pal, s: &State) -> El {
     let mut root = el().size(W, H)
         .child(graph::view(p, s, W, H).absolute(0.0, 0.0))
         .child(breadcrumb(p, s).absolute(M, M))
-        .child(chrome(p, s).pin(None, Some(M), Some(M), None));
+        .child(status(p, s).pin(None, Some(M), Some(M), None));
     if s.project.is_some() {
         root = root.child(crate::dialogs::explorer(p, s).absolute(M, 72.0));
     }
@@ -74,18 +64,7 @@ pub fn view(p: &Pal, s: &State) -> El {
         let [x, y] = hover_anchor(s, item, w, h);
         root = root.child(card.w(w).absolute(x, y));
     }
-    if s.modal.is_some() {
-        root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
-    }
     root
-}
-
-/// Top-right controls. Watching SpacetimeDB offers no Open or Rewrite: what is shown and what is
-/// translated are the database's and the workers' business.
-fn chrome(p: &Pal, s: &State) -> El {
-    let r = row().gap(8.0);
-    let r = if s.db.is_some() { r } else { r.child(crate::dialogs::toolbar(p, s)) };
-    r.child(status(p, s))
 }
 
 fn breadcrumb(p: &Pal, s: &State) -> El {
@@ -111,19 +90,9 @@ fn status(p: &Pal, s: &State) -> El {
         let c = if s.online { p.ok } else { p.faint };
         el().size(14.0, 14.0).radius(7.0).border(2.0, c.alpha(0.35)).center().child(el().size(6.0, 6.0).radius(3.0).fill(c))
     };
+    // Every claim in the database counts, not only those on the shown function's canvas.
     let mut workers: Vec<(u8, bool, String)> = vec![];
-    for n in &s.graph.nodes {
-        if let Some(c) = n.claim {
-            workers.push((c.worker, c.active, n.title.clone()));
-        }
-    }
-    for g in &s.graph.groups {
-        if let Some(c) = g.claim {
-            workers.push((c.worker, c.active, g.title.clone()));
-        }
-    }
-    // Watching a database, every claim counts, not only those on the shown function's canvas.
-    if let Some(live) = s.live.as_ref().filter(|_| s.db.is_some()) {
+    if let Some(live) = &s.live {
         let snap = &live.snap;
         let claimed: HashSet<NodeId> = snap.status.iter().filter(|st| st.claim.is_some()).map(|st| st.node).collect();
         workers = snap.graph.nodes.iter().filter(|n| claimed.contains(&n.id))
@@ -136,7 +105,7 @@ fn status(p: &Pal, s: &State) -> El {
     r = r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0));
     for (worker, active, title) in &workers {
         let a = graph::avatar(p, *worker, true, 22.0).child(state_glyph(p, *active).absolute(12.0, 12.0));
-        let tip = format!("worker {worker} · {title} · {}", if *active { "translating" } else { idle(s) });
+        let tip = format!("worker {worker} · {title} · {}", if *active { "translating" } else { IDLE });
         r = r.child(icon_button(p, a, &tip));
     }
     r = r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0))
@@ -270,11 +239,8 @@ fn status_glyph(p: &Pal, e: Evidence) -> El {
         .child(text(g).font(TextStyle::new(11.0, 800.0)).color(c))
 }
 
-/// What an inactive claim means: queued in the mock scenes; watching a database, where every
-/// claim starts running, a lease that ran out.
-fn idle(s: &State) -> &'static str {
-    if s.db.is_some() { "lease expired" } else { "queued" }
-}
+/// What an inactive claim means: every claim starts running, so a lease that ran out.
+const IDLE: &str = "lease expired";
 
 /// One compact line of agent activity, and one for a failed candidate. No prose banners.
 fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence, idle: &str) -> Option<El> {
@@ -336,7 +302,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 .child(col().gap(4.0)
                     .child(kicker(p, n.kind.category().name(), p.header(n.kind.category())))
                     .child(header(p, &n.title, graph::kind_glyph(n.kind), p.header(n.kind.category()), n.evidence, n.lang, &c.effects, (n.kind == crate::model::Kind::Group).then_some(n.members))));
-            if let Some(a) = activity(p, n.claim, n.evidence, idle(s)) {
+            if let Some(a) = activity(p, n.claim, n.evidence, IDLE) {
                 body = body.child(a);
             }
             if docked {
@@ -378,7 +344,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 .child(col().gap(4.0)
                     .child(kicker(p, "node group", p.header(Category::Function)))
                     .child(header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, &[], Some(members.len()))));
-            if let Some(a) = activity(p, grp.claim, grp.evidence, idle(s)) {
+            if let Some(a) = activity(p, grp.claim, grp.evidence, IDLE) {
                 body = body.child(a);
             }
             let mut list = col().gap(2.0);
@@ -392,13 +358,6 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 list = list.child(label(&format!("+{} more", members.len() - 5), p.faint).ml(16.0));
             }
             body = body.child(list);
-            if docked && s.scene == "fixture" {
-                let mut code = col().padding(10.0).radius(8.0).fill(p.code_bg);
-                for line in RUST_SOURCE {
-                    code = code.child(mono(if line.is_empty() { " " } else { line }, p.text));
-                }
-                body = body.child(code);
-            }
             (shell(p, body, docked, p.header(Category::Function)), 80.0 + members.len().min(6) as f32 * 24.0)
         }
     }

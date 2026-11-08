@@ -1,5 +1,6 @@
-//! Seeded scenes for layout and design renders. Not protocol data. `fixture` mirrors the worked
-//! example in ARCHITECTURE.md §5.2; the others are TinyEMU-shaped functions of increasing size.
+//! Seeded scenes: test data only (`cfg(test)`), never loaded by the app. Not protocol data.
+//! `fixture` mirrors the worked example in ARCHITECTURE.md §5.2; the others are TinyEMU-shaped
+//! functions of increasing size.
 
 use crate::model::{Claim, Evidence, Graph, Group, Kind, Lang, Node, Pin, Ty, Wire};
 

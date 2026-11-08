@@ -269,6 +269,67 @@ fn a_claim_whose_lease_runs_out_goes_idle() {
     );
 }
 
+/// The explorer's index from the rows alone: files with functions sorted by path, `main` in a .c
+/// file shown first with its file expanded, and the counts the explorer prints.
+#[test]
+fn the_explorer_indexes_the_rows_and_opens_main_first() {
+    use argo_db_client::Unit;
+    use argo_protocol::{
+        Analysis, GraphBuilder, GraphRevision, NodeKind, ProjectId, RevisionId, RevisionState,
+        Snapshot,
+    };
+    let mut b = GraphBuilder::new(GraphRevision {
+        id: RevisionId(1),
+        project: ProjectId(1),
+        parent: None,
+        analysis: Analysis::Interfaces,
+        state: RevisionState::Draft,
+    });
+    let program = b.node(None, NodeKind::Program, "demo");
+    let header = b.node(Some(program), NodeKind::Module, "lib.h");
+    b.node(Some(header), NodeKind::Function, "helper");
+    let main_c = b.node(Some(program), NodeKind::Module, "main.c");
+    b.node(Some(main_c), NodeKind::Function, "setup");
+    let main = b.node(Some(main_c), NodeKind::Function, "main");
+    let a_c = b.node(Some(program), NodeKind::Module, "a.c");
+    b.node(Some(a_c), NodeKind::Function, "alpha");
+    b.node(Some(program), NodeKind::Module, "empty.c");
+    let unit = |path: &str, skipped: Option<&str>| Unit {
+        path: path.into(),
+        skipped: skipped.map(Into::into),
+    };
+    let origin = Origin {
+        locator: "/src/demo".into(),
+        commit: None,
+        units: vec![
+            unit("a.c", None),
+            unit("main.c", None),
+            unit("broken.c", Some("parse error")),
+        ],
+        flags: vec![],
+    };
+    let rows = to_rows(&Snapshot::new(b.finish(), vec![]), &origin, &|_, _| None).unwrap();
+    let rebuilt = rebuild(&rows).unwrap();
+    let (tx, rx) = channel();
+    tx.send(Msg::Rows {
+        structure: 1,
+        snap: Box::new(rebuilt.live(&[])),
+        origin: rebuilt.origin,
+    })
+    .unwrap();
+    let s = first(Link::new("argo".into(), rx), Duration::from_secs(1)).unwrap();
+
+    assert_eq!(project::current(&s), Some((main, "main".into())));
+    assert_eq!(s.view.crumbs, ["demo", "main.c", "main"]);
+    let p = s.project.as_ref().unwrap();
+    let names: Vec<_> = p.modules.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["a.c", "lib.h", "main.c"], "sorted, files without functions left out");
+    assert_eq!((p.included(), p.units.len(), p.function_count()), (2, 3, 4));
+    assert_eq!(p.module_of(main).map(|m| m.id), Some(main_c));
+    assert_eq!(s.forms.expanded, Some(main_c), "the shown function's file is expanded");
+    assert!(p.checkout.contains("no commit recorded"), "{}", p.checkout);
+}
+
 #[test]
 fn no_rows_within_the_timeout_is_an_error_naming_why() {
     let (tx, rx) = channel();

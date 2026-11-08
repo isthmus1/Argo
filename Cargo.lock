@@ -311,7 +311,6 @@ dependencies = [
 name = "argo-ui"
 version = "0.0.1"
 dependencies = [
- "Argo",
  "argo-db-client",
  "argo-protocol",
  "rune",

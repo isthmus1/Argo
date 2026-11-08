@@ -15,8 +15,7 @@ use argo_db_client::bindings::{CChunkTableAccess, RustChunkTableAccess};
 use argo_db_client::{CChunk, DbConnection, RustChunk};
 use spacetimedb_sdk::{DbContext, Table, TableWithPrimaryKey};
 
-use super::Msg;
-use crate::project::WAKER;
+use super::{Msg, WAKER};
 use feed::{Cache, Feed, Mark};
 
 /// Retry delays double from the first to the last, and restart once a subscription applies.
