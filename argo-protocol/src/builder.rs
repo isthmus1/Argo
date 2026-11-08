@@ -15,6 +15,9 @@ pub struct GraphBuilder {
     next_edge: u64,
     order: HashMap<Option<NodeId>, u32>,
     logical: HashSet<LogicalKey>,
+    /// Each node's pins, as indices into `graph.pins`, so looking them up doesn't scan every pin
+    /// (a node is found by its id directly: ids are handed out in the order nodes are pushed).
+    pins_of: HashMap<NodeId, Vec<usize>>,
 }
 
 /// The template ID recorded when a producer doesn't supply its own.
@@ -79,6 +82,7 @@ impl GraphBuilder {
             next_edge: 0,
             order: HashMap::new(),
             logical: HashSet::new(),
+            pins_of: HashMap::new(),
         }
     }
 
@@ -126,16 +130,21 @@ impl GraphBuilder {
         id
     }
 
+    /// Node `id` is `graph.nodes[id]`: `node` hands ids out in the order it pushes nodes, and
+    /// nothing else adds or removes them.
     fn get(&self, id: NodeId) -> Option<&Node> {
-        self.graph.nodes.iter().find(|n| n.id == id)
+        let n = self.graph.nodes.get(usize::try_from(id.0).ok()?)?;
+        debug_assert_eq!(n.id, id);
+        Some(n)
     }
 
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        self.graph
-            .nodes
-            .iter_mut()
-            .find(|n| n.id == id)
-            .expect("node was added by this builder")
+        let n = usize::try_from(id.0)
+            .ok()
+            .and_then(|i| self.graph.nodes.get_mut(i))
+            .expect("node was added by this builder");
+        debug_assert_eq!(n.id, id);
+        n
     }
 
     pub fn template(&mut self, id: NodeId, template: impl Into<String>) -> &mut Self {
@@ -161,6 +170,10 @@ impl GraphBuilder {
     pub fn pin(&mut self, node: NodeId, spec: PinSpec) -> PinRef {
         let pin = spec.at(node);
         let r = pin.pin_ref();
+        self.pins_of
+            .entry(node)
+            .or_default()
+            .push(self.graph.pins.len());
         self.graph.pins.push(pin);
         r
     }
@@ -198,24 +211,21 @@ impl GraphBuilder {
 
     /// Change a pin's display label.
     pub fn relabel(&mut self, pin: &PinRef, label: impl Into<String>) {
-        if let Some(p) = self
-            .graph
-            .pins
-            .iter_mut()
-            .find(|p| p.node == pin.node && p.key == pin.key)
-        {
-            p.label = label.into();
+        let pins = &mut self.graph.pins;
+        let found = self
+            .pins_of
+            .get(&pin.node)
+            .and_then(|of| of.iter().find(|&&i| pins[i].key == pin.key));
+        if let Some(&i) = found {
+            pins[i].label = label.into();
         }
     }
 
     /// The pins added to `node` so far.
     pub fn specs(&self, node: NodeId) -> Vec<PinSpec> {
-        self.graph
-            .pins
-            .iter()
-            .filter(|p| p.node == node)
-            .map(|p| p.spec())
-            .collect()
+        self.pins_of.get(&node).map_or_else(Vec::new, |of| {
+            of.iter().map(|&i| self.graph.pins[i].spec()).collect()
+        })
     }
 
     /// The container's group input: every `in`/`in_out` pin re-exposed as an output.
