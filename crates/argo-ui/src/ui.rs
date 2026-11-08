@@ -58,8 +58,9 @@ pub fn view(p: &Pal, s: &State) -> El {
     }
     if let Some(item) = s.hovered.filter(|h| Some(*h) != s.selected) {
         let (card, h) = info(p, s, item, false);
-        let [x, y] = hover_anchor(s, item, h);
-        root = root.child(card.w(HOVER_W).absolute(x, y));
+        let w = hover_w(s, item);
+        let [x, y] = hover_anchor(s, item, w, h);
+        root = root.child(card.w(w).absolute(x, y));
     }
     root
 }
@@ -155,17 +156,42 @@ fn overlap(a: [f32; 4], b: [f32; 4]) -> f32 {
     if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
 }
 
+/// Hover-card width: a card with port rows uses the full width; one with only its kind and title
+/// fits them, so no empty band trails the title.
+fn hover_w(s: &State, item: Item) -> f32 {
+    let Item::Node(i) = item else { return HOVER_W };
+    let n = &s.view.nodes[i];
+    let c = describe::card(&s.view, i);
+    if !c.inputs.is_empty() || !c.outputs.is_empty() || n.claim.is_some() || n.evidence == Evidence::Rejected {
+        return HOVER_W;
+    }
+    let chars = |t: &str| t.chars().count() as f32;
+    // Padding, kind tile and gap, title; then whichever header marks are present.
+    let mut title = 14.0 * 2.0 + 22.0 + 9.0 + chars(&n.title) * 8.2;
+    if c.effects.iter().any(|e| *e != "control flow") {
+        title += 9.0 + 20.0;
+    }
+    if n.evidence != Evidence::None {
+        title += 9.0 + 20.0;
+    }
+    if n.lang != crate::model::Lang::None {
+        title += 9.0 + 26.0;
+    }
+    let kicker = 14.0 * 2.0 + 8.0 + 6.0 + chars(n.kind.category().name()) * 7.6;
+    title.max(kicker).clamp(160.0, HOVER_W)
+}
+
 /// Hover-card position: try right, left, below and above the item; keep inside the free
 /// canvas, never over the item, and prefer the side covering the fewest nodes (direct
 /// neighbours count triple).
-fn hover_anchor(s: &State, item: Item, card_h: f32) -> [f32; 2] {
+fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> [f32; 2] {
     let [x, y, w, h] = item_rect(s, item);
     let gap = 14.0;
     let [fx, fy, fw, fh] = free_area(s.selected.is_some());
-    let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - HOVER_W).max(fx)), cy.clamp(fy, (fy + fh - card_h).max(fy))];
+    let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - card_w).max(fx)), cy.clamp(fy, (fy + fh - card_h).max(fy))];
     let candidates = [
         clamp(x + w + gap, y),
-        clamp(x - gap - HOVER_W, y),
+        clamp(x - gap - card_w, y),
         clamp(x, y + h + gap),
         clamp(x, y - gap - card_h),
     ];
@@ -177,7 +203,7 @@ fn hover_anchor(s: &State, item: Item, card_h: f32) -> [f32; 2] {
     };
     let me = [x, y, w, h];
     let cost = |c: [f32; 2]| {
-        let r = [c[0], c[1], HOVER_W, card_h];
+        let r = [c[0], c[1], card_w, card_h];
         let mut cost = overlap(r, me) * 100.0;
         for i in 0..s.view.nodes.len() {
             let o = overlap(r, s.screen_rect(i));
@@ -196,7 +222,7 @@ fn effect_glyph(e: &str) -> &'static str {
     match e {
         "pure" => "∘",
         "memory read" | "memory read/write" => "⇄",
-        "control flow" => "⑂",
+        "control flow" => "◇",
         "returns" => "⇤",
         _ => "⚡",
     }
@@ -354,11 +380,19 @@ fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, la
         r = r.child(row().h(18.0).px(6.0).radius(4.0).fill(p.code_bg).items_center().help("nodes in this group")
             .child(text(format!("▣ {c}")).font(TextStyle::new(10.5, 650.0)).color(p.muted)));
     }
-    if let Some(e) = effects.first() {
+    // Control flow is already named above the title; other effects keep their icon.
+    if let Some(e) = effects.iter().find(|e| **e != "control flow") {
         r = r.child(el().size(20.0, 20.0).center().help(*e)
             .child(text(effect_glyph(e)).font(TextStyle::new(12.0, 650.0)).color(p.muted)));
     }
-    r.child(status_glyph(p, evidence)).child(graph::lang_chip(p, lang))
+    // Absent marks add nothing, not an empty slot plus its gap.
+    if evidence != Evidence::None {
+        r = r.child(status_glyph(p, evidence));
+    }
+    if lang != crate::model::Lang::None {
+        r = r.child(graph::lang_chip(p, lang));
+    }
+    r
 }
 
 fn shell(p: &Pal, body: El, docked: bool, family: Color) -> El {

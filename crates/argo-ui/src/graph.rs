@@ -280,7 +280,7 @@ pub fn kind_glyph(kind: Kind) -> &'static str {
         Kind::GroupOut => "⇤",
         Kind::Local => "≔",
         Kind::Loop => "↻",
-        Kind::Branch => "⑂",
+        Kind::Branch => "◇",
         Kind::Switch => "☰",
         Kind::Op => "ƒx",
         Kind::Call => "ƒ",
@@ -347,16 +347,19 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], look: Look) -> El {
             .child(socket(p, n.outs[0].ty, model::socket_local(n, w, true, 0)));
         return interact(decorate(p, emphasis(p, card, look), [w, h], h / 2.0, n.evidence, n.claim, look));
     }
-    let header = row().h(model::HEADER).px(10.0).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
-        .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)))
-        .child(text(n.title.clone()).font(header_font(n.kind)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0))
-        .child(if n.kind == Kind::Group {
-            row().h(16.0).px(5.0).radius(4.0).fill(Color::BLACK.alpha(0.25)).items_center()
-                .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE))
-        } else {
-            el()
-        })
-        .child(lang_chip(p, n.lang));
+    // Glyph in a fixed 16 px slot, then only the chips that exist: `model::size` budgets exactly
+    // these widths and gaps, so titles that fit are never truncated.
+    let mut header = row().h(model::HEADER).px(10.0).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
+        .child(el().w(16.0).center()
+            .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)).single_line()))
+        .child(text(n.title.clone()).font(header_font(n.kind)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
+    if n.kind == Kind::Group {
+        header = header.child(row().h(16.0).px(5.0).radius(4.0).fill(Color::BLACK.alpha(0.25)).items_center()
+            .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE)));
+    }
+    if n.lang != Lang::None {
+        header = header.child(lang_chip(p, n.lang));
+    }
 
     let mut body = col().py(model::BODY_PAD);
     for (o, ii) in model::rows(n) {
