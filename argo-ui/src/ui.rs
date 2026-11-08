@@ -14,9 +14,42 @@ pub(crate) const UI: TextStyle = TextStyle::new(11.5, 450.0);
 pub(crate) const UI_STRONG: TextStyle = TextStyle::new(11.5, 600.0);
 pub(crate) const LABEL: TextStyle = TextStyle::new(10.0, 650.0).tracking(0.4);
 
-pub const W: f32 = 1600.0;
-pub const H: f32 = 920.0;
+/// Default window size; the layout follows the actual window (see [`viewport`]).
+pub const W: f32 = 1440.0;
+pub const H: f32 = 900.0;
+/// The smallest window the layout is designed for.
+pub const MIN_W: f32 = 760.0;
+pub const MIN_H: f32 = 520.0;
 pub(crate) const M: f32 = 16.0;
+/// Top of the canvas area below the floating top bar.
+pub(crate) const TOP: f32 = 72.0;
+
+thread_local! {
+    /// The window's size in points, as last laid out (the default size until the first layout).
+    static VIEWPORT: std::cell::Cell<[f32; 2]> = const { std::cell::Cell::new([W, H]) };
+    /// Light/dark override chosen in the app; `None` follows the system.
+    static THEME: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// The window size in points.
+pub fn viewport() -> [f32; 2] {
+    VIEWPORT.with(|v| v.get())
+}
+
+/// Record a new window size; returns the previous one.
+pub fn set_viewport(size: [f32; 2]) -> [f32; 2] {
+    VIEWPORT.with(|v| v.replace(size))
+}
+
+/// The chosen appearance: the in-app override, else the system's.
+pub fn dark(system_dark: bool) -> bool {
+    THEME.with(|t| t.get()).unwrap_or(system_dark)
+}
+
+/// Set (or clear, with `None`) the in-app light/dark override.
+pub fn set_theme(dark: Option<bool>) {
+    THEME.with(|t| t.set(dark));
+}
 const DETAIL_W: f32 = 380.0;
 const HOVER_W: f32 = 340.0;
 
@@ -32,9 +65,20 @@ const RUST_SOURCE: &[&str] = &[
 
 /// Canvas area not covered by floating panels: x, y, w, h.
 pub fn free_area(detail_open: bool, explorer: bool) -> [f32; 4] {
-    let right = if detail_open { DETAIL_W + 2.0 * M } else { M };
-    let left = if explorer { M + EXPLORER_W + M } else { M };
-    [left, 72.0, W - left - right, H - 72.0 - M]
+    let [w, h] = viewport();
+    let right = if detail_open { detail_w() + 2.0 * M } else { M };
+    let left = if explorer { M + explorer_w() + M } else { M };
+    [left, TOP, (w - left - right).max(120.0), (h - TOP - M).max(120.0)]
+}
+
+/// Docked details width: narrower in small windows so the canvas keeps most of the width.
+pub fn detail_w() -> f32 {
+    (viewport()[0] * 0.3).clamp(280.0, DETAIL_W)
+}
+
+/// Explorer width, narrowing with the window like the details panel.
+pub fn explorer_w() -> f32 {
+    (viewport()[0] * 0.22).clamp(220.0, EXPLORER_W)
 }
 
 /// Width of the project explorer docked on the left.
@@ -53,16 +97,21 @@ pub(crate) fn card(p: &Pal) -> El {
         .shadow(8.0, 30.0, p.shadow.alpha(if p.dark { 0.5 } else { 0.12 }))
 }
 
-pub fn view(p: &Pal, s: &State) -> El {
-    let mut root = el().size(W, H)
-        .child(graph::view(p, s, W, H).absolute(0.0, 0.0))
-        .child(breadcrumb(p, s).absolute(M, M))
+/// The whole window. `inset` is the width macOS's traffic lights take at the top-left (0
+/// elsewhere); the breadcrumb starts after them.
+pub fn view(p: &Pal, s: &State, inset: f32) -> El {
+    let [w, h] = viewport();
+    let left = if inset > 0.0 { inset + 12.0 } else { M };
+    let mut root = el().key("root").w_full().h_full().fill(p.canvas)
+        .on_layout(|s: &mut State, r| s.resized([r[2], r[3]]))
+        .child(graph::view(p, s, w, h).absolute(0.0, 0.0))
+        .child(breadcrumb(p, s).absolute(left, M))
         .child(row().gap(8.0).child(crate::dialogs::toolbar(p, s)).child(status(p, s)).pin(None, Some(M), Some(M), None));
     if s.project.is_some() {
-        root = root.child(crate::dialogs::explorer(p, s).absolute(M, 72.0));
+        root = root.child(crate::dialogs::explorer(p, s).absolute(M, TOP));
     }
     if let Some(item) = s.selected {
-        root = root.child(info(p, s, item, true).0.w(DETAIL_W).absolute(W - M - DETAIL_W, 72.0));
+        root = root.child(info(p, s, item, true).0.w(detail_w()).absolute(w - M - detail_w(), TOP));
     }
     if let Some(item) = s.hovered.filter(|h| Some(*h) != s.selected) {
         let (card, h) = info(p, s, item, false);
@@ -408,7 +457,7 @@ fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, la
 
 fn shell(p: &Pal, body: El, docked: bool, family: Color) -> El {
     if docked {
-        col().h(H - 72.0 - M).fill(p.panel).radius(RADIUS).border(1.0, p.panel_border).padding(16.0).child(body)
+        col().h(viewport()[1] - TOP - M).fill(p.panel).radius(RADIUS).border(1.0, p.panel_border).padding(16.0).child(body)
             .shadow(4.0, 16.0, p.shadow.alpha(if p.dark { 0.4 } else { 0.08 }))
     } else {
         col().fill(p.panel).radius(RADIUS).border(1.0, family.alpha(0.45)).padding(14.0).child(body)

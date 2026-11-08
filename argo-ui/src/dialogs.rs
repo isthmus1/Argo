@@ -6,7 +6,7 @@ use rune_ui::{Color, Cursor, El, ScrollSpec, TextStyle, col, el, row, text, text
 use crate::app::State;
 use crate::palette::Pal;
 use crate::project::{self, Modal, Scope};
-use crate::ui::{EXPLORER_W, H, LABEL, M, UI, UI_STRONG, W, card, label};
+use crate::ui::{LABEL, M, TOP, UI, UI_STRONG, card, explorer_w, label, viewport};
 
 const TITLE: TextStyle = TextStyle::new(17.0, 650.0);
 const BODY: TextStyle = TextStyle::new(12.5, 450.0);
@@ -255,8 +255,8 @@ pub fn explorer(p: &Pal, s: &State) -> El {
         }
     }
     card(p)
-        .w(EXPLORER_W)
-        .h(H - 72.0 - M)
+        .w(explorer_w())
+        .h(viewport()[1] - TOP - M)
         .padding(12.0)
         .gap(10.0)
         .child(col().gap(3.0).child(header).child(sub))
@@ -287,12 +287,12 @@ pub fn modal(p: &Pal, s: &State) -> El {
             s.modal = None;
         }
     };
-    el().size(W, H)
+    el().w_full().h_full()
         .fill(Color::BLACK.alpha(if p.dark { 0.5 } else { 0.25 }))
         .center()
         .child(
             card(p)
-                .w(DIALOG_W)
+                .w(DIALOG_W.min(viewport()[0] - 2.0 * M))
                 .padding(22.0)
                 .gap(16.0)
                 .child(dialog)

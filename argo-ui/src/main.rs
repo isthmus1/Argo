@@ -32,7 +32,10 @@ use std::time::Duration;
 const SCENES: [&str; 5] = ["fixture", "branches", "dataflow", "devices", "interp"];
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
-    ui::view(&Pal::new(cx.system_dark()), s)
+    let p = Pal::new(ui::dark(cx.system_dark()));
+    // Text fields and anything else left uncoloured draw in the theme's text colour, not white.
+    cx.foreground(p.text);
+    ui::view(&p, s, cx.titlebar_inset())
 }
 
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
@@ -183,7 +186,7 @@ fn main() {
                 hover(s, "alu");
             }),
         ],
-        min_size: Some((ui::W, ui::H)),
+        min_size: Some((ui::MIN_W, ui::MIN_H)),
         poll: Some(poll),
         on_key: Some(on_key),
         setup: Some(|_, waker| {

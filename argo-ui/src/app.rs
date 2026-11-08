@@ -65,6 +65,8 @@ pub struct State {
     pub loader: Option<project::Loader>,
     next_event: f64,
     step: usize,
+    /// Whether the camera has been fitted to the real window size yet.
+    sized: bool,
 }
 
 /// A protocol snapshot, the level being shown, and the deltas still to replay.
@@ -86,6 +88,8 @@ impl State {
             scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![] },
             cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None, next_event: 4.0, step: 0,
             project: None, forms: project::Forms::default(), modal: None, loader: None,
+            // A state built after the window's first layout already knows its size.
+            sized: ui::viewport() != [ui::W, ui::H],
         };
         s.relayout();
         s.fit();
@@ -179,6 +183,19 @@ impl State {
     /// Rebuild the view graph only: claims and evidence changed, positions did not.
     fn refresh(&mut self) {
         self.view = self.graph.collapse(&self.collapsed).0;
+    }
+
+    /// The window was laid out at `size`. The first layout frames the graph for the real window;
+    /// later resizes keep whatever was at the centre of the canvas there.
+    pub fn resized(&mut self, size: [f32; 2]) {
+        let old = ui::set_viewport(size);
+        if !self.sized {
+            self.sized = true;
+            self.fit();
+        } else if old != size {
+            self.cam.pan[0] += (size[0] - old[0]) / 2.0;
+            self.cam.pan[1] += (size[1] - old[1]) / 2.0;
+        }
     }
 
     /// Frame the whole graph in the canvas area left free by the floating panels.
