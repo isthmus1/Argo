@@ -33,9 +33,37 @@ pub struct Cam {
     pub pan: [f32; 2],
     pub zoom: f32,
     pub drag_from: [f32; 2],
+    /// A pan drag is held: hover changes are ignored until it ends.
+    pub dragging: bool,
+    /// The last pan drag travelled past a click, so the press its release produces is no click.
+    pub panned: bool,
 }
 
+/// Pointer travel (points, per axis) a press may have and still count as a click, not a pan.
+const CLICK_SLOP: f32 = 4.0;
+
 impl Cam {
+    /// One phase of a pan drag; `d` is the pointer's travel since the press.
+    pub fn drag(&mut self, phase: rune_ui::Phase, d: [f32; 2]) {
+        match phase {
+            rune_ui::Phase::Down => {
+                self.drag_from = self.pan;
+                self.dragging = true;
+                self.panned = false;
+            }
+            rune_ui::Phase::Move | rune_ui::Phase::Up => {
+                self.pan = [self.drag_from[0] + d[0], self.drag_from[1] + d[1]];
+                self.panned |= d[0].abs() > CLICK_SLOP || d[1].abs() > CLICK_SLOP;
+                self.dragging = phase == rune_ui::Phase::Move;
+            }
+        }
+    }
+
+    /// Whether the press being handled is the release of a pan rather than a click (once).
+    pub fn take_panned(&mut self) -> bool {
+        std::mem::take(&mut self.panned)
+    }
+
     pub fn zoom_about(&mut self, x: f32, y: f32, factor: f32) {
         let z = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         let k = z / self.zoom;
@@ -280,7 +308,14 @@ impl State {
         }
     }
 
+    /// Hover changes are ignored while a pan drag is held: the world moves with the pointer, so
+    /// what it is over cannot change, but the pointer runs up to a frame ahead of where the world
+    /// was last drawn and hit tests against that frame would flicker hover (card, outline, wire
+    /// focus) on and off.
     pub fn hover(&mut self, item: Item, on: bool) {
+        if self.cam.dragging {
+            return;
+        }
         if on {
             self.hovered = Some(item);
         } else if self.hovered == Some(item) {
@@ -373,5 +408,52 @@ impl State {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune_ui::Phase;
+
+    #[test]
+    fn pan_drag_follows_travel_and_marks_a_pan_past_click_slop() {
+        let mut cam = Cam { zoom: 1.0, pan: [10.0, 20.0], ..Cam::default() };
+        cam.drag(Phase::Down, [0.0, 0.0]);
+        assert!(cam.dragging && !cam.panned);
+        cam.drag(Phase::Move, [2.0, -1.0]);
+        assert_eq!(cam.pan, [12.0, 19.0]);
+        assert!(!cam.panned, "a jitter within click slop is still a click");
+        cam.drag(Phase::Move, [-40.0, 30.0]);
+        cam.drag(Phase::Up, [-40.0, 30.0]);
+        assert_eq!(cam.pan, [-30.0, 50.0]);
+        assert!(!cam.dragging);
+        assert!(cam.take_panned(), "the release's press is a pan, not a click");
+        assert!(!cam.take_panned(), "only once");
+    }
+
+    #[test]
+    fn a_fresh_press_clears_an_unclaimed_pan() {
+        let mut cam = Cam { zoom: 1.0, ..Cam::default() };
+        cam.drag(Phase::Down, [0.0, 0.0]);
+        cam.drag(Phase::Up, [80.0, 0.0]);
+        // That release landed off the canvas, so no press claimed the pan; the next click counts.
+        cam.drag(Phase::Down, [0.0, 0.0]);
+        cam.drag(Phase::Up, [0.0, 0.0]);
+        assert!(!cam.take_panned());
+    }
+
+    #[test]
+    fn hover_holds_still_while_panning() {
+        let mut s = State::load("fixture");
+        s.hover(Item::Node(0), true);
+        s.cam.drag(Phase::Down, [0.0, 0.0]);
+        // Hit tests against the last drawn frame lag the pointer: these leaves and enters are noise.
+        s.hover(Item::Node(0), false);
+        s.hover(Item::Node(1), true);
+        assert_eq!(s.hovered, Some(Item::Node(0)));
+        s.cam.drag(Phase::Up, [30.0, 0.0]);
+        s.hover(Item::Node(1), true);
+        assert_eq!(s.hovered, Some(Item::Node(1)));
     }
 }
