@@ -140,7 +140,10 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         let w = hover_w(s, item);
         // No card for an item hidden under the floating panels.
         let h = hover_h(item, w, estimate);
-        if let Some([x, y]) = hover_anchor(s, item, w, h) {
+        if let Some(Spot { at: [x, y], tether }) = hover_anchor(s, item, w, h) {
+            if let Some(line) = tether {
+                root = root.child(tether_line(line, card_accent(p, s, item)).key("hover-tether"));
+            }
             // Keyed per item so a newly hovered card always reports its own first layout.
             root = root.child(card.w(w).key(format!("hover-{item:?}"))
                 .on_layout(move |_: &mut State, r| HOVER_SIZE.with(|c| c.set(Some((item, [r[2], r[3]])))))
@@ -151,6 +154,27 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
     }
     root
+}
+
+/// A hover card's accent: its border's colour, the item's header family.
+fn card_accent(p: &Pal, s: &State, item: Item) -> Color {
+    match item {
+        Item::Node(i) => p.header(s.view.nodes[i].kind.category()),
+        Item::Group(_) => p.header(Category::Function),
+    }
+}
+
+/// The faint line from a card that couldn't sit beside its item to that item, absolutely placed,
+/// with a small dot where it meets the item.
+fn tether_line([a, b]: [[f32; 2]; 2], accent: Color) -> El {
+    let dot = 2.5;
+    let pad = dot + 1.0;
+    let (x0, y0) = (a[0].min(b[0]) - pad, a[1].min(b[1]) - pad);
+    let (w, h) = ((a[0] - b[0]).abs() + 2.0 * pad, (a[1] - b[1]).abs() + 2.0 * pad);
+    let local = |q: [f32; 2]| [q[0] - x0, q[1] - y0];
+    let c = accent.alpha(0.7);
+    canvas(Shape::new().line(local(a), local(b), 1.5, LineCap::Round, c).fill(ring(local(b), dot, 16), c))
+        .size(w, h).absolute(x0, y0)
 }
 
 /// The protocol containers behind the breadcrumb, root first, when the crumbs are a real
@@ -179,8 +203,8 @@ pub(crate) fn go_to_crumb(s: &mut State, id: NodeId) {
     }
 }
 
-/// One breadcrumb: ancestors are buttons that navigate up; the current level, and every crumb
-/// of a mock scene, is plain text.
+/// One breadcrumb of a real hierarchy: ancestors are buttons that navigate up; the current
+/// level is plain text. A mock scene's crumbs are [`plain_crumbs`].
 fn crumb(p: &Pal, name: &str, current: bool, target: Option<NodeId>) -> El {
     let t = if current { text(name.to_string()).font(UI_STRONG).color(p.text) } else { label(name, p.muted) };
     let c = row().h(CONTROL_H).px(8.0).radius(CONTROL_R).items_center().child(t);
@@ -200,13 +224,33 @@ fn breadcrumb(p: &Pal, s: &State) -> El {
     let mut r = row().gap(0.0)
         .child(el().w(LOGO_W).h(CONTROL_H).center().child(text("◆").font(TextStyle::new(13.0, 700.0)).color(p.accent)));
     let last = s.view.crumbs.len().saturating_sub(1);
-    for (i, c) in s.view.crumbs.iter().enumerate() {
-        if i > 0 {
-            r = r.child(label("›", p.faint));
+    match path {
+        Some(path) => {
+            for (i, c) in s.view.crumbs.iter().enumerate() {
+                if i > 0 {
+                    r = r.child(label("›", p.faint));
+                }
+                r = r.child(crumb(p, c, i == last, Some(path[i])).key(format!("crumb-{i}")));
+            }
         }
-        r = r.child(crumb(p, c, i == last, path.as_ref().map(|p| p[i])).key(format!("crumb-{i}")));
+        None => r = r.child(plain_crumbs(p, &s.view.crumbs).key("crumbs")),
     }
     bar(p, r.child(source_chip(p, &source(s)).ml(2.0).mr(4.0))).key("breadcrumb")
+}
+
+/// Crumbs that lead nowhere (a mock scene's) as one title, not buttons: the ancestors faint,
+/// `/` between, the current level strong.
+fn plain_crumbs(p: &Pal, crumbs: &[String]) -> El {
+    let last = crumbs.len().saturating_sub(1);
+    let mut r = row().h(CONTROL_H).px(8.0).gap(5.0).items_center();
+    for (i, c) in crumbs.iter().enumerate() {
+        if i == last {
+            r = r.child(text(c.clone()).font(UI_STRONG).color(p.text).single_line());
+        } else {
+            r = r.child(label(c, p.faint)).child(label("/", p.faint));
+        }
+    }
+    r
 }
 
 /// Where the graph comes from, as a passive chip after the crumbs: a small muted glyph and one
@@ -519,11 +563,12 @@ fn visible_part(rect: [f32; 4], head: f32, free: [f32; 4]) -> Option<([f32; 4], 
 /// neighbour's name if anywhere else will do.
 const TITLE_WEIGHT: f32 = 4.0;
 
-/// Hover-card position for `item`, or `None` when the item is hidden under the floating panels.
-/// Its visible rect, header height and what else is on the canvas feed [`place_card`]: other nodes (direct neighbours weigh triple), every on-screen
-/// node's header band and every other frame's title row, weighted by [`TITLE_WEIGHT`] on top,
-/// and wire ends (see [`wire_end`]).
-fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<[f32; 2]> {
+/// Hover-card spot for `item`, or `None` when the item is hidden under the floating panels.
+/// Its visible rect, header height and what else is on screen feed [`place_card`]: every other
+/// node and every other frame's title row as solid; in `others`, those nodes (direct neighbours
+/// weigh triple), their header bands and the frames' title rows weighted by [`TITLE_WEIGHT`] on
+/// top, frame bodies by [`FRAME_WEIGHT`], and wire ends (see [`wire_end`]).
+fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<Spot> {
     let free = free_area(s.selected.is_some(), s.project.is_some());
     let z = s.cam.zoom;
     let head = match item {
@@ -539,11 +584,16 @@ fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<[f32;
     let on_screen = |r: [f32; 4]| overlap(r, [0.0, 0.0, vw, vh]) > 0.0;
     let neighbour = |i: usize| s.view.wires.iter().any(|wi| Some(wi.from.0) == me && wi.to.0 == i || Some(wi.to.0) == me && wi.from.0 == i);
     let mut others: Vec<([f32; 4], f32)> = vec![];
+    // What a card must not cover: every other node, every other frame's title row, and the
+    // overview card when it shows.
+    let mut solid: Vec<[f32; 4]> = crate::overview::rect(s).filter(|_| crate::overview::overflows(s)).into_iter().collect();
+    others.extend(solid.iter().map(|&r| (r, TITLE_WEIGHT)));
     for i in (0..s.view.nodes.len()).filter(|i| Some(*i) != me) {
         let r = s.screen_rect(i);
         if !on_screen(r) {
             continue;
         }
+        solid.push(r);
         others.push((r, if neighbour(i) { 3.0 } else { 1.0 }));
         others.push(([r[0], r[1], r[2], (crate::model::HEADER * z).min(r[3])], TITLE_WEIGHT));
     }
@@ -554,7 +604,10 @@ fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<[f32;
         }
         let r = item_rect(s, Item::Group(g));
         if on_screen(r) {
-            others.push(([r[0], r[1], r[2], (FRAME_HEAD * z).min(r[3])], TITLE_WEIGHT));
+            let band = [r[0], r[1], r[2], (FRAME_HEAD * z).min(r[3])];
+            solid.push(band);
+            others.push((band, TITLE_WEIGHT));
+            others.push((r, FRAME_WEIGHT));
         }
     }
     // Wire ends: each socket and the first stretch of its wire, so a card doesn't cut where
@@ -581,7 +634,7 @@ fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<[f32;
             }
         }
     }
-    Some(place_card(rect, head, [card_w, card_h], free, &others))
+    Some(place_card(rect, head, [card_w, card_h], free, &solid, &others))
 }
 
 /// Weight of a socket and the start of its wire in [`place_card`], and of the hovered item's
@@ -611,6 +664,12 @@ fn pin_label(at: [f32; 2], output: bool, chars: usize, z: f32) -> [f32; 4] {
 const FRAME_HEAD: f32 = 32.0;
 /// Space between a hover card and the item it describes.
 const CARD_GAP: f32 = 14.0;
+/// How far from its item a card may sit and still read as beside it; farther, a tether links
+/// the two.
+const NEAR: f32 = 24.0;
+/// Weight of a frame's body (not its title row) in [`place_card`]: a card may sit on a frame's
+/// empty stretches, but open canvas is a little better.
+const FRAME_WEIGHT: f32 = 0.1;
 
 /// Cost, in covered area, of each point a card sits farther from its item than [`CARD_GAP`]:
 /// moving 100 points away is worth it to keep about a quarter of a node, or a few wire ends,
@@ -626,21 +685,81 @@ fn rect_gap(a: [f32; 4], b: [f32; 4]) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
+/// Where a hover card goes: its top-left, and when it couldn't sit beside its item, the tether
+/// drawn from the card's edge to the item's nearest edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Spot {
+    pub at: [f32; 2],
+    pub tether: Option<[[f32; 2]; 2]>,
+}
+
+/// The shortest link between two rects that don't overlap: from `a`'s edge to `b`'s, straight
+/// across the middle of the span they share on an axis, else corner to corner.
+fn link(a: [f32; 4], b: [f32; 4]) -> [[f32; 2]; 2] {
+    let axis = |a0: f32, a1: f32, b0: f32, b1: f32| {
+        if a1 < b0 {
+            (a1, b0)
+        } else if b1 < a0 {
+            (a0, b1)
+        } else {
+            let m = (a0.max(b0) + a1.min(b1)) / 2.0;
+            (m, m)
+        }
+    };
+    let (ax, bx) = axis(a[0], a[0] + a[2], b[0], b[0] + b[2]);
+    let (ay, by) = axis(a[1], a[1] + a[3], b[1], b[1] + b[3]);
+    [[ax, ay], [bx, by]]
+}
+
 /// Where a floating card of size `card` goes beside an item at `item` (`[x, y, w, h]`, window
-/// points) whose header row is `head` tall, inside the `free` canvas rect. Candidates sit right,
-/// left, below and above the item (each also aligned to the item's far edge), clamped into the
-/// free area; then spots across the free canvas, for when everything beside the item is busy.
-/// Clamping can push a candidate back over the item, so the ranking is: candidates clear of the
+/// points) whose header row is `head` tall, inside the `free` canvas rect. A card may cover
+/// wires but not a node or a frame's title row: `solid` lists those.
+///
+/// First choice is a spot within [`NEAR`] of the item that covers neither the item nor anything
+/// solid, by side (above, below, right, left), then by the weighted area of `others` (rect,
+/// weight) it covers, then aligned to the item's start before its end, middle or a slide along.
+///
+/// When no near spot is clear, every side and spots across the free canvas compete: clear of the
 /// item first; failing that, ones that leave its header row (its name) visible; then the rest.
-/// Within a rank the card covers the least area, of the item plus the weighted area of
-/// `others` (rect, weight), plus [`DISTANCE_COST`] for each point it strays beyond
-/// [`CARD_GAP`]; ties keep the earlier candidate (right, left, below, above).
-pub(crate) fn place_card(item: [f32; 4], head: f32, card: [f32; 2], free: [f32; 4], others: &[([f32; 4], f32)]) -> [f32; 2] {
+/// Within a rank, spots clear of everything solid first, then the least area covered, of the
+/// item plus `others`, plus [`DISTANCE_COST`] for each point the card strays beyond
+/// [`CARD_GAP`]. A card that lands farther than [`NEAR`] gets a tether.
+pub(crate) fn place_card(item: [f32; 4], head: f32, card: [f32; 2], free: [f32; 4], solid: &[[f32; 4]], others: &[([f32; 4], f32)]) -> Spot {
     let [x, y, w, h] = item;
     let [cw, ch] = card;
     let [fx, fy, fw, fh] = free;
     let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - cw).max(fx)), cy.clamp(fy, (fy + fh - ch).max(fy))];
     let gap = CARD_GAP;
+    let rect = |c: [f32; 2]| [c[0], c[1], cw, ch];
+    let covered = |r: [f32; 4]| -> f32 { others.iter().map(|(o, wt)| overlap(r, *o) * wt).sum() };
+    let hits_solid = |r: [f32; 4]| solid.iter().any(|s| overlap(r, *s) > 0.0);
+    let spot = |c: [f32; 2]| {
+        let r = rect(c);
+        let tether = (rect_gap(r, item) > NEAR).then(|| link(r, item));
+        Spot { at: c, tether }
+    };
+    // Beside the item: start-aligned, end-aligned, centred, then sliding along the side.
+    let along = |start: f32, len: f32, size: f32| -> Vec<f32> {
+        let mut v = vec![start, start + len - size, start + (len - size) / 2.0];
+        let (lo, hi) = (start - size + NEAR, start + len - NEAR);
+        v.extend((0..=8).map(|k| lo + (hi - lo) * k as f32 / 8.0));
+        v
+    };
+    let sides: [Vec<[f32; 2]>; 4] = [
+        along(x, w, cw).into_iter().map(|cx| clamp(cx, y - gap - ch)).collect(),
+        along(x, w, cw).into_iter().map(|cx| clamp(cx, y + h + gap)).collect(),
+        along(y, h, ch).into_iter().map(|cy| clamp(x + w + gap, cy)).collect(),
+        along(y, h, ch).into_iter().map(|cy| clamp(x - gap - cw, cy)).collect(),
+    ];
+    let near = sides.iter().enumerate().flat_map(|(side, cs)| cs.iter().enumerate().map(move |(k, c)| (side, k, *c)))
+        .filter(|&(_, _, c)| {
+            let r = rect(c);
+            overlap(r, item) <= 0.0 && rect_gap(r, item) <= NEAR && !hits_solid(r)
+        })
+        .min_by(|a, b| a.0.cmp(&b.0).then(covered(rect(a.2)).total_cmp(&covered(rect(b.2)))).then(a.1.cmp(&b.1)));
+    if let Some((_, _, c)) = near {
+        return spot(c);
+    }
     let mut candidates = vec![
         clamp(x + w + gap, y),
         clamp(x - gap - cw, y),
@@ -666,17 +785,16 @@ pub(crate) fn place_card(item: [f32; 4], head: f32, card: [f32; 2], free: [f32; 
     }
     let header = [x, y, w, head.min(h)];
     let rank = |c: [f32; 2]| {
-        let r = [c[0], c[1], cw, ch];
+        let r = rect(c);
         let on_item = overlap(r, item);
         let tier = if on_item <= 0.0 { 0 } else if overlap(r, header) <= 0.0 { 1 } else { 2 };
-        let covered: f32 = others.iter().map(|(o, wt)| overlap(r, *o) * wt).sum();
         let away = (rect_gap(r, item) - gap).max(0.0) * DISTANCE_COST;
-        (tier, on_item + covered + away)
+        (tier, hits_solid(r), on_item + covered(r) + away)
     };
-    candidates.into_iter().min_by(|a, b| {
+    spot(candidates.into_iter().chain(sides.into_iter().flatten()).min_by(|a, b| {
         let (a, b) = (rank(*a), rank(*b));
-        a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))
-    }).unwrap_or([fx, fy])
+        a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.total_cmp(&b.2))
+    }).unwrap_or([fx, fy]))
 }
 
 thread_local! {
@@ -708,16 +826,22 @@ fn ring(c: [f32; 2], r: f32, n: usize) -> Vec<[f32; 2]> {
 }
 
 /// The effect mark drawn 10 points square: a filled dot (has effects), a hollow dot (pure) or a
-/// dotted ring (unknown, or only inferred).
+/// ring holding a small `?` (unknown, or only inferred).
 fn effect_shape(color: Color, mark: Mark) -> Shape {
     let c = [5.0, 5.0];
     match mark {
         Mark::Effects => Shape::new().fill(ring(c, 4.0, 24), color),
         Mark::Pure => Shape::new().stroke(ring(c, 3.5, 24), 1.5, color),
-        Mark::Unknown => (0..8).fold(Shape::new(), |sh, k| {
-            let a = k as f32 * std::f32::consts::TAU / 8.0;
-            sh.fill(ring([c[0] + 3.8 * a.cos(), c[1] + 3.8 * a.sin()], 0.85, 8), color)
-        }),
+        Mark::Unknown => {
+            // The `?`: a hook from its left round over the top, down to a short stem, and a dot.
+            let (hc, hr) = ([5.0, 3.9], 1.35);
+            let mut hook: Vec<[f32; 2]> = (0..=10).map(|k| {
+                let a = std::f32::consts::PI + (std::f32::consts::PI + 0.7) * k as f32 / 10.0;
+                [hc[0] + hr * a.cos(), hc[1] + hr * a.sin()]
+            }).collect();
+            hook.push([5.0, 5.7]);
+            Shape::new().stroke(ring(c, 4.4, 24), 1.0, color).stroke(hook, 1.1, color).fill(ring([5.0, 7.3], 0.65, 8), color)
+        }
     }
 }
 
@@ -746,7 +870,7 @@ fn effect_legend(p: &Pal, mark: Mark, tip: String) -> El {
 
 /// An effect tooltip followed by the key to the three marks.
 fn effect_key(tip: &str) -> String {
-    format!("{tip}\n● effects · ○ pure · ◌ unknown or inferred")
+    format!("{tip}\n● effects · ○ pure · (?) unknown or inferred")
 }
 
 /// The header's mark for an accepted Rust implementation.
@@ -797,35 +921,56 @@ fn validation(p: &Pal, r: &Rejection) -> El {
     c
 }
 
-/// Width of a port row's columns before the other end: tag, type dot, pin and type, each
-/// followed by the row's 8-point gap.
-const PORT_COLUMNS: f32 = 26.0 + 8.0 + 8.0 + 8.0 + 64.0 + 8.0 + 64.0 + 8.0;
-/// Average advance of a `UI` character, for fitting an end into its column before layout.
-const UI_CHAR: f32 = 6.4;
+/// A port row's gap between columns, and its tag column (`IN`, `OUT`).
+const PORT_GAP: f32 = 8.0;
+const PORT_TAG: f32 = 26.0;
+/// Widest a pin name or type column gets; longer ones are cut, whole in their tooltip.
+const PORT_COL_MAX: f32 = 64.0;
 /// Where a docked port's other end starts on its own line: under the pin name.
-const END_INDENT: f32 = 26.0 + 8.0 + 8.0 + 8.0;
+const END_INDENT: f32 = PORT_TAG + PORT_GAP + 8.0 + PORT_GAP;
 
-/// Port rows: tag, type dot, pin, type and the other end, the whole of it in a tooltip.
-/// Floating (`width` is the card's), the end sits beside the type, its producer shortened so
-/// the pin it reaches stays readable ([`describe::fit_end`]). Docked, every end has its own
-/// line under its pin, so rows are even and nothing is cut.
-fn ports(p: &Pal, rows: &[Port], tag: &str, arrow: &str, limit: usize, docked: bool, width: f32) -> El {
-    // Characters that fit beside the type, less the arrow and its space.
-    let fits = (((width - 2.0 * 14.0 - PORT_COLUMNS) / UI_CHAR).floor() as usize).saturating_sub(2).max(4);
+/// A card's pin-name and type column widths: each its widest entry over all of the card's
+/// rows (inputs and outputs line up), up to [`PORT_COL_MAX`].
+fn port_columns<'a>(rows: impl IntoIterator<Item = &'a Port>) -> [f32; 2] {
+    let w = |s: &str| rune_ui::text::measure(s, &[], MONO, None).0;
+    rows.into_iter().fold([0.0_f32, 0.0_f32], |[n, t], p| [n.max(w(&p.name)), t.max(w(&p.ty_text))])
+        .map(|v| v.min(PORT_COL_MAX))
+}
+
+/// `other` after `arrow`, cut with [`describe::fit_end`] to the most characters that set in `UI`
+/// fit `room` points.
+fn fit_end_in(arrow: &str, other: &str, room: f32) -> String {
+    let set = |s: &str| format!("{arrow}\u{a0}{s}");
+    let fits = |s: &str| rune_ui::text::measure(&set(s), &[], UI, None).0 <= room;
+    let n = other.chars().count();
+    (1..=n).rev().map(|max| describe::fit_end(other, max)).find(|s| fits(s))
+        .map_or_else(|| set(&describe::fit_end(other, 1)), |s| set(&s))
+}
+
+/// Port rows: tag, type dot, pin, type and the other end, the whole of it in a tooltip. The
+/// pin and type columns are as wide as their content (`cols`, see [`port_columns`]).
+/// Floating (`width` is the card's), the end takes the rest of the row, its producer shortened
+/// to the width it really has so the pin it reaches stays readable ([`describe::fit_end`]).
+/// Docked, every end has its own line under its pin, so rows are even and nothing is cut.
+#[allow(clippy::too_many_arguments)]
+fn ports(p: &Pal, rows: &[Port], tag: &str, arrow: &str, limit: usize, docked: bool, width: f32, cols: [f32; 2]) -> El {
+    let [name_w, ty_w] = cols;
+    // The end's column: the card's inner width less the columns before it and their gaps.
+    let room = width - 2.0 * 14.0 - (PORT_TAG + 8.0 + name_w + ty_w + 4.0 * PORT_GAP) - 1.0;
     let mut t = col().gap(2.0);
     for (k, port) in rows.iter().take(limit).enumerate() {
         // The arrow stays joined to the name it points at.
-        let end = if docked { port.other.clone() } else { describe::fit_end(&port.other, fits) };
-        let other = label(&format!("{arrow}\u{a0}{end}"), p.muted).help(port.full.clone());
-        let pin = row().h(22.0).gap(8.0).items_center()
-            .child(text(if k == 0 { tag } else { "" }).font(LABEL).color(p.faint).w(26.0).min_w(26.0))
+        let end = if docked { format!("{arrow}\u{a0}{}", port.other) } else { fit_end_in(arrow, &port.other, room) };
+        let other = label(&end, p.muted).help(port.full.clone());
+        let pin = row().h(22.0).gap(PORT_GAP).items_center()
+            .child(text(if k == 0 { tag } else { "" }).font(LABEL).color(p.faint).w(PORT_TAG).min_w(PORT_TAG))
             .child(el().size(8.0, 8.0).min_w(8.0).radius(4.0).fill(p.ty(port.ty)))
-            .child(mono(&port.name, p.text).single_line().truncate().help_when_truncated(port.name.clone()).w(64.0).min_w(64.0))
-            .child(mono(&port.ty_text, p.ty_text(port.ty)).single_line().truncate().help_when_truncated(port.ty_text.clone()).w(64.0).min_w(64.0));
+            .child(mono(&port.name, p.text).single_line().truncate().help_when_truncated(port.name.clone()).w(name_w).min_w(name_w))
+            .child(mono(&port.ty_text, p.ty_text(port.ty)).single_line().truncate().help_when_truncated(port.ty_text.clone()).w(ty_w).min_w(ty_w));
         t = t.child(if docked {
             col().child(pin).child(other.wrap_anywhere().ml(END_INDENT).mb(3.0))
         } else {
-            pin.child(other.truncate().grow(1.0))
+            pin.child(other.truncate().grow(1.0).min_w(0.0))
         });
     }
     if rows.len() > limit {
@@ -888,7 +1033,8 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let limit = if docked { usize::MAX } else { HOVER_PORTS };
             let group = n.kind == Kind::Group;
             let tile = p.header(n.kind.category());
-            let badge = c.badge().then(|| (c.mark, c.effect_tip()));
+            // Docked, the EFFECTS row shows the mark; the header doesn't repeat it.
+            let badge = (!docked && c.badge()).then(|| (c.mark, c.effect_tip()));
             let mut tools = vec![];
             if docked && group && s.can_expand(i) {
                 tools.push(group_toggle(p, true).on_press(move |s: &mut State| s.expand_node(i)));
@@ -910,15 +1056,16 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 body = body.child(col().padding(9.0).radius(8.0).fill(p.code_bg).child(mono(&c.signature, p.text).wrap()));
             }
             if !c.inputs.is_empty() || !c.outputs.is_empty() {
+                let cols = port_columns(c.inputs.iter().chain(&c.outputs));
                 let mut t = col().gap(6.0);
                 if !c.inputs.is_empty() {
-                    t = t.child(ports(p, &c.inputs, "IN", "←", limit, docked, width));
+                    t = t.child(ports(p, &c.inputs, "IN", "←", limit, docked, width, cols));
                 }
                 if !c.inputs.is_empty() && !c.outputs.is_empty() {
                     t = t.child(divider(p));
                 }
                 if !c.outputs.is_empty() {
-                    t = t.child(ports(p, &c.outputs, "OUT", "→", limit, docked, width));
+                    t = t.child(ports(p, &c.outputs, "OUT", "→", limit, docked, width, cols));
                 }
                 body = body.child(t);
             }
@@ -940,7 +1087,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let declared = grp.effects.as_deref().map(describe::declared);
             let badge = declared.as_ref().map(|(m, list)| (*m, format!("Effects: {}", list.join(", "))));
             let tools = if docked { vec![group_toggle(p, false).on_press(move |s: &mut State| s.toggle_group(g)), close_button(p)] } else { vec![] };
-            let head = header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, badge.clone(), Some(members.len()), docked, tools);
+            let head = header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, badge.clone().filter(|_| !docked), Some(members.len()), docked, tools);
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, "node group", p.header(Category::Function))).child(head));
             if let Some(a) = activity(p, grp.claim, grp.evidence) {
@@ -1028,8 +1175,9 @@ const TILE: f32 = 22.0;
 const TILE_GAP: f32 = 9.0;
 
 /// A card's header. Floating, one row: kind tile, title (cut, whole in its tooltip) and the
-/// chips. Docked, the title has its row to itself and wraps rather than being cut, and the
-/// chips, then `tools` (group toggle, close) at the far end, sit on a row under it.
+/// chips. Docked, the title row ends in `tools` (group toggle, close) at the panel's top-right,
+/// and the title wraps rather than being cut; the chips sit on a row under it, in line with
+/// the title's text.
 #[allow(clippy::too_many_arguments)]
 fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, lang: crate::model::Lang, badge: Option<(Mark, String)>, count: Option<usize>, docked: bool, tools: Vec<El>) -> El {
     let tile = el().size(TILE, TILE).min_w(TILE).radius(7.0).fill(tile).center()
@@ -1056,11 +1204,23 @@ fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, la
             .child(name.single_line().truncate().help_when_truncated(title.to_string()).grow(1.0))
             .children(chips);
     }
-    let title_row = row().min_h(28.0).gap(TILE_GAP).items_center().child(tile).child(name.wrap().grow(1.0).shrink().min_w(0.0));
-    let chip_row = row().h(26.0).gap(TILE_GAP).ml(TILE + TILE_GAP).items_center().children(chips)
-        .child(el().grow(1.0)).child(row().gap(2.0).items_center().children(tools));
-    col().gap(2.0).child(title_row).child(chip_row)
+    // Tile, title and tools share the first line, the tile and tools centred on it; a title too
+    // long for it wraps below its own first line.
+    let line = |e: El| row().h(HEAD_LINE).min_w(0.0).items_center().child(e);
+    let title_row = row().gap(TILE_GAP).items_start()
+        .child(line(tile))
+        .child(name.wrap().grow(1.0).shrink().min_w(0.0).mt((HEAD_LINE - TITLE_LINE) / 2.0))
+        .child(line(row().gap(2.0).items_center().children(tools)));
+    let mut c = col().gap(2.0).child(title_row);
+    if !chips.is_empty() {
+        c = c.child(row().h(26.0).gap(TILE_GAP).ml(TILE + TILE_GAP).items_center().children(chips));
+    }
+    c
 }
+
+/// Height of a docked header's first line, and of one line of its 14.5-point title.
+const HEAD_LINE: f32 = 28.0;
+const TITLE_LINE: f32 = 14.5 * 1.25;
 
 /// The card around `body`. Docked, it is as tall as its content up to the canvas height, and
 /// scrolls inside when longer.
@@ -1081,31 +1241,99 @@ mod tests {
 
     const FREE: [f32; 4] = [16.0, 72.0, 1000.0, 800.0];
     const CARD: [f32; 2] = [340.0, 166.0];
+    /// A rect and its weight, as `place_card` takes them.
+    type Weighted = ([f32; 4], f32);
 
-    fn place(item: [f32; 4], others: &[([f32; 4], f32)]) -> [f32; 4] {
-        let [x, y] = place_card(item, 30.0, CARD, FREE, others);
-        [x, y, CARD[0], CARD[1]]
+    /// The card for `item` among `nodes` (solid, each also weighted) and weighted `soft` rects.
+    fn spot_among(item: [f32; 4], free: [f32; 4], nodes: &[([f32; 4], f32)], soft: &[([f32; 4], f32)]) -> ([f32; 4], Spot) {
+        let solid: Vec<[f32; 4]> = nodes.iter().map(|n| n.0).collect();
+        let others: Vec<([f32; 4], f32)> = nodes.iter().chain(soft).copied().collect();
+        let s = place_card(item, 30.0, CARD, free, &solid, &others);
+        ([s.at[0], s.at[1], CARD[0], CARD[1]], s)
+    }
+
+    fn place(item: [f32; 4], nodes: &[([f32; 4], f32)]) -> [f32; 4] {
+        spot_among(item, FREE, nodes, &[]).0
     }
 
     fn inside(r: [f32; 4], f: [f32; 4]) -> bool {
         r[0] >= f[0] && r[1] >= f[1] && r[0] + r[2] <= f[0] + f[2] + 0.01 && r[1] + r[3] <= f[1] + f[3] + 0.01
     }
 
-    #[test]
-    fn open_canvas_puts_the_card_right_of_the_item() {
-        let item = [400.0, 400.0, 140.0, 90.0];
-        let r = place(item, &[]);
-        assert_eq!([r[0], r[1]], [400.0 + 140.0 + CARD_GAP, 400.0]);
+    /// Whether `q` lies on the outline of `r`.
+    fn on_edge(q: [f32; 2], r: [f32; 4]) -> bool {
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        let within = |v: f32, lo: f32, len: f32| v >= lo - 0.01 && v <= lo + len + 0.01;
+        (within(q[0], r[0], r[2]) && (near(q[1], r[1]) || near(q[1], r[1] + r[3])))
+            || (within(q[1], r[1], r[3]) && (near(q[0], r[0]) || near(q[0], r[0] + r[2])))
     }
 
     #[test]
-    fn the_side_covering_fewest_nodes_wins() {
+    fn open_canvas_puts_the_card_above_the_item() {
         let item = [400.0, 400.0, 140.0, 90.0];
-        // A neighbour to the right: the card goes left instead.
+        let (r, s) = spot_among(item, FREE, &[], &[]);
+        assert_eq!([r[0], r[1]], [400.0, 400.0 - CARD_GAP - CARD[1]]);
+        assert_eq!(s.tether, None);
+    }
+
+    #[test]
+    fn the_nearest_clear_side_wins_in_order_above_below_right_left() {
+        let item = [400.0, 400.0, 140.0, 90.0];
+        // Nodes close above, below and to the right, one at a time added: the card takes the
+        // next side in order, always beside the item and untethered.
+        let above = ([390.0, 300.0, 140.0, 60.0], 1.0);
+        let below = ([390.0, 520.0, 140.0, 60.0], 1.0);
         let right = ([560.0, 380.0, 140.0, 120.0], 3.0);
-        let r = place(item, &[right]);
-        assert_eq!([r[0], r[1]], [400.0 - CARD_GAP - CARD[0], 400.0]);
-        assert_eq!(overlap(r, right.0), 0.0);
+        let cases: [(&[Weighted], [f32; 2]); 4] = [
+            (&[], [400.0, 400.0 - CARD_GAP - CARD[1]]),
+            (&[above], [400.0, 400.0 + 90.0 + CARD_GAP]),
+            (&[above, below], [400.0 + 140.0 + CARD_GAP, 400.0]),
+            (&[above, below, right], [400.0 - CARD_GAP - CARD[0], 400.0]),
+        ];
+        for (nodes, want) in cases {
+            let (r, s) = spot_among(item, FREE, nodes, &[]);
+            assert_eq!([r[0], r[1]], want, "with {} nodes", nodes.len());
+            assert_eq!(s.tether, None);
+            for (n, _) in nodes {
+                assert_eq!(overlap(r, *n), 0.0, "card {r:?} covers {n:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_card_never_covers_a_node_and_is_tethered_when_far() {
+        // The reported case (`report` hovered in the fixture): every spot beside the item clips
+        // some neighbour, at least a corner. The old cost let a few points of `normalize` go;
+        // now the card goes to clear canvas farther away, tethered to the item.
+        let item = [400.0, 400.0, 140.0, 90.0];
+        let nodes = [
+            ([150.0, 180.0, 500.0, 200.0], 1.0),
+            ([150.0, 500.0, 500.0, 200.0], 1.0),
+            ([560.0, 380.0, 120.0, 120.0], 3.0),
+            ([60.0, 380.0, 320.0, 120.0], 3.0),
+        ];
+        let (r, s) = spot_among(item, FREE, &nodes, &[]);
+        for (n, _) in nodes {
+            assert_eq!(overlap(r, n), 0.0, "card {r:?} covers {n:?}");
+        }
+        assert!(inside(r, FREE));
+        assert!(rect_gap(r, item) > NEAR);
+        let [a, b] = s.tether.expect("a far card is tethered");
+        assert!(on_edge(a, r), "tether starts on the card: {a:?} {r:?}");
+        assert!(on_edge(b, item), "tether ends on the item: {b:?}");
+        // A wire end is no reason to leave: soft rects only weigh among clear spots.
+        let wire = wire_end([400.0, 300.0], false);
+        let (r, s) = spot_among(item, FREE, &[], &[(wire, HOT_WEIGHT)]);
+        assert_eq!(s.tether, None, "card {r:?}");
+    }
+
+    #[test]
+    fn the_link_runs_between_facing_edges() {
+        let item = [400.0, 400.0, 140.0, 90.0];
+        // Beside, sharing a vertical span: a horizontal link across the middle of it.
+        assert_eq!(link([600.0, 420.0, 100.0, 100.0], item), [[600.0, 455.0], [540.0, 455.0]]);
+        // Diagonal: corner to corner.
+        assert_eq!(link([0.0, 0.0, 100.0, 100.0], item), [[100.0, 100.0], [400.0, 400.0]]);
     }
 
     #[test]
@@ -1126,11 +1354,12 @@ mod tests {
     }
 
     #[test]
-    fn near_the_right_edge_the_card_flips_left() {
+    fn near_the_right_edge_the_card_stays_above_inside_the_canvas() {
         let item = [860.0, 300.0, 140.0, 90.0];
-        let r = place(item, &[]);
+        let (r, s) = spot_among(item, FREE, &[], &[]);
         assert_eq!(overlap(r, item), 0.0);
-        assert_eq!(r[0], 860.0 - CARD_GAP - CARD[0]);
+        assert_eq!([r[0], r[1]], [FREE[0] + FREE[2] - CARD[0], 300.0 - CARD_GAP - CARD[1]]);
+        assert_eq!(s.tether, None);
     }
 
     #[test]
@@ -1147,7 +1376,7 @@ mod tests {
         // A frame filling the canvas: the card has to sit on it, but not on its title row.
         let item = [10.0, 60.0, 1020.0, 820.0];
         let head = 32.0;
-        let [x, y] = place_card(item, head, CARD, FREE, &[]);
+        let [x, y] = place_card(item, head, CARD, FREE, &[], &[]).at;
         let r = [x, y, CARD[0], CARD[1]];
         assert_eq!(overlap(r, [item[0], item[1], item[2], head]), 0.0, "card {r:?} covers the title");
         assert!(inside(r, FREE));
@@ -1158,7 +1387,7 @@ mod tests {
         let item = [10.0, 60.0, 1020.0, 820.0];
         // Nodes along the top-left under the header; the right side is free.
         let others = [([16.0, 110.0, 600.0, 200.0], 1.0)];
-        let [x, y] = place_card(item, 32.0, CARD, FREE, &others);
+        let [x, y] = place_card(item, 32.0, CARD, FREE, &[others[0].0], &others).at;
         assert_eq!(overlap([x, y, CARD[0], CARD[1]], others[0].0), 0.0);
     }
 
@@ -1172,7 +1401,8 @@ mod tests {
         let card = [340.0, 234.0];
         let head = 96.0;
         let others = [([157.0, 207.0, 388.0, 310.0], 1.0), ([786.0, 537.0, 300.0, 100.0], 1.0), ([157.0, 603.0, 360.0, 100.0], 1.0)];
-        let [x, y] = place_card(item, head, card, free, &others);
+        let solid: Vec<[f32; 4]> = others.iter().map(|o| o.0).collect();
+        let [x, y] = place_card(item, head, card, free, &solid, &others).at;
         let r = [x, y, card[0], card[1]];
         assert_eq!(overlap(r, [item[0], item[1], item[2], head]), 0.0, "card {r:?} covers the title");
         for (o, _) in others {
@@ -1182,24 +1412,24 @@ mod tests {
 
     #[test]
     fn the_card_moves_off_a_neighbours_socket_into_empty_canvas() {
-        // Busy on both sides, so the card goes below; a neighbour's socket (the end of a wire the
-        // card describes) sits at the item's bottom-left, where "below" would land, with empty
-        // canvas further along. The card must leave the socket showing and stay near.
+        // Busy above and on both sides, so the card goes below; a neighbour's socket (the end of
+        // a wire the card describes) sits at the item's bottom-left, where "below" would land,
+        // with empty canvas further along. The card must leave the socket showing and stay near.
         let item = [400.0, 300.0, 140.0, 90.0];
         let socket = wire_end([420.0, 427.0], false);
-        let others = [
+        let nodes = [
             ([560.0, 280.0, 300.0, 110.0], 3.0),
             ([60.0, 280.0, 320.0, 110.0], 3.0),
-            (socket, HOT_WEIGHT),
+            ([300.0, 100.0, 400.0, 150.0], 1.0),
         ];
         // Without the socket the card sits right below the item, on it.
-        let plain = place(item, &others[..2]);
+        let plain = place(item, &nodes);
         assert!(overlap(plain, socket) > 0.0, "the setup puts {plain:?} on the socket");
-        let r = place(item, &others);
+        let (r, s) = spot_among(item, FREE, &nodes, &[(socket, HOT_WEIGHT)]);
         assert_eq!(overlap(r, socket), 0.0, "card {r:?} covers the socket");
         assert_eq!(overlap(r, item), 0.0);
         assert!(inside(r, FREE));
-        assert!(rect_gap(r, item) < 100.0, "card {r:?} strays from the item");
+        assert_eq!(s.tether, None, "card {r:?} strays from the item");
     }
 
     #[test]
@@ -1214,8 +1444,9 @@ mod tests {
         let band = |r: [f32; 4]| [r[0], r[1], r[2], 30.0];
         let bodies = [(below_right, 1.0), (tall_left, 1.0)];
         let with_titles = [(below_right, 1.0), (tall_left, 1.0), (band(below_right), TITLE_WEIGHT), (band(tall_left), TITLE_WEIGHT)];
+        // Both neighbours are nodes, so no spot beside the item is clear: the weights decide.
         let at = |others: &[([f32; 4], f32)]| {
-            let [x, y] = place_card(item, 30.0, CARD, free, others);
+            let [x, y] = place_card(item, 30.0, CARD, free, &[below_right, tall_left], others).at;
             [x, y, CARD[0], CARD[1]]
         };
         // Bodies alone: the smallest covered area is the neighbour's title.
