@@ -100,6 +100,55 @@ pub struct Claim {
     pub active: bool,
 }
 
+/// One declared effect of a node, as the protocol records it (§5.6). Only protocol data carries
+/// these; mock scenes leave them out and the card falls back to effects inferred from shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Effect {
+    Pure,
+    StateRead,
+    StateWrite,
+    MemoryRead,
+    MemoryWrite,
+    IndirectCall,
+    HostIo,
+    NonReturn,
+    /// Analysed, but some behaviour could not be classified.
+    Unknown,
+}
+
+impl Effect {
+    pub fn label(self) -> &'static str {
+        match self {
+            Effect::Pure => "pure",
+            Effect::StateRead => "reads state",
+            Effect::StateWrite => "writes state",
+            Effect::MemoryRead => "memory read",
+            Effect::MemoryWrite => "memory write",
+            Effect::IndirectCall => "indirect call",
+            Effect::HostIo => "host I/O",
+            Effect::NonReturn => "never returns",
+            Effect::Unknown => "unknown effect",
+        }
+    }
+}
+
+/// Why the latest candidate was rejected, from the report that rejected it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Rejection {
+    /// Failure category in words: `mismatch`, `build`, `timeout` …
+    pub failure: &'static str,
+    /// Cases passed of the cases run.
+    pub cases: Option<(u32, u32)>,
+    pub counterexample: Option<Counterexample>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Counterexample {
+    pub input: String,
+    pub expected: String,
+    pub actual: String,
+}
+
 #[derive(Clone)]
 pub struct Pin {
     pub label: String,
@@ -121,6 +170,10 @@ pub struct Node {
     pub group: Option<usize>,
     /// For a collapsed group node: how many nodes it contains.
     pub members: usize,
+    /// Declared effects, when the source analysed them (`None`: infer from shape).
+    pub effects: Option<Vec<Effect>>,
+    /// The latest rejecting report's summary, when the data carries reports.
+    pub rejection: Option<Rejection>,
 }
 
 /// (from node, output index) → (to node, input index).
@@ -140,6 +193,8 @@ pub struct Group {
     pub lang: Lang,
     pub evidence: Evidence,
     pub claim: Option<Claim>,
+    pub effects: Option<Vec<Effect>>,
+    pub rejection: Option<Rejection>,
 }
 
 /// Where a view node comes from: a node of the semantic graph, or a collapsed group.
@@ -177,6 +232,7 @@ impl Graph {
                             kind: Kind::Group, title: grp.title.clone(), lang: grp.lang, evidence: grp.evidence,
                             claim: grp.claim, outs: vec![], ins: vec![], group: None,
                             members: self.nodes.iter().filter(|n| n.group == Some(g)).count(),
+                            effects: grp.effects.clone(), rejection: grp.rejection.clone(),
                         });
                         origin.push(Origin::Group(g));
                         out.nodes.len() - 1

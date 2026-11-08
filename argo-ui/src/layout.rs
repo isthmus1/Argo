@@ -663,7 +663,7 @@ pub fn with_getters(mut g: Graph) -> Graph {
         if src.kind == Kind::GroupIn && pin.ty != Ty::Exec && fanout[&w.from] >= GETTER_FANOUT {
             let getter = Node {
                 kind: Kind::Get, title: pin.label.clone(), lang: Lang::None, evidence: Evidence::None, claim: None,
-                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty, spelled: pin.spelled.clone() }], group: g.nodes[w.to.0].group, members: 0,
+                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty, spelled: pin.spelled.clone() }], group: g.nodes[w.to.0].group, members: 0, effects: None, rejection: None,
             };
             g.nodes.push(getter);
             g.wires.push(Wire { from: (g.nodes.len() - 1, 0), to: w.to, back: false });
