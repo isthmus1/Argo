@@ -1,5 +1,5 @@
-//! SpacetimeDB mode (`--db ws://host:port`): every graph and status the window shows comes from
-//! the `c_chunk` and `rust_chunk` rows, rebuilt by `argo-db-client`. Nothing on this path clones,
+//! The window's only data source (`--db ws://host:port`): every graph and status it shows comes
+//! from the `c_chunk` and `rust_chunk` rows, rebuilt by `argo-db-client`. Nothing here clones,
 //! reads or parses the repository; the rows carry the structure, the source text and the origin.
 //!
 //! A status-only change (a `rust_chunk` row) keeps layout, camera, the shown function and the
@@ -11,14 +11,19 @@
 mod show;
 mod subscribe;
 
+use std::sync::OnceLock;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use argo_db_client::Origin;
 use argo_protocol::Snapshot;
+use rune_ui::Waker;
 
 use crate::app::State;
 use crate::bridge;
+
+/// Wakes the window when the subscription delivers something.
+pub static WAKER: OnceLock<Waker> = OnceLock::new();
 
 /// What the subscription tells the event loop.
 pub enum Msg {
@@ -65,7 +70,7 @@ pub fn connect(uri: &str, module: &str) -> Link {
 impl State {
     /// An empty canvas naming the database and what it waits for, until rows describe a program.
     pub fn db_waiting(link: Link, why: &str) -> State {
-        let mut s = State::empty("db", vec![link.module.clone(), why.into()]);
+        let mut s = State::empty(vec![link.module.clone(), why.into()]);
         s.online = false;
         s.db = Some(link);
         s

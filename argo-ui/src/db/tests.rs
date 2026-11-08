@@ -269,6 +269,93 @@ fn a_claim_whose_lease_runs_out_goes_idle() {
     );
 }
 
+/// A program built from scratch, delivered as its rows: what `argo-server` ingests for it.
+fn show_rows(build: impl FnOnce(&mut argo_protocol::GraphBuilder), units: &[(&str, Option<&str>)]) -> State {
+    use argo_db_client::Unit;
+    use argo_protocol::{Analysis, GraphBuilder, GraphRevision, ProjectId, RevisionId, RevisionState, Snapshot};
+    let mut b = GraphBuilder::new(GraphRevision {
+        id: RevisionId(1),
+        project: ProjectId(1),
+        parent: None,
+        analysis: Analysis::Interfaces,
+        state: RevisionState::Draft,
+    });
+    build(&mut b);
+    let origin = Origin {
+        locator: "/src/demo".into(),
+        commit: None,
+        units: units.iter().map(|(path, skipped)| Unit { path: (*path).into(), skipped: skipped.map(Into::into) }).collect(),
+        flags: vec![],
+    };
+    let rows = to_rows(&Snapshot::new(b.finish(), vec![]), &origin, &|_, _| None).unwrap();
+    let rebuilt = rebuild(&rows).unwrap();
+    let (tx, rx) = channel();
+    tx.send(Msg::Rows {
+        structure: 1,
+        snap: Box::new(rebuilt.live(&[])),
+        origin: rebuilt.origin,
+    })
+    .unwrap();
+    first(Link::new("argo".into(), rx), Duration::from_secs(1)).unwrap()
+}
+
+/// The explorer's index from the rows alone: files with functions sorted by path, `main` in a .c
+/// file shown first with its file expanded, and the counts the explorer prints.
+#[test]
+fn the_explorer_indexes_the_rows_and_opens_main_first() {
+    use argo_protocol::NodeKind;
+    let (mut main, mut main_c) = (None, None);
+    let s = show_rows(
+        |b| {
+            let program = b.node(None, NodeKind::Program, "demo");
+            let header = b.node(Some(program), NodeKind::Module, "lib.h");
+            b.node(Some(header), NodeKind::Function, "helper");
+            let m = b.node(Some(program), NodeKind::Module, "main.c");
+            b.node(Some(m), NodeKind::Function, "setup");
+            main = Some(b.node(Some(m), NodeKind::Function, "main"));
+            main_c = Some(m);
+            let a_c = b.node(Some(program), NodeKind::Module, "a.c");
+            b.node(Some(a_c), NodeKind::Function, "alpha");
+            b.node(Some(program), NodeKind::Module, "empty.c");
+        },
+        &[("a.c", None), ("main.c", None), ("broken.c", Some("parse error"))],
+    );
+    let (main, main_c) = (main.unwrap(), main_c.unwrap());
+
+    assert_eq!(project::current(&s), Some((main, "main".into())));
+    assert_eq!(s.view.crumbs, ["demo", "main.c", "main"]);
+    let p = s.project.as_ref().unwrap();
+    let names: Vec<_> = p.modules.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["a.c", "lib.h", "main.c"], "sorted, files without functions left out");
+    assert_eq!((p.included(), p.units.len(), p.function_count()), (2, 3, 4));
+    assert_eq!(p.module_of(main).map(|m| m.id), Some(main_c));
+    assert_eq!(s.forms.expanded, Some(main_c), "the shown function's file is expanded");
+    assert!(p.checkout.contains("no commit recorded"), "{}", p.checkout);
+}
+
+/// Rows with declarations but no function bodies: the explorer says what there is, and the
+/// canvas shows the one file's level with those declarations on it.
+#[test]
+fn a_program_without_functions_shows_its_files_declarations() {
+    use argo_protocol::{NodeKind, TypeKind};
+    let s = show_rows(
+        |b| {
+            let program = b.node(None, NodeKind::Program, "settings");
+            let config = b.node(Some(program), NodeKind::Module, "config.c");
+            b.node(Some(config), NodeKind::State, "verbose");
+            b.node(Some(config), NodeKind::Type(TypeKind::Struct), "options");
+        },
+        &[("config.c", None)],
+    );
+    let p = s.project.as_ref().unwrap();
+    assert!(p.modules.is_empty());
+    assert_eq!(p.empty_note(), "2 declarations, no function bodies");
+    assert_eq!(project::current(&s).map(|(_, n)| n).as_deref(), Some("config.c"));
+    let mut titles: Vec<&str> = s.view.nodes.iter().map(|n| n.title.as_str()).collect();
+    titles.sort();
+    assert_eq!(titles, ["options", "verbose"]);
+}
+
 #[test]
 fn no_rows_within_the_timeout_is_an_error_naming_why() {
     let (tx, rx) = channel();

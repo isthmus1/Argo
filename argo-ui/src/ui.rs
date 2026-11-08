@@ -1,6 +1,6 @@
-//! Floating chrome over a full-bleed canvas. Read-only: the UI visualizes agent work (mock
-//! scenes, protocol replays, snapshots and opened projects); it offers navigation and
-//! inspection, never editing. Opening a project and requesting a rewrite live in `dialogs`.
+//! Floating chrome over a full-bleed canvas. Read-only: the UI visualizes agent work recorded in
+//! SpacetimeDB; it offers navigation and inspection, never editing. The explorer lives in
+//! `dialogs`.
 //!
 //! Controls inside a floating card sit `INSET` from every edge with a radius concentric with
 //! the card's corner (`CONTROL_R = RADIUS - INSET`).
@@ -63,16 +63,6 @@ const DETAIL_W: f32 = 420.0;
 const DETAIL_MIN_W: f32 = 260.0;
 const HOVER_W: f32 = 340.0;
 
-const RUST_SOURCE: &[&str] = &[
-    "pub fn step(acc: u32, i: u32) -> u32 {",
-    "    normalize(acc.wrapping_add(i))",
-    "}",
-    "",
-    "fn normalize(x: u32) -> u32 {",
-    "    x & 0xff",
-    "}",
-];
-
 /// Canvas area not covered by floating panels: x, y, w, h.
 pub fn free_area(detail_open: bool, explorer: bool) -> [f32; 4] {
     let [w, h] = viewport();
@@ -131,7 +121,7 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         .on_layout(|s: &mut State, r| s.resized([r[2], r[3]]))
         .child(graph::view(p, s, w, h).absolute(0.0, 0.0))
         .child(breadcrumb(p, s).absolute(left, M))
-        .child(chrome(p, s).pin(None, Some(M), Some(M), None));
+        .child(status(p, s).pin(None, Some(M), Some(M), None));
     if s.project.is_some() {
         root = root.child(crate::dialogs::explorer(p, s).absolute(M, TOP));
     }
@@ -153,18 +143,7 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
                 .absolute(x, y));
         }
     }
-    if s.modal.is_some() {
-        root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
-    }
     root
-}
-
-/// Top-right controls. Watching SpacetimeDB offers no Open: what is shown and what is
-/// translated are the database's and the workers' business.
-fn chrome(p: &Pal, s: &State) -> El {
-    let r = row().gap(8.0);
-    let r = if s.db.is_some() { r } else { r.child(crate::dialogs::toolbar(p, s)) };
-    r.child(status(p, s))
 }
 
 /// A hover card's accent: its border's colour, the item's header family.
@@ -192,7 +171,7 @@ fn tether_line([a, b]: [[f32; 2]; 2], accent: Color, halo: Color) -> El {
 }
 
 /// The protocol containers behind the breadcrumb, root first, when the crumbs are a real
-/// hierarchy (protocol scenes, snapshots and projects); `None` for mock scenes.
+/// hierarchy (a program the rows describe); `None` while waiting for one.
 pub(crate) fn crumb_path(s: &State) -> Option<Vec<NodeId>> {
     let live = s.live.as_ref()?;
     let nodes = &live.snap.graph.nodes;
@@ -218,7 +197,7 @@ pub(crate) fn go_to_crumb(s: &mut State, id: NodeId) {
 }
 
 /// One breadcrumb of a real hierarchy: ancestors are buttons that navigate up; the current
-/// level is plain text. A mock scene's crumbs are [`plain_crumbs`].
+/// level is plain text. The waiting canvas's crumbs are [`plain_crumbs`].
 fn crumb(p: &Pal, name: &str, current: bool, target: Option<NodeId>) -> El {
     let t = if current { text(name.to_string()).font(UI_STRONG).color(p.text) } else { label(name, p.muted) };
     let c = row().h(CONTROL_H).px(8.0).radius(CONTROL_R).items_center().child(t);
@@ -249,7 +228,9 @@ fn breadcrumb(p: &Pal, s: &State) -> El {
         }
         None => r = r.child(plain_crumbs(p, &s.view.crumbs).key("crumbs")),
     }
-    let r = r.child(source_chip(p, &source(s)).ml(2.0).mr(4.0));
+    if let Some(src) = source(s) {
+        r = r.child(source_chip(p, &src).ml(2.0).mr(4.0));
+    }
     // The whole program, every file and function at once, wired by calls.
     let r = if s.project.is_some() {
         let on = crate::project::showing_program(s);
@@ -269,7 +250,7 @@ fn breadcrumb(p: &Pal, s: &State) -> El {
     bar(p, r).key("breadcrumb")
 }
 
-/// Crumbs that lead nowhere (a mock scene's) as one title, not buttons: the ancestors faint,
+/// Crumbs that lead nowhere (the database and what it waits for) as one title, not buttons: the ancestors faint,
 /// `/` between, the current level strong.
 fn plain_crumbs(p: &Pal, crumbs: &[String]) -> El {
     let last = crumbs.len().saturating_sub(1);
@@ -301,107 +282,43 @@ fn sized_icon_button(p: &Pal, content: El, help: &str, d: f32, r: f32) -> El {
     el().size(d, d).min_w(d).radius(r).center().hover(p.code_bg).cursor(Cursor::Pointer).help(help).child(content)
 }
 
-/// Where the graph on screen comes from. Only a watched database is a live backend connection.
+/// Where the graph on screen comes from: the watched database, and whether its subscription is
+/// connected.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Source {
-    /// A seeded mock scene with simulated agent activity.
-    Mock(&'static str),
-    /// The `argo-protocol` fixture, replaying its recorded updates (`left` still to come).
-    Fixture { left: usize },
-    /// A snapshot file (`ARGO_SNAPSHOT`).
-    Snapshot(String),
-    /// A C project opened from a git URL or directory.
-    Project(String),
-    /// A SpacetimeDB module being watched live, and whether its subscription is connected.
-    Db { module: String, online: bool },
+pub(crate) struct Source {
+    module: String,
+    online: bool,
 }
 
-pub(crate) fn source(s: &State) -> Source {
-    if let Some(link) = &s.db {
-        return Source::Db { module: link.module.clone(), online: s.online };
-    }
-    if let Some(proj) = &s.project {
-        return Source::Project(proj.source.clone());
-    }
-    match &s.live {
-        None => Source::Mock(s.scene),
-        Some(_) if s.scene == "snapshot" => Source::Snapshot(std::env::var("ARGO_SNAPSHOT").unwrap_or_else(|_| "snapshot".into())),
-        Some(live) => Source::Fixture { left: live.pending() },
-    }
+pub(crate) fn source(s: &State) -> Option<Source> {
+    s.db.as_ref().map(|link| Source { module: link.module.clone(), online: s.online })
 }
 
 impl Source {
     fn tip(&self) -> String {
-        match self {
-            Source::Mock(scene) => format!("Mock scene “{scene}” · simulated agents"),
-            Source::Fixture { left: 0 } => "Protocol fixture · replay finished".into(),
-            Source::Fixture { left } => format!("Protocol fixture · replaying, {left} updates left"),
-            Source::Snapshot(path) => format!("Snapshot file · {path}"),
-            Source::Project(src) => format!("C project · {src}"),
-            Source::Db { module, online: true } => format!("SpacetimeDB module “{module}” · connected, updating live"),
-            Source::Db { module, online: false } => format!("SpacetimeDB module “{module}” · offline, reconnecting; showing the last rows"),
+        let module = &self.module;
+        if self.online {
+            format!("SpacetimeDB module “{module}” · connected, updating live")
+        } else {
+            format!("SpacetimeDB module “{module}” · offline, reconnecting; showing the last rows")
         }
     }
 
-    /// For a replay: recorded updates applied, of all.
-    fn progress(&self) -> Option<(usize, usize)> {
-        let Source::Fixture { left } = self else { return None };
-        static TOTAL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        let total = *TOTAL.get_or_init(|| argo_protocol::fixture::transcript().len()).max(left);
-        Some((total - left, total))
-    }
-
-    /// The chip's one word: `mock`, `replay 3/12` (updates applied of all), `snapshot`, `project`.
-    fn label(&self) -> String {
-        match self {
-            Source::Mock(_) => "mock".into(),
-            Source::Fixture { .. } => {
-                let (done, total) = self.progress().unwrap_or_default();
-                format!("replay {done}/{total}")
-            }
-            Source::Snapshot(_) => "snapshot".into(),
-            Source::Project(_) => "project".into(),
-            Source::Db { online: true, .. } => "live".into(),
-            Source::Db { online: false, .. } => "offline".into(),
-        }
+    /// The chip's one word: `live` or `offline`.
+    fn label(&self) -> &'static str {
+        if self.online { "live" } else { "offline" }
     }
 }
 
-/// The data source as a small neutral outline, 10 points square: a stack of cards (seeded
-/// scene), a timeline with its playhead (recorded replay), a page (snapshot file), a folder
-/// (project). Nothing here is a control.
+/// The connection as a small dot, 10 points square: filled and green while connected, a hollow
+/// ring while offline. Nothing here is a control.
 fn source_glyph(p: &Pal, src: &Source) -> Shape {
-    let c = p.muted;
-    let w = 1.2;
-    match src {
-        Source::Mock(_) => {
-            let back = Path::new().move_to([3.0, 1.0]).line_to([9.0, 1.0]).line_to([9.0, 6.5]);
-            let front = Path::new().move_to([1.0, 3.5]).line_to([6.5, 3.5]).line_to([6.5, 9.0]).line_to([1.0, 9.0]).close();
-            Shape::new().stroke_path(&back, w, LineCap::Round, c).stroke_path(&front, w, LineCap::Round, c)
-        }
-        Source::Fixture { .. } => {
-            let (done, total) = src.progress().unwrap_or((1, 1));
-            let x = 2.0 + 6.0 * done as f32 / total.max(1) as f32;
-            Shape::new().line([1.0, 5.0], [9.0, 5.0], w, LineCap::Round, p.faint).line([1.0, 5.0], [x, 5.0], w, LineCap::Round, c)
-                .fill(ring([x, 5.0], 2.0, 16), c)
-        }
-        Source::Snapshot(_) => {
-            let outline = Path::new().move_to([2.0, 0.8]).line_to([6.0, 0.8]).line_to([8.5, 3.3]).line_to([8.5, 9.2]).line_to([2.0, 9.2]).close();
-            Shape::new().stroke_path(&outline, w, LineCap::Round, c).line([3.8, 5.0], [6.7, 5.0], 1.0, LineCap::Round, c)
-                .line([3.8, 7.0], [6.7, 7.0], 1.0, LineCap::Round, c)
-        }
-        Source::Project(_) => {
-            let outline = Path::new().move_to([0.8, 2.0]).line_to([3.8, 2.0]).line_to([5.0, 3.2]).line_to([9.2, 3.2]).line_to([9.2, 8.6]).line_to([0.8, 8.6]).close();
-            Shape::new().stroke_path(&outline, w, LineCap::Round, c)
-        }
-        // A dot: filled and green while connected, a hollow ring while offline.
-        Source::Db { online: true, .. } => Shape::new().fill(ring([5.0, 5.0], 3.5, 20), p.ok),
-        Source::Db { online: false, .. } => {
-            let pts = ring([5.0, 5.0], 3.0, 20);
-            let outline = pts[1..].iter().fold(Path::new().move_to(pts[0]), |path, &q| path.line_to(q)).close();
-            Shape::new().stroke_path(&outline, w, LineCap::Round, p.faint)
-        }
+    if src.online {
+        return Shape::new().fill(ring([5.0, 5.0], 3.5, 20), p.ok);
     }
+    let pts = ring([5.0, 5.0], 3.0, 20);
+    let outline = pts[1..].iter().fold(Path::new().move_to(pts[0]), |path, &q| path.line_to(q)).close();
+    Shape::new().stroke_path(&outline, 1.2, LineCap::Round, p.faint)
 }
 
 /// Every claim shown: worker, whether it is translating, title, and the item on screen that
@@ -419,9 +336,9 @@ pub(crate) fn workers(s: &State) -> Vec<(u8, bool, String, Option<Item>)> {
             out.push((c.worker, c.active, grp.title.clone(), Some(Item::Group(g))));
         }
     }
-    // Watching a database, every claim counts, not only those on the shown function's canvas.
-    // Each goes to the node or frame showing it (a call site shows its callee's), if any.
-    if let Some(live) = s.live.as_ref().filter(|_| s.db.is_some()) {
+    // Every claim in the database counts, not only those on the shown function's canvas. Each
+    // goes to the node or frame showing it (a call site shows its callee's), if any.
+    if let Some(live) = s.live.as_ref() {
         let snap = &live.snap;
         let claimed: HashSet<NodeId> = snap.status.iter().filter(|st| st.claim.is_some()).map(|st| st.node).collect();
         let on_screen = std::mem::take(&mut out);
@@ -464,7 +381,7 @@ fn status(p: &Pal, s: &State) -> El {
             .child(hover_ring)
             .child(graph::avatar(p, worker, true, AVATAR).absolute(0.0, 0.0))
             .child(state_glyph(p, active).absolute(BADGE_AT, BADGE_AT));
-        let b = icon_button(p, a, &worker_tip(worker, active, &title, item.is_some(), idle(s))).hover_group().key(format!("worker-{k}"));
+        let b = icon_button(p, a, &worker_tip(worker, active, &title, item.is_some(), IDLE)).hover_group().key(format!("worker-{k}"));
         r = r.child(match item {
             Some(item) => b.on_press(move |s: &mut State| reveal(s, item)),
             None => b.cursor(Cursor::Default),
@@ -991,11 +908,8 @@ fn evidence_glyph(p: &Pal, e: Evidence) -> Option<El> {
         .child(text(g).font(TextStyle::new(11.0, 800.0)).color(c)))
 }
 
-/// What an inactive claim means: queued in the mock scenes; watching a database, where every
-/// claim starts running, a lease that ran out.
-fn idle(s: &State) -> &'static str {
-    if s.db.is_some() { "lease expired" } else { "queued" }
-}
+/// What an inactive claim means: every claim starts running, so a lease that ran out.
+const IDLE: &str = "lease expired";
 
 /// One compact line of agent activity, and one for a failed candidate. No prose banners.
 fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence, idle: &str) -> Option<El> {
@@ -1235,7 +1149,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let width = if docked { detail_w() } else { hover_w(s, item) };
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, &kicker_text(n), tile)).child(head));
-            if let Some(a) = activity(p, n.claim, n.evidence, idle(s)) {
+            if let Some(a) = activity(p, n.claim, n.evidence, IDLE) {
                 body = body.child(a);
             }
             if docked && let Some(r) = n.rejection.as_ref().filter(|_| n.evidence == Evidence::Rejected) {
@@ -1282,7 +1196,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let head = header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, badge.clone().filter(|_| !docked), Some(members.len()), docked, tools);
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, "node group", p.header(Category::Function))).child(head));
-            if let Some(a) = activity(p, grp.claim, grp.evidence, idle(s)) {
+            if let Some(a) = activity(p, grp.claim, grp.evidence, IDLE) {
                 body = body.child(a);
             }
             if docked && let Some(r) = grp.rejection.as_ref().filter(|_| grp.evidence == Evidence::Rejected) {
@@ -1301,9 +1215,6 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 list = list.child(label(&format!("+{} more", members.len() - shown), p.faint).ml(16.0));
             }
             body = body.child(list);
-            if docked && s.scene == "fixture" {
-                body = body.child(code_block(p, &RUST_SOURCE.join("\n"), detail_w() - 2.0 * DOCK_PAD, 9.0));
-            }
             if docked && let Some((m, tip)) = badge {
                 body = body.child(effect_legend(p, m, tip));
             }
@@ -1845,10 +1756,16 @@ mod chrome_tests {
         assert_eq!(Some(path[2]), s.live.as_ref().unwrap().container);
     }
 
+    /// The canvas before rows describe a program: the database and what it waits for.
+    fn waiting() -> State {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        State::db_waiting(crate::db::Link::new("argo".into(), rx), "connecting")
+    }
+
     #[test]
-    fn mock_scene_crumbs_are_not_navigable() {
-        let s = State::load("fixture");
-        assert!(!s.view.crumbs.is_empty());
+    fn waiting_crumbs_are_not_navigable() {
+        let s = waiting();
+        assert_eq!(s.view.crumbs, ["argo", "connecting"]);
         assert_eq!(crumb_path(&s), None);
     }
 
@@ -1875,16 +1792,13 @@ mod chrome_tests {
     }
 
     #[test]
-    fn the_source_says_where_the_graph_comes_from() {
-        assert_eq!(source(&State::load("devices")), Source::Mock("devices"));
-        let mut s = State::protocol_fixture();
-        assert!(matches!(source(&s), Source::Fixture { left } if left > 0));
-        s.replay(usize::MAX);
-        assert_eq!(source(&s), Source::Fixture { left: 0 });
-        for src in [source(&State::load("devices")), source(&s)] {
-            let tip = src.tip();
-            assert!(!tip.contains("SpacetimeDB") && !tip.contains("live"), "{tip}");
-        }
+    fn the_source_names_the_database_and_its_connection() {
+        let mut s = waiting();
+        let src = source(&s).expect("the database is the source");
+        assert_eq!((src.label(), src.tip().contains("“argo” · offline")), ("offline", true), "{}", src.tip());
+        s.online = true;
+        let src = source(&s).unwrap();
+        assert_eq!((src.label(), src.tip().contains("connected, updating live")), ("live", true), "{}", src.tip());
     }
 
     #[test]

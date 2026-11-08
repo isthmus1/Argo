@@ -2,16 +2,15 @@
 //! and selection. Live updates change claims and evidence in place, so layout, camera and
 //! selection survive them.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
-use argo_protocol::{NodeId, NodeKind, Snapshot, Update, fixture};
+use argo_protocol::{NodeId, Snapshot};
 
 use crate::bridge;
 use crate::db;
 use crate::layout::{self, Placed};
 use crate::project;
-use crate::model::{Evidence, Graph, Kind, Lang, Origin};
-use crate::scenes;
+use crate::model::{Evidence, Graph, Kind, Origin};
 use crate::ui;
 
 /// World padding around the laid-out graph.
@@ -115,7 +114,6 @@ impl Cam {
 }
 
 pub struct State {
-    pub scene: &'static str,
     /// The semantic graph as received (claims and evidence update live).
     pub graph: Graph,
     pub collapsed: Vec<bool>,
@@ -125,29 +123,24 @@ pub struct State {
     pub cam: Cam,
     pub hovered: Option<Item>,
     pub selected: Option<Item>,
-    /// Set when the graph comes from an `argo-protocol` snapshot rather than a seeded mock.
+    /// Set once the database's rows describe a program: the snapshot they rebuild.
     pub live: Option<Live>,
-    /// An opened C project, with its file/function index.
+    /// The ingested project, with its file/function index.
     pub project: Option<project::Project>,
     pub forms: project::Forms,
-    pub modal: Option<project::Modal>,
-    pub loader: Option<project::Loader>,
-    /// SpacetimeDB mode: the subscription every graph and status shown comes from.
+    /// The subscription every graph and status shown comes from.
     pub db: Option<db::Link>,
-    /// SpacetimeDB mode: whether the subscription is connected (always true otherwise).
+    /// Whether the subscription is connected.
     pub online: bool,
-    next_event: f64,
-    step: usize,
     /// Whether the camera has been fitted to the real window size yet.
     sized: bool,
 }
 
-/// A protocol snapshot, the level being shown, and the deltas still to replay.
+/// A protocol snapshot and the level being shown.
 pub struct Live {
     pub snap: Snapshot,
     pub container: Option<NodeId>,
     pub open: HashSet<NodeId>,
-    pending: VecDeque<Update>,
     /// The whole-program view is showing (`open` then holds the files drawn as frames).
     pub whole: bool,
     /// Calls between functions, worked out once per structure for the whole-program view.
@@ -172,13 +165,6 @@ fn descendants(snap: &Snapshot, container: NodeId) -> HashSet<NodeId> {
         }
     }
     open
-}
-
-impl Live {
-    /// Recorded updates still to replay.
-    pub fn pending(&self) -> usize {
-        self.pending.len()
-    }
 }
 
 /// How well a camera meets the view goals; fields compare in priority order (better is greater).
@@ -255,25 +241,18 @@ fn contains(a: [f32; 4], r: [f32; 4], slack: f32) -> bool {
 }
 
 impl State {
-    /// A mock scene, fitted to the window.
-    pub fn load(scene: &'static str) -> State {
-        let mut s = State::with_graph(scene, layout::with_getters(scenes::scene(scene)));
-        s.fit();
-        s
+    /// Nothing on the canvas but its breadcrumb: where the database view starts.
+    pub fn empty(crumbs: Vec<String>) -> State {
+        State::with_graph(Graph { crumbs, nodes: vec![], wires: vec![], groups: vec![], selected_group: None, expanded: None })
     }
 
-    /// Nothing on the canvas but its breadcrumb: where protocol-backed scenes start.
-    pub fn empty(scene: &'static str, crumbs: Vec<String>) -> State {
-        State::with_graph(scene, Graph { crumbs, nodes: vec![], wires: vec![], groups: vec![], selected_group: None, expanded: None })
-    }
-
-    fn with_graph(scene: &'static str, graph: Graph) -> State {
+    fn with_graph(graph: Graph) -> State {
         let collapsed = vec![false; graph.groups.len()];
         let selected = graph.selected_group.map(Item::Group);
         let mut s = State {
-            scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![], generation: 0 },
-            cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None, next_event: 4.0, step: 0,
-            project: None, forms: project::Forms::default(), modal: None, loader: None, db: None,
+            view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![], generation: 0 },
+            cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None,
+            project: None, forms: project::Forms::default(), db: None,
             // A state built after the window's first layout already knows its size.
             sized: ui::viewport() != [ui::W, ui::H],
         };
@@ -281,55 +260,14 @@ impl State {
         s
     }
 
-    /// A protocol-backed scene: show `container`'s level with `open` drawn in place, then replay
-    /// `transcript` as live deltas.
-    pub fn from_snapshot(scene: &'static str, snap: Snapshot, container: Option<NodeId>, open: HashSet<NodeId>, transcript: Vec<Update>) -> State {
-        let mut s = State::empty(scene, vec![]);
-        s.live = Some(Live { snap, container, open, pending: transcript.into(), whole: false, calls: None, origin: vec![], frames: vec![] });
+    /// A protocol snapshot: show `container`'s level with `open` drawn in place.
+    pub fn from_snapshot(snap: Snapshot, container: Option<NodeId>, open: HashSet<NodeId>) -> State {
+        let mut s = State::empty(vec![]);
+        s.live = Some(Live { snap, container, open, whole: false, calls: None, origin: vec![], frames: vec![] });
         s.reproject();
         s.relayout();
         s.fit();
         s
-    }
-
-    /// The §5.6 fixture from `argo-protocol`: `compute` with its loop opened in place.
-    pub fn protocol_fixture() -> State {
-        let (_, ids) = fixture::graph();
-        let open = [ids.loop_region, ids.loop_body].into_iter().collect();
-        State::from_snapshot("protocol", fixture::snapshot(), Some(ids.compute), open, fixture::transcript())
-    }
-
-    /// The §5.6 fixture's module level: its functions as collapsed node groups, with `compute`
-    /// opened in place as a frame when `open_compute`.
-    pub fn protocol_module(open_compute: bool) -> State {
-        let (_, ids) = fixture::graph();
-        let open = if open_compute { [ids.compute].into_iter().collect() } else { HashSet::new() };
-        State::from_snapshot("protocol-module", fixture::snapshot(), Some(ids.module), open, vec![])
-    }
-
-    /// A snapshot file (e.g. `main --protocol-json x.c`), showing one function's body.
-    /// `function` picks it by name; otherwise the first function.
-    pub fn snapshot_file(path: &str, function: Option<&str>) -> Result<State, String> {
-        let json = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let snap: Snapshot = serde_json::from_str(&json).map_err(|e| format!("{path}: {e}"))?;
-        let f = snap
-            .graph
-            .nodes
-            .iter()
-            .find(|n| n.kind == NodeKind::Function && function.is_none_or(|name| n.name == name))
-            .ok_or_else(|| format!("{path}: no function {}", function.unwrap_or("")))?;
-        // Show the function itself, so its parameters and result are on the canvas, with its body
-        // block open (the bridge draws no frame for it).
-        let container = f.id;
-        let body: Vec<NodeId> = snap
-            .graph
-            .nodes
-            .iter()
-            .filter(|n| n.parent == Some(f.id) && n.kind == NodeKind::Scope)
-            .map(|n| n.id)
-            .collect();
-        let open = if open_all_requested() { descendants(&snap, container) } else { body.into_iter().collect() };
-        Ok(State::from_snapshot("snapshot", snap, Some(container), open, vec![]))
     }
 
     /// Captures: `ARGO_OPEN=all` opens every construct inside the shown function.
@@ -342,17 +280,7 @@ impl State {
         self.fit();
     }
 
-    /// Apply up to `n` pending deltas at once (scripted captures).
-    pub fn replay(&mut self, n: usize) {
-        let Some(live) = &mut self.live else { return };
-        for update in live.pending.drain(..n.min(live.pending.len())) {
-            live.snap.apply(update);
-        }
-        self.reproject();
-        self.refresh();
-    }
-
-    /// Re-derive the semantic graph from the protocol snapshot (live scenes only).
+    /// Re-derive the semantic graph from the protocol snapshot (once rows describe a program).
     pub(crate) fn reproject(&mut self) {
         let Some(live) = &mut self.live else { return };
         let p = match (&live.calls, live.whole) {
@@ -959,40 +887,37 @@ impl State {
     pub fn find(&self, title: &str) -> Option<usize> {
         self.view.nodes.iter().position(|n| n.title == title)
     }
+}
 
-    /// Simulated subscription deltas until the protocol crate lands: the active worker finishes
-    /// its node (accepted, now Rust) and claims the next C node. Returns true when state changed.
-    pub fn poll(&mut self, now: f64) -> bool {
-        if now < self.next_event {
-            return false;
-        }
-        self.next_event = now + 4.0;
-        self.step += 1;
-        if let Some(live) = &mut self.live {
-            // Replay the next recorded delta; structure is unchanged, so layout stays.
-            let Some(update) = live.pending.pop_front() else { return false };
-            live.snap.apply(update);
-            self.reproject();
-            self.refresh();
-            return true;
-        }
-        let nodes = &mut self.graph.nodes;
-        if let Some(active) = nodes.iter().position(|n| n.claim.is_some_and(|c| c.active)) {
-            let worker = nodes[active].claim.map_or(1, |c| c.worker);
-            nodes[active].claim = None;
-            nodes[active].evidence = if self.step.is_multiple_of(3) { Evidence::Rejected } else { Evidence::Accepted };
-            if nodes[active].evidence == Evidence::Accepted {
-                nodes[active].lang = Lang::Rust;
-            }
-            let next = (1..=nodes.len()).map(|k| (active + k) % nodes.len())
-                .find(|&j| nodes[j].lang == Lang::C && nodes[j].claim.is_none() && nodes[j].evidence != Evidence::Accepted);
-            if let Some(j) = next {
-                nodes[j].claim = Some(crate::model::Claim { worker, active: true });
-            }
-            self.refresh();
-            return true;
-        }
-        false
+/// Test data only: the seeded mock scenes and the `argo-protocol` fixture, which the app never
+/// loads (its only data source is the database).
+#[cfg(test)]
+impl State {
+    /// A mock scene, fitted to the window.
+    pub fn load(scene: &'static str) -> State {
+        let mut s = State::with_graph(layout::with_getters(crate::scenes::scene(scene)));
+        s.fit();
+        s
+    }
+
+    /// The §5.6 fixture from `argo-protocol`: `compute` with its loop opened in place.
+    pub fn protocol_fixture() -> State {
+        let (_, ids) = argo_protocol::fixture::graph();
+        let open = [ids.loop_region, ids.loop_body].into_iter().collect();
+        State::from_snapshot(argo_protocol::fixture::snapshot(), Some(ids.compute), open)
+    }
+
+    /// The §5.6 fixture's module level: its functions as collapsed node groups, with `compute`
+    /// opened in place as a frame when `open_compute`.
+    pub fn protocol_module(open_compute: bool) -> State {
+        let (_, ids) = argo_protocol::fixture::graph();
+        let open = if open_compute { [ids.compute].into_iter().collect() } else { HashSet::new() };
+        State::from_snapshot(argo_protocol::fixture::snapshot(), Some(ids.module), open)
+    }
+
+    /// A name for test messages: the breadcrumb.
+    pub fn name(&self) -> String {
+        self.view.crumbs.join(" › ")
     }
 }
 
@@ -1000,8 +925,14 @@ impl State {
 mod tests {
     use std::collections::HashSet;
 
+    use argo_protocol::fixture;
+
     use super::*;
     use crate::model::Wire;
+
+    /// A selection and a hover a person could see beside the details panel: `normalize`
+    /// (claimed, feeding round_pack) stays in view at every review size.
+    const DATAFLOW_SELECT: [&str; 2] = ["round_pack", "normalize"];
 
     fn near(a: [f32; 4], b: [f32; 4]) -> bool {
         (a[0] - b[0]).abs() < 0.5 && (a[1] - b[1]).abs() < 0.5
@@ -1179,7 +1110,7 @@ mod tests {
                 snap.status.push(st);
             }
         }
-        let mut s = State::from_snapshot("merged", snap, Some(ids.compute), HashSet::new(), vec![]);
+        let mut s = State::from_snapshot(snap, Some(ids.compute), HashSet::new());
         let i = s.view.nodes.iter().position(|n| n.kind == Kind::Group).expect("the merged group is one node");
         assert!(s.can_expand(i));
         let closed = touching(&s.view, i);
@@ -1343,20 +1274,20 @@ mod tests {
             for s in states {
                 let z = s.cam.zoom;
                 let top = if size[0] <= WIDE { FIT_MAX } else { WIDE_MAX };
-                assert!(z <= top + 1e-4, "{size:?} {}: zoom {z} above the band", s.scene);
+                assert!(z <= top + 1e-4, "{size:?} {}: zoom {z} above the band", s.name());
                 if z >= FIT_FLOOR - 1e-4 {
                     continue;
                 }
-                assert!(z >= CONTEXT_FLOOR - 1e-4, "{size:?} {}: zoom {z} below the context floor", s.scene);
+                assert!(z >= CONTEXT_FLOOR - 1e-4, "{size:?} {}: zoom {z} below the context floor", s.name());
                 let free = s.free();
                 if drawn(&s).into_iter().all(|r| inside(r, free)) {
                     continue;
                 }
-                let sel = s.selected.unwrap_or_else(|| panic!("{size:?} {}: zoom {z} below the band with no selection", s.scene));
-                assert!(inside(s.item_rect(sel), free), "{size:?} {}: zoom {z} below the band yet the selection is hidden", s.scene);
+                let sel = s.selected.unwrap_or_else(|| panic!("{size:?} {}: zoom {z} below the band with no selection", s.name()));
+                assert!(inside(s.item_rect(sel), free), "{size:?} {}: zoom {z} below the band yet the selection is hidden", s.name());
                 let claims = s.claims().into_iter().all(|it| inside(s.item_rect(it), free));
                 let upstream = s.upstream(sel).into_iter().all(|i| inside(s.screen_rect(i), free));
-                assert!(claims || upstream, "{size:?} {}: zoom {z} below the band shows neither all claims nor all upstream", s.scene);
+                assert!(claims || upstream, "{size:?} {}: zoom {z} below the band shows neither all claims nor all upstream", s.name());
             }
         }
         // Without a selection the view never goes below the band except to show the whole graph:
@@ -1368,8 +1299,8 @@ mod tests {
             fixture.fit();
             for s in [fixture, State::protocol_fixture()] {
                 let free = s.free();
-                assert!(s.cam.zoom >= CONTEXT_FLOOR - 1e-4, "{size:?} {}: zoom {}", s.scene, s.cam.zoom);
-                assert!(drawn(&s).into_iter().all(|r| inside(r, free)), "{size:?} {}: not whole", s.scene);
+                assert!(s.cam.zoom >= CONTEXT_FLOOR - 1e-4, "{size:?} {}: zoom {}", s.name(), s.cam.zoom);
+                assert!(drawn(&s).into_iter().all(|r| inside(r, free)), "{size:?} {}: not whole", s.name());
             }
         }
     }
@@ -1377,7 +1308,7 @@ mod tests {
     /// The default view of each review scene with something selected or claimed, as captured.
     fn focused_scenes() -> Vec<State> {
         let mut states: Vec<State> = ["fixture", "branches", "dataflow", "interp"].into_iter().map(State::load).collect();
-        // `dataflow-select`: round_pack selected after loading, then the first layout's fit.
+        // round_pack selected after loading, then the first layout's fit.
         let mut df = State::load("dataflow");
         df.select(Item::Node(df.find("round_pack").unwrap()));
         states.push(df);
@@ -1418,14 +1349,14 @@ mod tests {
             let right = free[0] + free[2];
             if let Some(sel) = s.selected {
                 let r = s.item_rect(sel);
-                assert!(inside(r, free), "{}: selection {r:?} outside {free:?}", s.scene);
+                assert!(inside(r, free), "{}: selection {r:?} outside {free:?}", s.name());
             }
             // Only claims in view count: one below or above the free area may line up with
             // its right edge without being cut by it.
             for item in s.claims() {
                 let r = s.item_rect(item);
                 let straddles = r[0] < right - 0.5 && r[0] + r[2] > right + 0.5;
-                assert!(!(straddles && overlaps(r, free)), "{}: {item:?} {r:?} straddles {right}", s.scene);
+                assert!(!(straddles && overlaps(r, free)), "{}: {item:?} {r:?} straddles {right}", s.name());
             }
         }
     }
@@ -1446,11 +1377,11 @@ mod tests {
         }
     }
 
-    /// The `dataflow-select` capture hovers a node a person could see: on screen beside the
+    /// A dataflow selection's hover is a node a person could see: on screen beside the
     /// details panel at every review size, and feeding the selection.
     #[test]
     fn dataflow_select_hovers_a_node_in_view() {
-        let [sel, hover] = crate::DATAFLOW_SELECT;
+        let [sel, hover] = DATAFLOW_SELECT;
         for size in SIZES {
             ui::set_viewport(size);
             // Selected after loading, then (in the window) the first layout's fit.
@@ -1479,7 +1410,7 @@ mod tests {
                     if overlaps(r, free) {
                         let (x, y) = (r[0], r[1]);
                         let start = x >= free[0] - 0.5 && x <= free[0] + free[2] && y >= free[1] - 0.5 && y <= free[1] + free[3];
-                        assert!(start, "{size:?} {}: frame {g} at {r:?} shows without its title in {free:?}", s.scene);
+                        assert!(start, "{size:?} {}: frame {g} at {r:?} shows without its title in {free:?}", s.name());
                     }
                 }
             }
@@ -1499,7 +1430,7 @@ mod tests {
                 for item in s.selected.into_iter().chain(s.claims()) {
                     let r = s.item_rect(item);
                     if inside(r, free) {
-                        assert!(!overlaps(r, card), "{size:?} {}: {item:?} {r:?} under the overview {card:?}", s.scene);
+                        assert!(!overlaps(r, card), "{size:?} {}: {item:?} {r:?} under the overview {card:?}", s.name());
                     }
                 }
             }
@@ -1524,12 +1455,12 @@ mod tests {
                 if !focus.is_empty() {
                     // Claimed items may be hidden whole past an edge; those shown start inside.
                     for r in focus.into_iter().map(|it| s.item_rect(it)).filter(|&r| overlaps(r, free)) {
-                        assert!(r[0] >= free[0] - 0.5 && r[1] >= free[1] - 0.5, "{size:?} {}: focus {r:?} starts outside the free area", s.scene);
+                        assert!(r[0] >= free[0] - 0.5 && r[1] >= free[1] - 0.5, "{size:?} {}: focus {r:?} starts outside the free area", s.name());
                     }
                     continue;
                 }
                 for r in drawn(&s) {
-                    assert!(r[1] >= free[1] - 0.5 && r[0] >= free[0] - 0.5, "{size:?} {}: {r:?} starts outside the free area", s.scene);
+                    assert!(r[1] >= free[1] - 0.5 && r[0] >= free[0] - 0.5, "{size:?} {}: {r:?} starts outside the free area", s.name());
                 }
             }
         }

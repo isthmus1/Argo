@@ -8,11 +8,10 @@ description = "Argo control-plane client: node-graph canvas, inspectors and live
 
 [dependencies]
 argo-protocol = { path = "../argo-protocol" }
-# SpacetimeDB mode: generated bindings and rows -> snapshot, over the client SDK.
+# The only data source: generated bindings and rows -> snapshot, over the client SDK.
 argo-db-client = { path = "../argo-db-client" }
 spacetimedb-sdk.workspace = true
-# Browse… in the open dialog picks a folder with the system dialog (the XDG portal on Linux).
-rune-ui = { workspace = true, features = ["native-file-dialog"] }
-serde_json.workspace = true
-# The C front end (package `Argo`, library `main`): preprocess, parse and export a project.
+rune-ui.workspace = true
+# The C front end, used only by the whole-program view (`calls.rs`) to find calls in the C
+# source text the database stores. It never opens, clones or preprocesses a repository.
 argo-c = { package = "Argo", path = "../argo" }
