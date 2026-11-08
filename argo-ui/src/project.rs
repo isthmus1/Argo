@@ -26,6 +26,8 @@ pub struct Project {
     pub flags: Vec<String>,
     /// Modules (original files) that define functions, sorted by path.
     pub modules: Vec<Module>,
+    /// File-level items that aren't functions (globals, types), counted from the graph.
+    pub declarations: usize,
 }
 
 pub struct Module {
@@ -47,6 +49,15 @@ impl Project {
         self.modules
             .iter()
             .find(|m| m.functions.iter().any(|(id, _)| *id == f))
+    }
+
+    /// What the explorer says for a project with no function bodies: what it does hold.
+    pub fn empty_note(&self) -> String {
+        match self.declarations {
+            0 => "Nothing declared".into(),
+            1 => "1 declaration, no function bodies".into(),
+            n => format!("{n} declarations, no function bodies"),
+        }
     }
 }
 
@@ -410,18 +421,6 @@ pub fn error_row(line: &str) -> (&str, &str) {
     (file, rest)
 }
 
-/// An error row's reason split at its first `: ` into what it is about and what is wrong with
-/// it (`argo_absent/slirp_config.h`, `No such file or directory`), so the dialog can cut a long
-/// subject and keep the message whole. A reason with no `: ` is all subject.
-pub fn reason_parts(why: &str) -> (&str, Option<&str>) {
-    match why.split_once(": ") {
-        Some((subject, message)) if !subject.is_empty() && !message.trim().is_empty() => {
-            (subject, Some(message))
-        }
-        _ => (why, None),
-    }
-}
-
 /// What a project with no function definitions holds, for the `project-empty` review scene.
 const SAMPLE_EMPTY: &str = "int verbose = 0;\nstruct options { int level; const char *name; };\nextern int limit;\n";
 
@@ -451,6 +450,10 @@ pub fn needs_flags(error: &str) -> bool {
 fn install(s: &mut State, opened: Opened, source: String) {
     let snap = opened.snapshot;
     let modules = index(&snap);
+    let declarations = declarations(&snap);
+    // With nothing to open, the canvas shows what there is: the one file's declarations, or
+    // each file as a group of them.
+    let level = file_level(&snap);
     let name = snap
         .graph
         .nodes
@@ -482,12 +485,52 @@ fn install(s: &mut State, opened: Opened, source: String) {
         units: opened.units,
         flags: opened.flags,
         modules,
+        declarations,
     });
     next.modal = None;
     *s = next;
     if let Some(f) = first {
         open_function(s, f);
+    } else if let Some(c) = level {
+        show_level(s, c);
     }
+}
+
+/// File-level items that aren't functions: every non-function child of a module.
+fn declarations(snap: &Snapshot) -> usize {
+    let nodes = &snap.graph.nodes;
+    let modules: HashSet<NodeId> = nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Module)
+        .map(|n| n.id)
+        .collect();
+    nodes
+        .iter()
+        .filter(|n| n.kind != NodeKind::Function && n.parent.is_some_and(|p| modules.contains(&p)))
+        .count()
+}
+
+/// The container whose level lists a project's files' contents: its one module, else the
+/// program (each module a group), else none.
+fn file_level(snap: &Snapshot) -> Option<NodeId> {
+    let nodes = &snap.graph.nodes;
+    let mut modules = nodes.iter().filter(|n| n.kind == NodeKind::Module);
+    match (modules.next(), modules.next()) {
+        (Some(m), None) => Some(m.id),
+        _ => nodes.iter().find(|n| n.kind == NodeKind::Program).map(|n| n.id),
+    }
+}
+
+/// Show container `c`'s level with nothing inside it open.
+fn show_level(s: &mut State, c: NodeId) {
+    let Some(live) = &mut s.live else { return };
+    live.container = Some(c);
+    live.open.clear();
+    s.selected = None;
+    s.hovered = None;
+    s.reproject();
+    s.relayout();
+    s.fit();
 }
 
 fn index(snap: &Snapshot) -> Vec<Module> {
@@ -735,29 +778,6 @@ mod tests {
     }
 
     #[test]
-    fn a_reason_splits_into_a_subject_and_a_whole_message() {
-        let (_, files, _) = error_parts(SAMPLE_ERROR, usize::MAX);
-        let slirp = files.iter().find(|l| l.starts_with("slirp/")).unwrap();
-        let (at, why) = error_row(slirp);
-        assert_eq!(at, "slirp/slirp.c:1");
-        assert_eq!(
-            reason_parts(why),
-            ("argo_absent/slirp_config.h", Some("No such file or directory"))
-        );
-        // Every missing header in the sample keeps its message whole.
-        for l in files.iter().filter(|l| l.contains("No such file")) {
-            let (_, why) = error_row(l);
-            assert_eq!(reason_parts(why).1, Some("No such file or directory"), "{l}");
-        }
-        assert_eq!(
-            reason_parts("expected `;`, found `CONFIG_VERSION`"),
-            ("expected `;`, found `CONFIG_VERSION`", None)
-        );
-        assert_eq!(reason_parts("#error MAX_XLEN must be defined").1, None);
-        assert_eq!(reason_parts("trailing: ").1, None);
-    }
-
-    #[test]
     fn path_shaped_specs_fail_on_the_folder_before_any_git_work() {
         let base = std::env::temp_dir().join(format!("argo-ui-target-{}", std::process::id()));
         let dir = base.join("proj");
@@ -836,6 +856,14 @@ mod tests {
         assert_eq!((p.included(), p.units.len(), p.function_count()), (1, 1, 0));
         assert!(p.modules.is_empty());
         assert_eq!(s.modal, None);
+        // The explorer's count is what the canvas shows: the file's level, one node for each
+        // declaration (`extern int limit;` defines nothing, so the graph has no node for it).
+        assert_eq!(p.declarations, 2);
+        assert_eq!(p.empty_note(), "2 declarations, no function bodies");
+        assert_eq!(current(&s).map(|(_, n)| n).as_deref(), Some("config.c"));
+        let mut titles: Vec<&str> = s.view.nodes.iter().map(|n| n.title.as_str()).collect();
+        titles.sort();
+        assert_eq!(titles, ["options", "verbose"]);
     }
 
     #[test]
