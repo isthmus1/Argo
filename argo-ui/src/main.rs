@@ -22,6 +22,7 @@ mod dialogs;
 mod graph;
 mod layout;
 mod model;
+mod overview;
 mod palette;
 mod project;
 mod scenes;
@@ -38,7 +39,12 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let p = Pal::new(ui::dark(cx.system_dark()));
     // Text fields and anything else left uncoloured draw in the theme's text colour, not white.
     cx.foreground(p.text);
-    ui::view(&p, s, cx.titlebar_inset())
+    let root = ui::view(&p, s, cx.titlebar_inset());
+    // The overview layers over the canvas and chrome, at the free area's bottom-left.
+    match overview::view(&p, s) {
+        Some(map) => root.child(map),
+        None => root,
+    }
 }
 
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {

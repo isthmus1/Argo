@@ -20,6 +20,13 @@ const MAX_ZOOM: f32 = 2.0;
 /// The default view never zooms out past this; larger graphs pan instead. Below about this zoom
 /// headers and pin labels are too small to read.
 const READABLE_ZOOM: f32 = 0.9;
+/// The default view still frames the whole graph down to this zoom (labels stay legible), so
+/// small graphs show whole rather than panned at [`READABLE_ZOOM`].
+const FIT_FLOOR: f32 = 0.75;
+/// Framing never magnifies past this, so a small graph in a large window stays node-sized.
+const FIT_MAX: f32 = 1.6;
+/// Gap between the free canvas area's edge and content aligned to it.
+const EDGE_PAD: f32 = 24.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
@@ -255,14 +262,31 @@ impl State {
     pub fn fit_all(&mut self) {
         let [_, _, bw, bh] = self.placed.bounds;
         let (ww, wh) = (bw + 2.0 * MARGIN, bh + 2.0 * MARGIN);
-        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some(), self.project.is_some());
-        let zoom = (vw / ww).min(vh / wh).clamp(MIN_ZOOM, 1.25);
-        self.cam.zoom = zoom;
-        self.cam.pan = [vx + (vw - ww * zoom) / 2.0, vy + (vh - wh * zoom) / 2.0];
+        let [_, _, vw, vh] = self.free();
+        self.place((vw / ww).min(vh / wh).clamp(MIN_ZOOM, FIT_MAX));
     }
 
-    /// Default view: fit everything when that stays readable; otherwise keep a readable zoom
-    /// and centre on where an agent is working (or the entry), leaving the rest to panning.
+    /// The canvas area left free by the floating panels currently shown.
+    fn free(&self) -> [f32; 4] {
+        ui::free_area(self.selected.is_some(), self.project.is_some())
+    }
+
+    /// Show the graph at `zoom`: centred on each axis where it fits the free area, and read
+    /// from its top or left edge (just inside the free area) where it does not.
+    fn place(&mut self, zoom: f32) {
+        let [_, _, bw, bh] = self.placed.bounds;
+        let [vx, vy, vw, vh] = self.free();
+        let axis = |len: f32, lo: f32, room: f32| {
+            let start = if len * zoom <= room { lo + (room - len * zoom) / 2.0 } else { lo + EDGE_PAD };
+            start - MARGIN * zoom
+        };
+        self.cam.zoom = zoom;
+        self.cam.pan = [axis(bw, vx, vw), axis(bh, vy, vh)];
+    }
+
+    /// Default view: fit everything when that stays readable; otherwise keep a readable zoom,
+    /// read the graph from its top-left, and bring the selection (or where an agent is
+    /// working) into the free area, leaving the rest to panning.
     pub fn fit(&mut self) {
         self.fit_all();
         // Captures can pan like a person would: `ARGO_TILE=col,row` at `ARGO_ZOOM`.
@@ -273,20 +297,43 @@ impl State {
             return;
         }
         // Captures can ask for the whole graph regardless of readability (`ARGO_FIT=all`).
-        if self.cam.zoom >= READABLE_ZOOM || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
+        if self.cam.zoom >= FIT_FLOOR || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
             return;
         }
-        // Start where the program starts (reading order); the far edge fades to show more.
-        let [vx, vy, _, vh] = ui::free_area(self.selected.is_some(), self.project.is_some());
-        let [_, _, _, bh] = self.placed.bounds;
-        let wh = (bh + 2.0 * MARGIN) * READABLE_ZOOM;
-        self.cam.zoom = READABLE_ZOOM;
-        self.cam.pan = [vx, if wh < vh { vy + (vh - wh) / 2.0 } else { vy }];
-        if let Some(i) = self.view.nodes.iter().position(|n| n.kind == Kind::GroupIn) {
-            let [_, y, _, h] = self.screen_rect(i);
-            if wh > vh {
-                self.cam.pan[1] += vy + vh / 2.0 - (y + h / 2.0);
-            }
+        // Start where the program starts (reading order); the far edges fade to show more.
+        self.place(READABLE_ZOOM);
+        // Where an agent is working, then the selection (which wins), stay in view.
+        for item in [self.claimed(), self.selected].into_iter().flatten() {
+            self.show(item);
+        }
+    }
+
+    /// The item an agent is working on: an active claim first, else a queued one.
+    fn claimed(&self) -> Option<Item> {
+        let nodes = self.view.nodes.iter().enumerate().filter_map(|(i, n)| Some((n.claim?, Item::Node(i))));
+        let groups = self.view.groups.iter().enumerate()
+            .filter(|&(g, _)| !self.collapsed.get(g).copied().unwrap_or(false) && self.placed.frames.get(g).is_some_and(|f| f[2] > 0.0))
+            .filter_map(|(g, grp)| Some((grp.claim?, Item::Group(g))));
+        let claims: Vec<_> = nodes.chain(groups).collect();
+        claims.iter().find(|(c, _)| c.active).or(claims.first()).map(|&(_, item)| item)
+    }
+
+    /// Pan the least distance that puts `item` inside the free canvas area (padded). An item
+    /// larger than that area on an axis shows from its top or left edge, where a frame's title
+    /// and collapse button are.
+    fn show(&mut self, item: Item) {
+        let r = self.item_rect(item);
+        let [vx, vy, vw, vh] = self.free();
+        for (axis, start, len, lo, room) in [(0, r[0], r[2], vx, vw), (1, r[1], r[3], vy, vh)] {
+            let (lo, hi) = (lo + EDGE_PAD, lo + room - EDGE_PAD);
+            let shift = if len > hi - lo || start < lo {
+                lo - start
+            } else if start + len > hi {
+                hi - (start + len)
+            } else {
+                0.0
+            };
+            self.cam.pan[axis] += shift;
         }
     }
 
@@ -337,16 +384,14 @@ impl State {
         [self.cam.pan[0] + (x - bx + MARGIN) * z, self.cam.pan[1] + (y - by + MARGIN) * z, w * z, h * z]
     }
 
-    /// Select an item; pan so a selected node is not hidden under the docked details panel.
+    /// Select an item; when the docked details panel would cover part of it (a node or a
+    /// frame), pan it into the canvas left free beside the panel.
     pub fn select(&mut self, item: Item) {
         self.selected = Some(item);
-        if let Item::Node(i) = item {
-            let [vx, _, vw, _] = ui::free_area(true, self.project.is_some());
-            let [x, _, w, _] = self.screen_rect(i);
-            let limit = vx + vw - 48.0;
-            if x + w > limit {
-                self.cam.pan[0] -= x + w - limit;
-            }
+        let [vx, _, vw, _] = self.free();
+        let [x, _, w, _] = self.item_rect(item);
+        if x + w > vx + vw - EDGE_PAD {
+            self.show(item);
         }
     }
 
@@ -774,6 +819,133 @@ mod tests {
         s.open_node(member);
         assert!(s.view.groups.is_empty());
         assert!(s.can_expand(group_node(&s, "compute")));
+    }
+
+    /// Window sizes from the review set where the default view must not hide content.
+    const SIZES: [[f32; 2]; 3] = [[1024.0, 640.0], [1440.0, 900.0], [2560.0, 1440.0]];
+
+    /// `r` lies inside `a` (half a point of slack).
+    fn inside(r: [f32; 4], a: [f32; 4]) -> bool {
+        r[0] >= a[0] - 0.5 && r[1] >= a[1] - 0.5 && r[0] + r[2] <= a[0] + a[2] + 0.5 && r[1] + r[3] <= a[1] + a[3] + 0.5
+    }
+
+    /// Every drawn node and frame of the current view, on screen.
+    fn drawn(s: &State) -> Vec<[f32; 4]> {
+        let frames = (0..s.placed.frames.len()).filter(|&g| s.placed.frames[g][2] > 0.0 && !s.collapsed.get(g).copied().unwrap_or(false));
+        (0..s.placed.pos.len()).map(|i| s.screen_rect(i)).chain(frames.map(|g| s.item_rect(Item::Group(g)))).collect()
+    }
+
+    #[test]
+    fn fit_shows_the_whole_protocol_fixture() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            let s = State::protocol_fixture();
+            let free = s.free();
+            for (i, r) in drawn(&s).into_iter().enumerate() {
+                assert!(inside(r, free), "{size:?}: item {i} at {r:?} outside {free:?}");
+            }
+            assert!(s.cam.zoom >= FIT_FLOOR, "{size:?}: zoom {}", s.cam.zoom);
+        }
+        // A large window magnifies a small graph past the old 1.25 cap.
+        ui::set_viewport([2560.0, 1440.0]);
+        assert!(State::protocol_fixture().cam.zoom > 1.25);
+    }
+
+    #[test]
+    fn fit_keeps_the_fixtures_selected_group_and_claimed_node_beside_the_details_panel() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            let s = State::load("fixture");
+            let Some(Item::Group(g)) = s.selected else { panic!("the fixture selects its group") };
+            let free = ui::free_area(true, false);
+            let r = s.item_rect(Item::Group(g));
+            assert!(inside(r, free), "{size:?}: selected group {r:?} outside {free:?}");
+        }
+    }
+
+    #[test]
+    fn content_never_starts_under_the_top_bar() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            let mut states: Vec<State> = ["fixture", "branches", "dataflow", "devices", "interp"].into_iter().map(State::load).collect();
+            states.push(State::protocol_fixture());
+            let mut collapsed = State::load("interp");
+            collapsed.toggle_group(0);
+            collapsed.fit();
+            states.push(collapsed);
+            for s in states {
+                let [vx, vy, _, _] = s.free();
+                for r in drawn(&s) {
+                    assert!(r[1] >= vy - 0.5 && r[0] >= vx - 0.5, "{size:?} {}: {r:?} starts outside the free area", s.scene);
+                }
+            }
+        }
+    }
+
+    /// When the graph overflows at readable zoom, it is read from its top-left: no empty band
+    /// above or left of content that runs off the far edge.
+    #[test]
+    fn overflowing_fit_reads_from_the_top_left() {
+        ui::set_viewport([1440.0, 900.0]);
+        let s = State::load("branches");
+        let [vx, vy, vw, vh] = s.free();
+        let r = drawn(&s);
+        let top = r.iter().map(|r| r[1]).fold(f32::MAX, f32::min);
+        let bottom = r.iter().map(|r| r[1] + r[3]).fold(f32::MIN, f32::max);
+        if bottom > vy + vh {
+            assert!((top - (vy + EDGE_PAD)).abs() < 0.5, "top {top}, free top {vy}");
+        } else {
+            assert!(top - vy - (vy + vh - bottom) < 1.0, "content is centred vertically: top {top}, bottom {bottom}");
+        }
+        let left = r.iter().map(|r| r[0]).fold(f32::MAX, f32::min);
+        let right = r.iter().map(|r| r[0] + r[2]).fold(f32::MIN, f32::max);
+        if right > vx + vw {
+            assert!(left <= vx + EDGE_PAD + 0.5, "left {left}");
+        }
+    }
+
+    #[test]
+    fn selecting_a_frame_under_the_details_panel_pans_it_beside_the_panel() {
+        ui::set_viewport([1024.0, 640.0]);
+        let mut s = State::load("fixture");
+        let g = group_index(&s, "step ∘ normalize");
+        s.selected = None;
+        s.fit();
+        // Put the frame's right part under where the panel opens.
+        let [fx, _, fw, _] = ui::free_area(true, false);
+        let r = s.item_rect(Item::Group(g));
+        s.cam.pan[0] += fx + fw - r[0] - r[2] / 2.0;
+        s.select(Item::Group(g));
+        let r = s.item_rect(Item::Group(g));
+        let free = ui::free_area(true, false);
+        if r[2] <= free[2] - 2.0 * EDGE_PAD {
+            assert!(inside(r, free), "{r:?} outside {free:?}");
+        } else {
+            assert!((r[0] - (free[0] + EDGE_PAD)).abs() < 0.5, "a wide frame shows its left edge: {r:?}");
+        }
+        // A node fully in view does not move when selected.
+        let padded = [free[0] + EDGE_PAD, free[1] + EDGE_PAD, free[2] - 2.0 * EDGE_PAD, free[3] - 2.0 * EDGE_PAD];
+        let i = (0..s.view.nodes.len()).find(|&i| inside(s.screen_rect(i), padded)).expect("a node in view");
+        let pan = s.cam.pan;
+        s.select(Item::Node(i));
+        assert_eq!(s.cam.pan, pan);
+    }
+
+    #[test]
+    fn toggling_a_group_keeps_it_where_it_was_on_screen() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            let mut s = State::load("fixture");
+            let g = group_index(&s, "step ∘ normalize");
+            let frame = s.item_rect(Item::Group(g));
+            s.toggle_group(g);
+            let i = group_node(&s, "step ∘ normalize");
+            let node = s.item_rect(Item::Node(i));
+            assert!((node[0] - frame[0]).abs() < 3.0 && (node[1] - frame[1]).abs() < 3.0, "{size:?}: collapsed {node:?} vs frame {frame:?}");
+            s.toggle_group(g);
+            let again = s.item_rect(Item::Group(g));
+            assert!((again[0] - node[0]).abs() < 3.0 && (again[1] - node[1]).abs() < 3.0, "{size:?}: reopened {again:?} vs node {node:?}");
+        }
     }
 
     use rune_ui::Phase;
