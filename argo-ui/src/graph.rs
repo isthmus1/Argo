@@ -46,7 +46,7 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
     }
     world.push(canvas(wires(p, g, pl, o, focus)).size(ww, wh).absolute(0.0, 0.0));
     for (i, n) in g.nodes.iter().enumerate() {
-        world.push(node(p, n, i, pl.size[i], look(Item::Node(i))).absolute(o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]));
+        world.push(node(p, n, i, pl.size[i], s.can_expand(i), look(Item::Node(i))).absolute(o[0] + pl.pos[i][0], o[1] + pl.pos[i][1]));
     }
     let world = el().size(ww, wh).scale(s.cam.zoom).origin(0.0, 0.0).children(world).absolute(s.cam.pan[0], s.cam.pan[1]);
 
@@ -94,20 +94,50 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
     sh
 }
 
+/// An expanded node group: a frame around its members. The title's button (or a double-click
+/// anywhere on the frame) collapses it into a single node in place.
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
-    let title = row().h(32.0).w(w).px(14.0).gap(8.0).items_center()
+    let collapse = group_button(p.frame_text.alpha(0.75), p.frame_text.alpha(0.12), false)
+        .key(format!("collapse-group-{gi}"))
+        .on_press(move |s: &mut State| s.collapse_group(gi))
+        .help("Collapse to node");
+    let title = row().h(32.0).w(w).pl(14.0).pr(10.0).gap(8.0).items_center()
         .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
         .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0))
-        .child(lang_chip(p, f.lang));
+        .child(lang_chip(p, f.lang))
+        .child(collapse);
     let border = if look.selected { (2.0, p.accent) } else if look.hovered { (1.5, p.muted) } else { (1.5, p.frame_text.alpha(0.22)) };
     let fr = el().size(w, h).fill(p.frame_fill).radius(RADIUS + 4.0)
         .border(border.0, border.1)
         .child(title.absolute(0.0, 0.0))
         .on_press(move |s: &mut State| s.select(Item::Group(gi)))
         .on_double_press(move |s: &mut State| s.toggle_group(gi))
-        .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Group(gi), on))
-        .help("Double-click to collapse");
+        .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Group(gi), on));
     decorate(p, fr, [w, h], RADIUS + 4.0, f.evidence, f.claim, look)
+}
+
+/// The collapse (frame -> node) or expand (node -> frame) button: diagonal arrows drawn as
+/// strokes, pointing in to collapse and out to expand, as for leaving and entering full screen.
+fn group_button(fg: Color, hover: Color, expand: bool) -> El {
+    let d = model::GROUP_BUTTON;
+    let (c, m) = (d / 2.0, d * 0.22);
+    let mut sh = Shape::new();
+    // One arrow per diagonal quadrant: a shaft from the corner to near the centre, and an
+    // L-shaped head at its corner end (expand) or centre end (collapse).
+    for (sx, sy) in [(1.0, -1.0), (-1.0, 1.0)] {
+        let outer = [c + sx * (c - m), c + sy * (c - m)];
+        let inner = [c + sx * 1.5, c + sy * 1.5];
+        let tip = if expand { outer } else { inner };
+        let k = 4.0;
+        let (hx, hy) = if expand { (-sx * k, -sy * k) } else { (sx * k, sy * k) };
+        sh = sh.line(outer, inner, 1.5, LineCap::Round, fg).stroke_path(
+            &Path::new().move_to([tip[0] + hx, tip[1]]).line_to(tip).line_to([tip[0], tip[1] + hy]),
+            1.5,
+            LineCap::Round,
+            fg,
+        );
+    }
+    el().size(d, d).radius(5.0).hover(hover).cursor(Cursor::Pointer).child(canvas(sh).size(d, d))
 }
 
 fn socket_world(g: &Graph, pl: &crate::layout::Placed, i: usize, output: bool, idx: usize) -> [f32; 2] {
@@ -321,7 +351,9 @@ fn emphasis(p: &Pal, e: El, look: Look) -> El {
     }
 }
 
-fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], look: Look) -> El {
+/// A view node. `expandable`: a collapsed node group, drawn as a stack of cards with an expand
+/// button that (like a double-click) opens it into a frame in place.
+fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: Look) -> El {
     let head = p.header(n.kind.category());
     let interact = move |e: El| {
         e.on_press(move |s: &mut State| s.select(Item::Node(i)))
@@ -359,6 +391,12 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], look: Look) -> El {
     }
     if n.lang != Lang::None {
         header = header.child(lang_chip(p, n.lang));
+    }
+    if expandable {
+        header = header.child(group_button(Color::WHITE.alpha(0.85), Color::BLACK.alpha(0.2), true)
+            .key(format!("expand-group-{i}"))
+            .on_press(move |s: &mut State| s.expand_node(i))
+            .help("Expand group"));
     }
 
     let mut body = col().py(model::BODY_PAD);

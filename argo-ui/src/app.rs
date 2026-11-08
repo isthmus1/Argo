@@ -9,7 +9,7 @@ use argo_protocol::{NodeId, NodeKind, Snapshot, Update, fixture};
 use crate::bridge;
 use crate::layout::{self, Placed};
 use crate::project;
-use crate::model::{Evidence, Graph, Kind, Lang};
+use crate::model::{Evidence, Graph, Kind, Lang, Origin};
 use crate::scenes;
 use crate::ui;
 
@@ -26,6 +26,17 @@ pub enum Item {
     /// A node in the view graph.
     Node(usize),
     Group(usize),
+}
+
+/// An item named independently of the current view (view indices change on collapse/expand).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ident {
+    /// A node of the mock semantic graph.
+    Node(usize),
+    /// A mock node group, drawn as a frame or as one node.
+    Group(usize),
+    /// A protocol node: a node, or the container a frame shows.
+    Proto(NodeId),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -110,6 +121,14 @@ impl State {
         let (_, ids) = fixture::graph();
         let open = [ids.loop_region, ids.loop_body].into_iter().collect();
         State::from_snapshot("protocol", fixture::snapshot(), Some(ids.compute), open, fixture::transcript())
+    }
+
+    /// The §5.6 fixture's module level: its functions as collapsed node groups, with `compute`
+    /// opened in place as a frame when `open_compute`.
+    pub fn protocol_module(open_compute: bool) -> State {
+        let (_, ids) = fixture::graph();
+        let open = if open_compute { [ids.compute].into_iter().collect() } else { HashSet::new() };
+        State::from_snapshot("protocol-module", fixture::snapshot(), Some(ids.module), open, vec![])
     }
 
     /// A snapshot file (e.g. `main --protocol-json x.c`), showing one function's body.
@@ -288,50 +307,168 @@ impl State {
         }
     }
 
-    pub fn toggle_group(&mut self, g: usize) {
-        if let Some(live) = &mut self.live {
-            // Closing a frame closes that protocol container; it becomes one node with its pins.
-            if let Some(f) = live.frames.get(g) {
-                live.open.remove(f);
-                self.hovered = None;
-                self.selected = None;
-                self.reproject();
-                self.relayout();
+    /// Screen rectangle of a frame or node under the current camera.
+    pub fn item_rect(&self, item: Item) -> [f32; 4] {
+        match item {
+            Item::Node(i) => self.screen_rect(i),
+            Item::Group(g) => {
+                let [bx, by, _, _] = self.placed.bounds;
+                let z = self.cam.zoom;
+                let [x, y, w, h] = self.placed.frames[g];
+                [self.cam.pan[0] + (x - bx + MARGIN) * z, self.cam.pan[1] + (y - by + MARGIN) * z, w * z, h * z]
             }
-            return;
-        }
-        if let Some(c) = self.collapsed.get_mut(g) {
-            *c = !*c;
-            self.hovered = None;
-            self.selected = None;
-            self.relayout();
         }
     }
 
-    /// Double-click on a node: a collapsed group expands; other nodes have nothing inside yet.
-    pub fn open_node(&mut self, i: usize) {
-        if let Some(live) = &mut self.live {
-            let Some(&id) = live.origin.get(i) else { return };
-            // Double-click opens a closed construct in place; on an opened construct's own node
-            // (it has no frame to click), it closes the construct again.
-            let parent = live.snap.graph.nodes.iter().find(|n| n.id == id).and_then(|n| n.parent);
-            if bridge::openable(&live.snap, id) {
-                live.open.insert(id);
-            } else if let Some(p) = parent.filter(|p| live.open.contains(p)) {
-                live.open.remove(&p);
-            } else {
-                return;
+    /// Whether a view node is a collapsed node group that can be viewed as a frame.
+    pub fn can_expand(&self, i: usize) -> bool {
+        let Some(n) = self.view.nodes.get(i) else { return false };
+        if n.kind != Kind::Group {
+            return false;
+        }
+        match &self.live {
+            Some(live) => live.origin.get(i).is_some_and(|&id| bridge::openable(&live.snap, id)),
+            None => true,
+        }
+    }
+
+    /// Frame button / double-click on a frame: view the group as a single node. On a collapsed
+    /// mock group (scripted scenes), expands it instead.
+    pub fn toggle_group(&mut self, g: usize) {
+        if self.live.is_none() && self.collapsed.get(g).copied().unwrap_or(false) {
+            if let Some(Item::Node(i)) = self.locate(Ident::Group(g)) {
+                self.expand_node(i);
             }
-            self.hovered = None;
-            self.selected = None;
-            self.reproject();
-            self.relayout();
             return;
         }
-        if self.view.nodes[i].kind == Kind::Group
-            && let Some(g) = self.graph.groups.iter().position(|g| g.title == self.view.nodes[i].title)
-        {
-            self.toggle_group(g);
+        self.collapse_group(g);
+    }
+
+    /// View an expanded group (frame `g`) as one node whose pins are the wires crossing its frame.
+    pub fn collapse_group(&mut self, g: usize) {
+        if g >= self.view.groups.len() {
+            return;
+        }
+        self.reshape(Item::Group(g), |s| match &mut s.live {
+            // Closing a frame closes that protocol container; it becomes one node with its pins.
+            Some(live) => live.frames.get(g).copied().is_some_and(|f| live.open.remove(&f)),
+            None => s.collapsed.get_mut(g).is_some_and(|c| !std::mem::replace(c, true)),
+        });
+    }
+
+    /// Expand button / double-click on a collapsed group node: view it as a frame in place.
+    pub fn expand_node(&mut self, i: usize) {
+        if !self.can_expand(i) {
+            return;
+        }
+        let ident = self.ident(Item::Node(i));
+        self.reshape(Item::Node(i), |s| match (&mut s.live, ident) {
+            (Some(live), Some(Ident::Proto(id))) => live.open.insert(id),
+            (None, Some(Ident::Group(g))) => s.collapsed.get_mut(g).is_some_and(|c| std::mem::replace(c, false)),
+            _ => false,
+        });
+    }
+
+    /// Double-click on a node: a collapsed group expands into a frame; in live mode a closed
+    /// construct opens in place, and an opened construct's own node closes it again.
+    pub fn open_node(&mut self, i: usize) {
+        if self.can_expand(i) {
+            self.expand_node(i);
+            return;
+        }
+        let Some(live) = &self.live else { return };
+        let Some(&id) = live.origin.get(i) else { return };
+        let parent = live.snap.graph.nodes.iter().find(|n| n.id == id).and_then(|n| n.parent);
+        if bridge::openable(&live.snap, id) {
+            self.reshape(Item::Node(i), |s| s.live.as_mut().is_some_and(|l| l.open.insert(id)));
+        } else if let Some(p) = parent.filter(|p| live.open.contains(p)) {
+            // A member of a frame closes the frame, like a double-click on the frame body.
+            match live.frames.iter().position(|&f| f == p) {
+                Some(g) => self.collapse_group(g),
+                None => self.reshape(Item::Node(i), |s| s.live.as_mut().is_some_and(|l| l.open.remove(&p))),
+            }
+        }
+    }
+
+    /// Apply a structural view change (`change` returns whether anything changed), keeping
+    /// `anchor` where it was on screen: its top-left corner stays put, then the camera nudges
+    /// just enough to show more of what replaced it. Hover clears; selection follows the item
+    /// it named (a member of a collapsed group selects the group's node).
+    fn reshape(&mut self, anchor: Item, change: impl FnOnce(&mut State) -> bool) {
+        let before = self.item_rect(anchor);
+        let target = self.ident(anchor);
+        let selected = self.selected.and_then(|it| self.ident(it));
+        if !change(self) {
+            return;
+        }
+        self.hovered = None;
+        self.reproject();
+        self.relayout();
+        self.selected = selected.and_then(|id| self.locate(id));
+        if let Some(item) = target.and_then(|id| self.locate(id)) {
+            let after = self.item_rect(item);
+            self.cam.pan[0] += before[0] - after[0];
+            self.cam.pan[1] += before[1] - after[1];
+            self.reveal(self.item_rect(item));
+        }
+    }
+
+    /// Pan so more of `r` (a screen rectangle) shows in the free canvas area, without moving its
+    /// top-left corner out of view.
+    fn reveal(&mut self, r: [f32; 4]) {
+        const PAD: f32 = 24.0;
+        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some(), self.project.is_some());
+        for (axis, start, len, lo, hi) in [(0, r[0], r[2], vx, vx + vw), (1, r[1], r[3], vy, vy + vh)] {
+            let over = start + len + PAD - hi;
+            let room = start - (lo + PAD);
+            if over > 0.0 && room > 0.0 {
+                self.cam.pan[axis] -= over.min(room);
+            }
+        }
+    }
+
+    /// A view-independent name for an item, valid across collapse/expand and reprojection.
+    fn ident(&self, item: Item) -> Option<Ident> {
+        match (&self.live, item) {
+            (Some(live), Item::Node(i)) => live.origin.get(i).copied().map(Ident::Proto),
+            (Some(live), Item::Group(g)) => live.frames.get(g).copied().map(Ident::Proto),
+            (None, Item::Group(g)) => Some(Ident::Group(g)),
+            (None, Item::Node(i)) => Some(match *self.graph.collapse(&self.collapsed).1.get(i)? {
+                Origin::Node(n) => Ident::Node(n),
+                Origin::Group(g) => Ident::Group(g),
+            }),
+        }
+    }
+
+    /// Where a named item is drawn now: itself, or the collapsed node or frame standing for it;
+    /// for an opened construct, its first member.
+    fn locate(&self, id: Ident) -> Option<Item> {
+        match (&self.live, id) {
+            (Some(live), Ident::Proto(id)) => {
+                let node = |c: NodeId| live.origin.iter().position(|&o| o == c).map(Item::Node);
+                let frame = |c: NodeId| live.frames.iter().position(|&f| f == c).map(Item::Group);
+                let ix = argo_protocol::GraphIndex::new(&live.snap.graph);
+                std::iter::once(id)
+                    .chain(ix.ancestors(id))
+                    .find_map(|c| node(c).or_else(|| frame(c)))
+                    .or_else(|| live.origin.iter().position(|&o| ix.ancestors(o).contains(&id)).map(Item::Node))
+            }
+            (None, Ident::Node(n)) => {
+                let g = self.graph.nodes.get(n)?.group;
+                if let Some(g) = g.filter(|&g| self.collapsed.get(g).copied().unwrap_or(false)) {
+                    return self.locate(Ident::Group(g));
+                }
+                let origin = self.graph.collapse(&self.collapsed).1;
+                origin.iter().position(|&o| o == Origin::Node(n)).map(Item::Node)
+            }
+            (None, Ident::Group(g)) => {
+                if !self.collapsed.get(g).copied().unwrap_or(false) {
+                    return (g < self.view.groups.len()).then_some(Item::Group(g));
+                }
+                let origin = self.graph.collapse(&self.collapsed).1;
+                origin.iter().position(|&o| o == Origin::Group(g)).map(Item::Node)
+            }
+            _ => None,
         }
     }
 
@@ -373,5 +510,211 @@ impl State {
             return true;
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::model::Wire;
+
+    fn near(a: [f32; 4], b: [f32; 4]) -> bool {
+        (a[0] - b[0]).abs() < 0.5 && (a[1] - b[1]).abs() < 0.5
+    }
+
+    /// `after` keeps `before`'s top-left corner on screen, or slid up/left only to show more of
+    /// itself, never past the free canvas area's padded edge.
+    fn anchored(s: &State, after: [f32; 4], before: [f32; 4]) -> bool {
+        let [vx, vy, _, _] = ui::free_area(s.selected.is_some(), s.project.is_some());
+        [(after[0], before[0], vx), (after[1], before[1], vy)]
+            .iter()
+            .all(|&(a, b, lo)| (a - b).abs() < 0.5 || (a < b && a >= lo + 24.0 - 0.5))
+    }
+
+    fn group_index(s: &State, title: &str) -> usize {
+        s.view.groups.iter().position(|g| g.title == title).unwrap_or_else(|| panic!("no group {title}"))
+    }
+
+    /// The node standing for a collapsed group, by title.
+    fn group_node(s: &State, title: &str) -> usize {
+        s.view.nodes.iter().position(|n| n.kind == Kind::Group && n.title == title).unwrap_or_else(|| panic!("no group node {title}"))
+    }
+
+    /// Wires of a view graph with exactly one end inside group `gi`'s frame, as
+    /// (outside node title, outside pin label, entering the frame).
+    fn crossing(g: &Graph, gi: usize) -> Vec<(String, String, bool)> {
+        let inside = |i: usize| g.nodes[i].group == Some(gi);
+        let mut v: Vec<_> = g.wires.iter().filter(|w| inside(w.from.0) != inside(w.to.0)).map(|w| outside_end(g, w, inside(w.to.0))).collect();
+        v.sort();
+        v
+    }
+
+    /// Wires of a view graph touching node `i`, named as [`crossing`] names them.
+    fn touching(g: &Graph, i: usize) -> Vec<(String, String, bool)> {
+        let mut v: Vec<_> = g.wires.iter().filter(|w| (w.from.0 == i) != (w.to.0 == i)).map(|w| outside_end(g, w, w.to.0 == i)).collect();
+        v.sort();
+        v
+    }
+
+    fn outside_end(g: &Graph, w: &Wire, entering: bool) -> (String, String, bool) {
+        let (node, pin) = if entering {
+            (&g.nodes[w.from.0], &g.nodes[w.from.0].outs[w.from.1])
+        } else {
+            (&g.nodes[w.to.0], &g.nodes[w.to.0].ins[w.to.1])
+        };
+        (node.title.clone(), pin.label.clone(), entering)
+    }
+
+    /// Collapse a mock group and expand it again: the node's pins are exactly the wires that
+    /// crossed the frame, the group stays put on screen, and selection follows it both ways.
+    fn mock_round_trip(scene: &'static str, title: &str) {
+        let mut s = State::load(scene);
+        let g = group_index(&s, title);
+        let frame = s.item_rect(Item::Group(g));
+        let crossed = crossing(&s.view, g);
+        assert!(!crossed.is_empty(), "{title}: a group with no wires in or out proves nothing");
+        // One input per outside source value, one output per inside source value.
+        let inside = |i: usize| s.view.nodes[i].group == Some(g);
+        let sources = |entering: bool| {
+            s.view.wires.iter().filter(|w| inside(w.from.0) != inside(w.to.0) && inside(w.to.0) == entering).map(|w| w.from).collect::<HashSet<_>>().len()
+        };
+        let (ins, outs) = (sources(true), sources(false));
+        let members = s.view.nodes.iter().filter(|n| n.group == Some(g)).count();
+        let total = s.view.nodes.len();
+        s.selected = Some(Item::Group(g));
+        s.hovered = Some(Item::Group(g));
+
+        s.collapse_group(g);
+        let i = group_node(&s, title);
+        assert!(s.can_expand(i));
+        assert_eq!(s.view.nodes.len(), total - members + 1);
+        assert_eq!(s.view.nodes[i].members, members);
+        assert_eq!(touching(&s.view, i), crossed, "{title}: the collapsed node's wires are the ones that crossed the frame");
+        assert_eq!((s.view.nodes[i].ins.len(), s.view.nodes[i].outs.len()), (ins, outs), "{title}: one pin per crossing value");
+        assert!(near(s.item_rect(Item::Node(i)), frame), "{title}: the node takes the frame's place");
+        assert_eq!(s.selected, Some(Item::Node(i)));
+        assert_eq!(s.hovered, None);
+
+        s.expand_node(i);
+        assert_eq!(group_index(&s, title), g);
+        assert!(!s.collapsed[g]);
+        assert_eq!(s.view.nodes.len(), total);
+        assert_eq!(crossing(&s.view, g), crossed);
+        assert!(near(s.item_rect(Item::Group(g)), frame), "{title}: the frame opens where the node was");
+        assert_eq!(s.selected, Some(Item::Group(g)));
+    }
+
+    #[test]
+    fn mock_groups_round_trip_between_frame_and_node() {
+        mock_round_trip("fixture", "step ∘ normalize");
+        mock_round_trip("interp", "alu");
+        mock_round_trip("dataflow", "mul_core");
+    }
+
+    #[test]
+    fn selection_follows_members_into_the_collapsed_node() {
+        let mut s = State::load("fixture");
+        let g = group_index(&s, "step ∘ normalize");
+        let member = s.view.nodes.iter().position(|n| n.group == Some(g)).unwrap();
+        s.selected = Some(Item::Node(member));
+        s.collapse_group(g);
+        assert_eq!(s.selected, Some(Item::Node(group_node(&s, "step ∘ normalize"))));
+        // An outside node stays selected across a change of view indices.
+        s.selected = s.find("report").map(Item::Node);
+        s.expand_node(group_node(&s, "step ∘ normalize"));
+        let Some(Item::Node(i)) = s.selected else { panic!("selection lost") };
+        assert_eq!(s.view.nodes[i].title, "report");
+    }
+
+    #[test]
+    fn double_click_expands_a_collapsed_group_and_the_frame_toggle_collapses() {
+        let mut s = State::load("interp");
+        s.toggle_group(0);
+        assert!(s.collapsed[0]);
+        s.open_node(group_node(&s, "alu"));
+        assert!(!s.collapsed[0], "double-click on the group node expands it");
+        s.toggle_group(0);
+        assert!(s.collapsed[0], "double-click on the frame collapses it");
+        s.toggle_group(0);
+        assert!(!s.collapsed[0], "on a collapsed mock group, toggling expands");
+        // Ordinary nodes have nothing to open.
+        let other = s.view.nodes.iter().position(|n| n.kind != Kind::Group).unwrap();
+        assert!(!s.can_expand(other));
+        let before = s.view.nodes.len();
+        s.open_node(other);
+        assert_eq!(s.view.nodes.len(), before);
+    }
+
+    #[test]
+    fn live_function_opens_in_place_as_a_frame_and_closes_to_a_node() {
+        let mut s = State::protocol_module(false);
+        assert!(s.view.groups.is_empty());
+        let i = group_node(&s, "compute");
+        assert!(s.can_expand(i), "a closed function is a collapsed node group");
+        let pins = |n: &crate::model::Node| {
+            (n.ins.iter().map(|p| p.label.clone()).collect::<Vec<_>>(), n.outs.iter().map(|p| p.label.clone()).collect::<Vec<_>>())
+        };
+        let closed_pins = pins(&s.view.nodes[i]);
+        let closed_wires = touching(&s.view, i);
+        let before = s.item_rect(Item::Node(i));
+        s.selected = Some(Item::Node(i));
+
+        s.expand_node(i);
+        assert_eq!(s.view.groups.iter().map(|g| g.title.as_str()).collect::<Vec<_>>(), ["compute"]);
+        assert!(s.view.nodes.iter().any(|n| n.group == Some(0) && n.title == "uint32_t acc = 0"));
+        assert!(s.view.nodes.iter().all(|n| n.title != "compute"), "the frame replaces the node");
+        assert!(anchored(&s, s.item_rect(Item::Group(0)), before), "the frame opens where the node was");
+        assert_eq!(s.selected, Some(Item::Group(0)));
+        assert_eq!(crossing(&s.view, 0), closed_wires);
+        let frame = s.item_rect(Item::Group(0));
+
+        s.collapse_group(0);
+        assert!(s.view.groups.is_empty());
+        let i = group_node(&s, "compute");
+        assert_eq!(pins(&s.view.nodes[i]), closed_pins);
+        assert_eq!(touching(&s.view, i), closed_wires);
+        assert!(anchored(&s, s.item_rect(Item::Node(i)), frame), "the node takes the frame's place");
+        assert_eq!(s.selected, Some(Item::Node(i)));
+    }
+
+    /// A merged group (§5.10, `status.collapsed`) inside a function: closed, it is one node whose
+    /// pins carry exactly the wires that cross its frame when opened.
+    #[test]
+    fn live_merged_group_pins_are_the_wires_crossing_its_frame() {
+        let (_, ids) = fixture::graph();
+        let mut snap = fixture::snapshot();
+        match snap.status.iter_mut().find(|st| st.node == ids.loop_region) {
+            Some(st) => st.collapsed = true,
+            None => {
+                let mut st = argo_protocol::NodeStatus::new(ids.loop_region, argo_protocol::Language::C);
+                st.collapsed = true;
+                snap.status.push(st);
+            }
+        }
+        let mut s = State::from_snapshot("merged", snap, Some(ids.compute), HashSet::new(), vec![]);
+        let i = s.view.nodes.iter().position(|n| n.kind == Kind::Group).expect("the merged group is one node");
+        assert!(s.can_expand(i));
+        let closed = touching(&s.view, i);
+        assert!(!closed.is_empty());
+
+        s.expand_node(i);
+        assert_eq!(s.view.groups.len(), 1, "a merged group opens as a frame");
+        assert_eq!(crossing(&s.view, 0), closed, "its pins were the wires crossing the frame");
+
+        s.collapse_group(0);
+        assert!(s.view.groups.is_empty());
+        let i = s.view.nodes.iter().position(|n| n.kind == Kind::Group).unwrap();
+        assert_eq!(touching(&s.view, i), closed);
+    }
+
+    #[test]
+    fn live_double_click_on_a_frame_member_closes_the_frame() {
+        let mut s = State::protocol_module(true);
+        let member = s.view.nodes.iter().position(|n| n.title == "uint32_t acc = 0").unwrap();
+        s.open_node(member);
+        assert!(s.view.groups.is_empty());
+        assert!(s.can_expand(group_node(&s, "compute")));
     }
 }

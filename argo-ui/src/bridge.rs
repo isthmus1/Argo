@@ -115,6 +115,13 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> (Lang, Evidence, Opti
     (lang, evidence, claim)
 }
 
+/// Whether opening this container draws a frame: a function, module or program, or a container
+/// collapsed into a merged group (§5.10). Control flow never does.
+fn node_group(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> bool {
+    let group = ix.node(id).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program));
+    group || snap.status(id).is_some_and(|s| s.collapsed)
+}
+
 fn is_backedge(ix: &GraphIndex, to: &argo_protocol::PinRef) -> bool {
     let k = to.key.as_str();
     ix.node(to.node).is_some_and(|n| n.kind == P::Dispatch(argo_protocol::DispatchKind::Loop))
@@ -129,10 +136,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     // Frames are only for opening a node group: a function's internals, or a merged group (§5.10).
     // Control flow is never framed: an opened `for`/`if`/`switch`/block lays its contents out
     // flat, and the construct's own node (the dispatch) wires straight to them, as in UE5.
-    let drawn = |f: NodeId| {
-        let group = ix.node(f).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program));
-        group || snap.status(f).is_some_and(|s| s.collapsed)
-    };
+    let drawn = |f: NodeId| node_group(snap, &ix, f);
     let outermost: HashMap<NodeId, Option<NodeId>> = {
         let parent: HashMap<_, _> = level.frames.iter().map(|f| (f.id, f.parent)).collect();
         level
@@ -193,8 +197,10 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
                 outs.push(pin);
             }
         }
-        let kind = kind(n.kind);
         let has_children = !ix.children(Some(ln.id)).is_empty();
+        // A closed node group (a function's internals, a merged bundle) is drawn as a collapsed
+        // group node, which opens in place as a frame.
+        let kind = if has_children && node_group(snap, &ix, ln.id) { Kind::Group } else { kind(n.kind) };
         let group = ln.frame.and_then(|f| outermost[&f]).and_then(|top| frames.iter().position(|&g| g == top));
         nodes.push(Node {
             kind,
