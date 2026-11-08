@@ -216,6 +216,9 @@ fn worker(bins: &Bins, local: &Local, o: &WorkerOpts) -> Command {
     if let Some(dir) = &o.workdir {
         cmd.arg("--workdir").arg(dir);
     }
+    if let Some(test) = &o.test_cmd {
+        cmd.args(["--test-cmd", test]);
+    }
     cmd
 }
 

@@ -96,6 +96,10 @@ pub struct Site {
     pub hi: usize,
     /// Every other unit's object.
     pub others: Vec<PathBuf>,
+    /// The unit's file, relative to `root`, and the clone it is in: the test oracle puts the
+    /// spliced unit there in a copy of the clone and builds it with the project's own build.
+    pub path: String,
+    pub root: PathBuf,
 }
 
 /// Symbols of one or more objects, by binding.
@@ -504,7 +508,8 @@ impl Program {
         p.symbols.extend(&symbols(&std::fs::read(&original).unwrap_or_default()).unwrap_or_default());
         p.objects = others.iter().cloned().chain([original]).collect();
         p.baseline = link(tools, dir, &p.objects, None).0;
-        p.site = Some(Site { text, lo, hi, others });
+        let path = target.path.clone();
+        p.site = Some(Site { text, lo, hi, others, path, root: root.clone() });
         p
     }
 

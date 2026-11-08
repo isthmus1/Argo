@@ -74,6 +74,11 @@ struct Args {
     /// Reach OpenRouter directly with `OPENROUTER_API_KEY` and `--model`, not the proxy.
     #[arg(long, conflicts_with = "proxy", requires = "model")]
     direct: bool,
+    /// The project's build and tests, a shell command run as the last check of each piece in a
+    /// copy of the clone with the piece spliced in; exit 0 accepts. It gets `ARGO_RUST_LIB`,
+    /// `ARGO_RUST_LIBS`, `ARGO_UNIT` and `ARGO_BUILD` (see `oracle.rs`).
+    #[arg(long, value_name = "SHELL")]
+    test_cmd: Option<String>,
 }
 
 /// The module rejects a longer model name in `submit_rust`; refuse it before any work is done.
@@ -128,6 +133,7 @@ async fn run(args: Args) -> Result<(), String> {
         (None, false) => Some(proxy::beside(&args.db)?),
     };
     let (validator, warning) = BuildCheck::detect()?;
+    let validator = validator.test_cmd(args.test_cmd.clone());
     if let Some(warning) = warning {
         eprintln!("argo-worker: {warning}");
     }

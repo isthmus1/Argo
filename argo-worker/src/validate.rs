@@ -83,6 +83,8 @@ pub enum Stage {
     Abi,
     /// A piece's C replacement doesn't compile in the piece's place.
     CCall,
+    /// The project's own build and tests (`--test-cmd`) fail with the candidate in it.
+    Test,
 }
 
 impl Stage {
@@ -94,6 +96,7 @@ impl Stage {
             Stage::Link => "link",
             Stage::Abi => "abi",
             Stage::CCall => "c",
+            Stage::Test => "test",
         }
     }
 }
@@ -156,6 +159,8 @@ pub struct BuildCheck {
     /// The program's units compiled for the latest ingest, shared by every worker in the
     /// process (clones share it): compiled once, by whichever claim needs it first.
     builds: Arc<Mutex<Option<Shared>>>,
+    /// `--test-cmd`: the project's build and tests, run with each piece spliced in.
+    test: Option<String>,
 }
 
 /// An ingest, by locator, commit and the units it compiled.
@@ -186,6 +191,7 @@ impl BuildCheck {
         BuildCheck {
             tools: None,
             builds: Arc::default(),
+            test: None,
         }
     }
 
@@ -193,7 +199,15 @@ impl BuildCheck {
         BuildCheck {
             tools: Some(tools),
             builds: Arc::default(),
+            test: None,
         }
+    }
+
+    /// Run `cmd` (a shell command) as the last check of each piece, in a copy of the clone with
+    /// the spliced unit in place; see [`crate::oracle`].
+    pub fn test_cmd(mut self, cmd: Option<String>) -> BuildCheck {
+        self.test = cmd;
+        self
     }
 
     /// The program's units compiled for `ingest`: the shared build when it is this ingest's,
@@ -272,6 +286,7 @@ impl Validator for BuildCheck {
             dir: candidate.dir.to_path_buf(),
             program: candidate.program.clone(),
             tools: self.tools.clone(),
+            test: self.test.clone(),
         };
         // rustc and the linker take a while; off this task, so the claim's heartbeat keeps
         // running.
@@ -296,6 +311,7 @@ struct Job {
     dir: PathBuf,
     program: Option<Arc<Program>>,
     tools: Option<Toolchain>,
+    test: Option<String>,
 }
 
 impl Job {
@@ -513,6 +529,25 @@ impl Job {
             (Some(_), Ok(None)) => {} // Not exported: the symbol check says so.
             (Some(_), Err(e)) => done.push(format!("ABI not checked: {e}")),
             (None, _) => done.push("ABI not checked: no C signature".into()),
+        }
+
+        // The project's own build and tests, last: they are the slowest check.
+        if let (true, Some(cmd), Some(site), Some(c)) =
+            (failures.is_empty(), &self.test, &program.site, &self.c)
+        {
+            let replaced = format!("{}{c}{}", &site.text[..site.lo], &site.text[site.hi..]);
+            let libs = tools.libs.join(" ");
+            match crate::oracle::run(cmd, site, &replaced, &lib, &libs, &self.dir) {
+                Ok(()) => {
+                    done.push(format!("passed the project's build and tests (`{cmd}`)"));
+                    return Verdict::Unvalidated(done.join("; "));
+                }
+                Err((summary, log)) => {
+                    let notes = log.lines().rev().take(15).collect::<Vec<_>>();
+                    let notes = notes.into_iter().rev().map(str::to_string).collect();
+                    failures.push(Failure::new(Stage::Test, summary, notes, Some(log)));
+                }
+            }
         }
 
         if failures.is_empty() {
