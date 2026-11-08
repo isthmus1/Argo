@@ -81,6 +81,9 @@ struct Look {
     labels: Option<f32>,
     /// Node title size in world points (see [`title_size`]).
     title: f32,
+    /// The whole-program view: nodes being translated glow, this many times their base glow so
+    /// it still shows zoomed far out; 0 elsewhere.
+    glow: f32,
 }
 
 /// The canvas filling `w`×`h`, with the world under the camera.
@@ -97,6 +100,7 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
         badge_scale: (1.0 / s.cam.zoom).clamp(1.0, 2.2),
         labels: (s.cam.zoom >= LABEL_ZOOM).then(|| label_size(s.cam.zoom)),
         title: title_size(s.cam.zoom),
+        glow: if s.live.as_ref().is_some_and(|l| l.whole) { (1.0 / s.cam.zoom).clamp(1.0, 6.0) } else { 0.0 },
     };
 
     let mut world = vec![];
@@ -1342,7 +1346,16 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     }
     let stacked = n.kind == Kind::Group;
     // A stack casts one shadow, from its back plate.
-    if !stacked {
+    let working = n.claim.is_some_and(|c| c.active);
+    if look.glow > 0.0 && working {
+        // Being translated, in the whole-program view: a blue glow (the explorer's
+        // "being translated" blue) and rim, so active work stands out among hundreds of nodes.
+        // The ring thickens as the view zooms out (about 4 screen points at 1x, 7 at 1/4x), so
+        // working nodes still read as blue spots across the whole map.
+        let ring = 4.0 + 8.0 * (look.glow - 1.0);
+        card = card.border(2.5, p.accent).outline(ring, 2.0, p.accent.alpha(0.5))
+            .shadow(0.0, 44.0 * look.glow, p.accent);
+    } else if !stacked {
         card = card.shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
     }
     for (pi, pin) in n.outs.iter().enumerate() {
