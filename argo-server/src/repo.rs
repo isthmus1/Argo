@@ -100,10 +100,8 @@ pub fn load(
             .map(|f| flags::unrooted_flag(f, &root))
             .collect(),
     };
-    // `places` traces bytes of the one combined source `open` produces, and nothing else.
-    let combined = opened.snapshot.sources.first().map(|s| s.id);
     let rows = to_rows(&opened.snapshot, &origin, &|file, pos| {
-        let (path, line) = opened.places.at(pos).filter(|_| Some(file) == combined)?;
+        let (path, line) = opened.places.at(file, pos)?;
         Some((path.to_string(), line))
     })
     .map_err(|e| e.to_string())?;

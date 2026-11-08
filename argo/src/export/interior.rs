@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use argo_protocol::{DispatchKind, GraphBuilder, NodeId, NodeKind, Provenance, pin::key};
 
+use super::Exporter;
 use super::flow::{Exit, is_exec};
-use super::{Exporter, range};
 use crate::CNodeRole;
 
 /// The container's group outputs, created on first use: one per exec exit key.
@@ -62,12 +62,14 @@ impl Exporter<'_> {
                 .parts
                 .iter()
                 .find(|p| matches!(p.role, CNodeRole::Condition | CNodeRole::Selector))
-                .map_or(range(n.span.lo, n.span.hi), |p| range(p.span.lo, p.span.hi));
+                .map_or(self.range(n.span.lo, n.span.hi), |p| {
+                    self.range(p.span.lo, p.span.hi)
+                });
             let dn = self
                 .b
                 .node(Some(node), NodeKind::Dispatch(d), self.header(n));
             let mut prov = Provenance::at(header);
-            prov.parts = Self::parts(n);
+            prov.parts = self.parts(n);
             self.b.provenance(dn, prov);
             dn
         });
@@ -118,7 +120,7 @@ impl Exporter<'_> {
             self.route_exits(c, cn, out, None);
         }
         if let Some(from) = cur {
-            out.to(&mut self.b, from, key::THEN);
+            out.to(self.b, from, key::THEN);
         }
     }
 
@@ -136,10 +138,10 @@ impl Exporter<'_> {
                 (Exit::Continue, Some(d)) => {
                     self.b.exec((cn, exit.key()), (d, key::NEXT));
                 }
-                (Exit::Break, Some(_)) => out.to(&mut self.b, (cn, exit.key()), key::THEN),
+                (Exit::Break, Some(_)) => out.to(self.b, (cn, exit.key()), key::THEN),
                 _ => {
                     let target = out.exit_key(exit);
-                    out.to(&mut self.b, (cn, exit.key()), target);
+                    out.to(self.b, (cn, exit.key()), target);
                 }
             }
         }

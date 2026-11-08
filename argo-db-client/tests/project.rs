@@ -1,6 +1,6 @@
 //! Rows of a real multi-file project: every chunk's location must be coherent with the files it
-//! names. The snapshot's one source is the combined, preprocessed text, so its byte offsets mean
-//! nothing in the repository; only `places` can say where a chunk came from.
+//! names. Each unit is recorded as its own preprocessed items laid end to end, so byte offsets
+//! mean nothing in the repository; only `places` can say where a chunk came from.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,9 +34,8 @@ fn sample() -> PathBuf {
 }
 
 fn rows(opened: &Opened) -> Vec<argo_db_client::CChunk> {
-    let id = opened.snapshot.sources[0].id;
     let places = |file: FileId, pos: u32| {
-        let (path, line) = opened.places.at(pos).filter(|_| file == id)?;
+        let (path, line) = opened.places.at(file, pos)?;
         Some((path.to_string(), line))
     };
     let origin = Origin {
@@ -68,7 +67,13 @@ fn chunk_locations_point_into_the_files_they_name() {
     let root = sample();
     let opened = project::open(&root, "two", &Options::default(), &|_| {}).unwrap();
     let rows = rows(&opened);
-    let ingested = &opened.snapshot.sources[0];
+    let names: Vec<_> = opened
+        .snapshot
+        .sources
+        .iter()
+        .map(|s| s.path.as_str())
+        .collect();
+    assert_eq!(names, ["a.i", "b.i"], "one recorded source per unit");
 
     let function = |name: &str| {
         let r = rows
@@ -86,7 +91,12 @@ fn chunk_locations_point_into_the_files_they_name() {
         .filter(|r| r.node.is_some() && !r.source.is_empty())
     {
         // The text and bytes index the ingested file, never the repository file.
-        assert_eq!(r.ingested, ingested.path);
+        let ingested = opened
+            .snapshot
+            .sources
+            .iter()
+            .find(|s| s.path == r.ingested)
+            .unwrap_or_else(|| panic!("{} names no recorded source", r.ingested));
         assert_ne!(r.ingested, r.path);
         let (lo, hi) = (r.byte_lo as usize, r.byte_hi as usize);
         assert_eq!(r.source, ingested.text[lo..hi]);
@@ -106,6 +116,10 @@ fn chunk_locations_point_into_the_files_they_name() {
     }
     let area = rows.iter().find(|r| r.name == "area").unwrap();
     assert!(area.source.contains("((w) * (w))"), "preprocessed text");
+    assert_eq!(area.ingested, "b.i");
+    // The header both units include is recorded once, with the first.
+    let square = rows.iter().find(|r| r.name == "square").unwrap();
+    assert_eq!(square.ingested, "a.i");
 
     let rebuilt = rebuild(&rows).unwrap();
     assert_eq!(

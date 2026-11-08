@@ -112,7 +112,7 @@ owned syntax tree, a template-match summary, and rucc's C pretty-print. Fatal
 lexer, conversion, or parser errors exit unsuccessfully without emitting a tree;
 diagnostics go to stderr.
 
-- `argo/src/lexer.rs`: reusable `Lexer`, defaulting to C11 + GNU on x86_64 Linux.
+- `argo/src/lexer.rs`: reusable `Lexer`, defaulting to C23 + GNU on x86_64 Linux.
 - `argo/src/parser.rs`: reusable `Parser` and an owned `ParseResult`.
 - `argo/src/ast.rs`, `argo/src/c_node.rs`: `Ast` owns a forest of `CNode` values, each with a
   `CNodeType`, name, original-source byte span, and owned children. These are
@@ -147,11 +147,11 @@ cargo run --release -p Argo -- --protocol-json ~/src/project > target/project.js
 ```
 
 The parser reads plain C, so `argo/src/project/` runs the system preprocessor (`cc -E`, or
-`$CC`) first: includes are pasted in and macros expanded. Each `.c` file is checked on
-its own; the ones that preprocess and parse are combined into one translation unit, and
-line markers put every function back under its original file. Files that fail (missing
-headers, undefined build macros) are listed with the reason instead of failing the
-project. `-D`/`-I` flags come from the Makefile's `CFLAGS`/`CPPFLAGS`/`DEFINES` lines,
+`$CC`, in C23 mode like the parser) first: includes are pasted in and macros expanded.
+Each `.c` file is its own translation unit, preprocessed, parsed and built on its own as a
+compiler would, then merged into one graph; line markers put every function back under its
+original file, and a shared header's items are kept once. Files that fail (missing headers,
+undefined build macros) are listed with the reason instead of failing the project. `-D`/`-I` flags come from the Makefile's `CFLAGS`/`CPPFLAGS`/`DEFINES` lines,
 then from the command line.
 
 ### Export a syntax graph

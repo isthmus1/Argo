@@ -1,16 +1,21 @@
 //! A whole C project as one protocol graph.
 //!
-//! Every `.c` file is a candidate translation unit. Each is first checked on its own (`cc -E`,
-//! then the parser) so one file the parser can't read, or whose headers aren't installed, is
-//! reported and left out instead of failing the project. The rest are combined into one input of
-//! `#include "<file>.c"` lines and preprocessed once: includes are copy-paste and macros are
-//! expanded, so the result is a single plain-C text, which the existing single-file pipeline reads.
-//! Line markers map every top-level item back to its original file, which becomes its module;
-//! code from outside the project (system headers) is dropped.
+//! Every `.c` file is its own translation unit, as a compiler sees it: preprocessed (`cc -E`, so
+//! includes are pasted in and macros expanded), parsed and built on its own, in parallel. A file
+//! the parser can't read, or whose headers aren't installed, is reported and left out instead of
+//! failing the project. Files are never pasted together: a macro, typedef or `static` name one
+//! file defines means nothing to another, and combining them would let it.
+//!
+//! The units are then merged into one graph. Line markers map every top-level item back to its
+//! original file, which becomes its module; code from outside the project (system headers) is
+//! dropped. A project header's items come in with every unit that includes it and are kept once,
+//! unless it expands differently in another unit, which keeps that version too. Each unit is
+//! recorded as one source file holding only the items it contributed, laid end to end, so system
+//! headers aren't stored once per unit; [`Places`] traces its bytes back to the original lines.
 //!
 //! Flags come from the project's Makefile ([`make`]): shared ones, per-file ones from explicit
-//! rules (emitted as `#define`/`#undef` around that file's `#include` in the combined input), and
-//! optional feature switches a file is read without when they need a header that isn't installed.
+//! rules, and optional feature switches a file is read without when they need a header that isn't
+//! installed.
 
 mod check;
 pub mod cpp;
@@ -21,16 +26,15 @@ pub mod lines;
 pub mod make;
 mod places;
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use argo_protocol::Snapshot;
+use argo_protocol::{FileId, Snapshot, SourceFile};
 
-use crate::{Parser, export, templates};
-use cpp::Input;
-use files::{relative, short};
-use lines::Mapped;
+use crate::export::{Placement, ProgramBuilder};
+use files::relative;
 pub use places::Places;
 
 /// The flags every file gets from `root`'s Makefile.
@@ -92,19 +96,25 @@ pub struct Unit {
 pub enum Step {
     Fetching(String),
     Scanning,
-    Checking { done: usize, total: usize },
-    Combining { units: usize },
-    Parsing,
-    Building,
+    /// Files preprocessed, parsed and built so far, each on its own.
+    Checking {
+        done: usize,
+        total: usize,
+    },
+    /// Every file is read; the merged graph is being checked.
+    Merging {
+        units: usize,
+    },
 }
 
 pub struct Opened {
+    /// One source per unit that contributed items: its preprocessed items, laid end to end.
     pub snapshot: Snapshot,
     pub units: Vec<Unit>,
     /// The preprocessor flags used, Makefile ones first.
     pub flags: Vec<String>,
     pub root: PathBuf,
-    /// Where each byte of the snapshot's (combined, preprocessed) source came from.
+    /// Where each byte of the snapshot's (preprocessed) sources came from.
     pub places: Places,
 }
 
@@ -163,9 +173,12 @@ pub fn open(
         .iter()
         .map(|p| (p.clone(), makefile.flags_for(p).to_vec()))
         .collect();
-    let verdicts = check::all(&setup, &starts, progress);
+    let mut merge = Merge::new(&root, name);
+    let verdicts = check::all(&setup, &starts, progress, &mut |i, read| {
+        merge.add(&relative(&root, &sources[i]), read);
+    });
     opts.cancelled()?;
-    let mut units: Vec<Unit> = sources
+    let units: Vec<Unit> = sources
         .iter()
         .zip(verdicts)
         .map(|(p, v)| Unit {
@@ -174,98 +187,129 @@ pub fn open(
             flags: v.flags,
         })
         .collect();
+    let read = units.iter().filter(|u| u.skipped.is_none()).count();
+    if read == 0 {
+        return Err(nothing_read(&units));
+    }
+    progress(Step::Merging { units: read });
+    let Merge {
+        program,
+        sources,
+        places,
+        ..
+    } = merge;
+    let mut g = program.finish();
+    g.freeze().map_err(|v| {
+        let lines: Vec<_> = v.iter().take(8).map(ToString::to_string).collect();
+        format!("graph failed freeze checks:\n{}", lines.join("\n"))
+    })?;
+    Ok(Opened {
+        snapshot: Snapshot::new(g, sources),
+        units,
+        flags,
+        root,
+        places,
+    })
+}
 
-    // Combine the files that work alone; drop any that fail only when combined, and retry.
-    loop {
-        opts.cancelled()?;
-        let included: Vec<(&Path, &Unit)> = sources
-            .iter()
-            .zip(&units)
-            .filter(|(_, u)| u.skipped.is_none())
-            .map(|(p, u)| (p.as_path(), u))
-            .collect();
-        if included.is_empty() {
-            return Err(nothing_read(&units));
+/// The units merged so far.
+struct Merge<'a> {
+    root: &'a Path,
+    program: ProgramBuilder,
+    sources: Vec<SourceFile>,
+    places: Places,
+    /// Preprocessor file names resolved to a project path (index into `places`), or `None` for
+    /// files outside the project.
+    resolved: HashMap<String, Option<u32>>,
+    /// Top-level items already taken, by original file, line and exact preprocessed text.
+    seen: HashSet<(u32, u32, Vec<u8>)>,
+}
+
+impl<'a> Merge<'a> {
+    fn new(root: &'a Path, name: &str) -> Self {
+        Merge {
+            root,
+            program: ProgramBuilder::new(name),
+            sources: vec![],
+            places: Places::default(),
+            resolved: HashMap::new(),
+            seen: HashSet::new(),
         }
-        progress(Step::Combining {
-            units: included.len(),
-        });
-        let mut combined_flags = flags.clone();
-        for (_, u) in &included {
-            for f in u.flags.iter().filter(|f| f.starts_with("-I")) {
-                if !combined_flags.contains(f) {
-                    combined_flags.push(f.clone());
+    }
+
+    fn resolve(&mut self, name: &str) -> Option<u32> {
+        if let Some(&r) = self.resolved.get(name) {
+            return r;
+        }
+        let r = lines::canonical(name)
+            .filter(|p| p.starts_with(self.root))
+            .map(|p| self.places.path(&relative(self.root, &p)));
+        self.resolved.insert(name.to_string(), r);
+        r
+    }
+
+    /// Add the project items of unit `path` not already taken, recorded as `<path>.i`.
+    fn add(&mut self, path: &str, read: check::Read) {
+        let check::Read {
+            mapped,
+            parsed,
+            graph,
+        } = read;
+        let files: Vec<Option<u32>> = mapped.files.iter().map(|f| self.resolve(f)).collect();
+        // Top-level items whose bytes overlap (declarations sharing a specifier) go together.
+        let mut groups: Vec<(Vec<usize>, u32, u32)> = vec![];
+        for &root in &graph.roots {
+            let span = graph.nodes[root].span;
+            match groups.last_mut() {
+                Some((roots, _, hi)) if span.lo < *hi => {
+                    roots.push(root);
+                    *hi = (*hi).max(span.hi);
                 }
+                _ => groups.push((vec![root], span.lo, span.hi)),
             }
         }
-        let combined = combined_input(&flags, &included);
-        let raw =
-            cpp::preprocess(&opts.cc, &combined_flags, Input::Stdin(&combined)).map_err(|e| {
-                format!(
-                    "preprocessing the combined files failed: {}",
-                    e.describe(|f| short(f, &root))
-                )
-            })?;
-        let mut mapped = Mapped::new(&raw);
-        dialect::neutralize(&mut mapped.text);
-        progress(Step::Parsing);
-        let parsed = Parser::default().parse(&mapped.text);
-        if let Some(d) = parsed.diagnostics.iter().find(|d| d.severity.is_fatal()) {
-            let o = mapped.origin(d.span.lo);
-            let culprit = o
-                .unit
-                .and_then(lines::canonical)
-                .map(|u| relative(&root, &u));
-            match culprit.and_then(|c| {
-                units
-                    .iter_mut()
-                    .find(|u| u.path == c && u.skipped.is_none())
-            }) {
-                Some(u) => {
-                    u.skipped = Some(format!(
-                        "fails when combined: {} ({}:{})",
-                        d.message,
-                        short(o.file, &root),
-                        o.line
-                    ));
-                    continue;
-                }
-                None => {
-                    return Err(format!(
-                        "combined parse failed at {}:{}: {}",
-                        short(o.file, &root),
-                        o.line,
-                        d.message
-                    ));
-                }
+        let mut text: Vec<u8> = vec![];
+        let mut spans = vec![];
+        let mut lines = vec![];
+        let mut keep: Vec<(usize, String)> = vec![];
+        for (roots, lo, hi) in groups {
+            let Some((_, file, line)) = mapped.lines_in(lo, hi).next() else {
+                continue;
+            };
+            let Some(module) = files[file as usize] else {
+                continue;
+            };
+            let bytes = &graph.source[lo as usize..hi as usize];
+            if !self.seen.insert((module, line, bytes.to_vec())) {
+                continue;
             }
+            let at = text.len() as u32;
+            spans.push((lo, hi, at));
+            lines.extend(
+                mapped
+                    .lines_in(lo, hi)
+                    .map(|(start, f, l)| (at + (start - lo), files[f as usize], l)),
+            );
+            text.extend_from_slice(bytes);
+            text.push(b'\n');
+            let name = self.places.name(module).to_string();
+            keep.extend(roots.into_iter().map(|r| (r, name.clone())));
         }
-        opts.cancelled()?;
-        let places = Places::new(mapped, &root);
-        progress(Step::Building);
-        let graph = parsed
-            .ast
-            .build_graph(&parsed.source, templates::all())
-            .map_err(|e| e.to_string())?;
-        let module_of = |pos: u32| places.at(pos).map(|(path, _)| path.to_string());
-        let (mut g, source) = export::to_protocol_modules(
+        if keep.is_empty() {
+            return;
+        }
+        let id = FileId(self.sources.len() as u64 + 1);
+        let ingested = format!("{}.i", path.strip_suffix(".c").unwrap_or(path));
+        let source = SourceFile::new(id, ingested, String::from_utf8_lossy(&text).into_owned());
+        self.program.add(
             &graph,
             &parsed.ast,
-            &format!("{name}.i"),
-            name,
-            &module_of,
+            &source,
+            &Placement::spans(id, spans),
+            &keep,
         );
-        g.freeze().map_err(|v| {
-            let lines: Vec<_> = v.iter().take(8).map(ToString::to_string).collect();
-            format!("graph failed freeze checks:\n{}", lines.join("\n"))
-        })?;
-        return Ok(Opened {
-            snapshot: Snapshot::new(g, vec![source]),
-            units,
-            flags,
-            root,
-            places,
-        });
+        self.places.add(id, lines);
+        self.sources.push(source);
     }
 }
 
@@ -290,105 +334,38 @@ fn macro_name(flag: &str) -> &str {
     flag.get(2..).unwrap_or("").split('=').next().unwrap_or("")
 }
 
-/// The `-D`/`-U` state the flags leave each macro in (later flags win).
-fn defines(flags: &[String]) -> Vec<(&str, Option<&str>)> {
-    let mut out: Vec<(&str, Option<&str>)> = vec![];
-    for f in flags {
-        let value = if let Some(d) = f.strip_prefix("-D") {
-            Some(d.split_once('=').map_or("1", |(_, v)| v))
-        } else if f.starts_with("-U") {
-            None
-        } else {
-            continue;
-        };
-        let name = macro_name(f);
-        out.retain(|(n, _)| *n != name);
-        out.push((name, value));
-    }
-    out
-}
-
-/// One `#include` per file, preceded by the `#define`/`#undef` lines its own flags stand for and
-/// followed by the lines restoring the shared state.
-fn combined_input(flags: &[String], included: &[(&Path, &Unit)]) -> String {
-    let shared = defines(flags);
-    let set = |out: &mut String, name: &str, value: Option<&str>| {
-        out.push_str(&format!("#undef {name}\n"));
-        if let Some(v) = value {
-            out.push_str(&format!("#define {name} {v}\n"));
-        }
-    };
-    let quote = |p: &str| p.replace('\\', "\\\\").replace('"', "\\\"");
-    let mut out = String::new();
-    for (path, unit) in included {
-        let own = defines(&unit.flags);
-        for (name, value) in &own {
-            set(&mut out, name, *value);
-        }
-        for f in &unit.flags {
-            if let Some(h) = f.strip_prefix("-include") {
-                out.push_str(&format!("#include \"{}\"\n", quote(h)));
-            }
-        }
-        out.push_str(&format!(
-            "#include \"{}\"\n",
-            quote(&path.display().to_string())
-        ));
-        for (name, _) in &own {
-            let restore = shared.iter().find(|(n, _)| n == name).and_then(|(_, v)| *v);
-            set(&mut out, name, restore);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn per_file_flags_wrap_their_include() {
-        let flags: Vec<String> = ["-I/p", "-DNET", "-DMAX=128", "-DMAX=64"]
-            .map(String::from)
-            .to_vec();
-        let unit = |path: &str, f: &[&str]| Unit {
-            path: path.into(),
-            skipped: None,
-            flags: f.iter().map(|s| s.to_string()).collect(),
-        };
-        let (a, b) = (unit("a.c", &["-DXLEN=128", "-UNET"]), unit("b.c", &[]));
-        let text = combined_input(
-            &flags,
-            &[(Path::new("/p/a.c"), &a), (Path::new("/p/b.c"), &b)],
-        );
-        assert_eq!(
-            text,
-            "#undef XLEN\n#define XLEN 128\n#undef NET\n#include \"/p/a.c\"\n#undef XLEN\n#undef NET\n#define NET 1\n#include \"/p/b.c\"\n"
-        );
-        assert_eq!(defines(&flags), [("NET", Some("1")), ("MAX", Some("64"))]);
-    }
 
     #[test]
     fn a_cancelled_load_stops_between_files() {
         let dir = std::env::temp_dir().join(format!("argo-cancel-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..8 {
-            std::fs::write(dir.join(format!("f{i}.c")), format!("int f{i}(void) {{ return {i}; }}\n")).unwrap();
+            std::fs::write(
+                dir.join(format!("f{i}.c")),
+                format!("int f{i}(void) {{ return {i}; }}\n"),
+            )
+            .unwrap();
         }
         let opts = Options::default();
         opts.cancel.store(true, Ordering::Relaxed);
-        assert_eq!(open(&dir, "c", &opts, &|_| {}).err().as_deref(), Some(git::CANCELLED));
+        assert_eq!(
+            open(&dir, "c", &opts, &|_| {}).err().as_deref(),
+            Some(git::CANCELLED)
+        );
 
-        // Cancelled while checking: the files after it aren't read and nothing is combined.
+        // Cancelled while checking: the files after it aren't read and nothing is merged.
         let opts = Options::default();
-        let combined = AtomicBool::new(false);
+        let merged = AtomicBool::new(false);
         let r = open(&dir, "c", &opts, &|step| match step {
             Step::Checking { .. } => opts.cancel.store(true, Ordering::Relaxed),
-            Step::Combining { .. } => combined.store(true, Ordering::Relaxed),
+            Step::Merging { .. } => merged.store(true, Ordering::Relaxed),
             _ => {}
         });
         assert_eq!(r.err().as_deref(), Some(git::CANCELLED));
-        assert!(!combined.load(Ordering::Relaxed));
+        assert!(!merged.load(Ordering::Relaxed));
     }
 
     #[test]
