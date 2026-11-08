@@ -26,6 +26,18 @@ pub fn concentric(outer: f32, inset: f32, height: f32) -> f32 {
 }
 /// Below this zoom, pin labels are hidden: they would be unreadable noise.
 const LABEL_ZOOM: f32 = 0.55;
+/// Node titles' world size at rest.
+const TITLE_SIZE: f32 = 11.5;
+/// Zoomed out, node titles keep at least this screen size (truncating sooner inside their
+/// header), up to `TITLE_MAX` world points so they still fit the header's height.
+const TITLE_MIN_SCREEN: f32 = 9.5;
+const TITLE_MAX: f32 = 16.0;
+
+/// The world size of node titles at `zoom`: `TITLE_SIZE`, counter-scaled when zoomed out far
+/// enough that it would read smaller than `TITLE_MIN_SCREEN` on screen.
+fn title_size(zoom: f32) -> f32 {
+    (TITLE_MIN_SCREEN / zoom.max(1e-3)).clamp(TITLE_SIZE, TITLE_MAX)
+}
 
 /// How an item is emphasised on the canvas.
 #[derive(Clone, Copy)]
@@ -35,6 +47,8 @@ struct Look {
     /// Screen-size compensation for badges and avatars at low zoom.
     badge_scale: f32,
     labels: bool,
+    /// Node title size in world points (see [`title_size`]).
+    title: f32,
 }
 
 /// The canvas filling `w`×`h`, with the world under the camera.
@@ -50,6 +64,7 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
         hovered: s.hovered == Some(item) && s.selected != Some(item),
         badge_scale: (1.0 / s.cam.zoom).clamp(1.0, 2.2),
         labels: s.cam.zoom >= LABEL_ZOOM,
+        title: title_size(s.cam.zoom),
     };
 
     let mut world = vec![];
@@ -126,8 +141,7 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
     let collapse = group_button(p.frame_text.alpha(0.9), p.frame_text.alpha(0.16), false, look.badge_scale)
         .key(format!("collapse-group-{gi}"))
-        .on_press(move |s: &mut State| s.collapse_group(gi))
-        .help("Collapse to node");
+        .on_press(move |s: &mut State| s.collapse_group(gi));
     // Trailing controls sit in the frame's corner: equal top and right insets, concentric radii;
     // an evidence badge on that corner pushes the button clear of it.
     let pr = FRAME_CHIP_INSET + if f.evidence == Evidence::None { 0.0 } else { BADGE_CLEAR };
@@ -179,7 +193,9 @@ fn group_button(fg: Color, hover: Color, expand: bool, badge_scale: f32) -> El {
             fg,
         );
     }
+    // Named as the docked panel's button is.
     el().size(d, d).radius(5.0).hover(hover).cursor(Cursor::Pointer).scale(grow * badge_scale).child(canvas(sh).size(d, d))
+        .help(if expand { "Expand group" } else { "Collapse to node" })
 }
 
 fn socket_world(g: &Graph, pl: &crate::layout::Placed, i: usize, output: bool, idx: usize) -> [f32; 2] {
@@ -195,12 +211,21 @@ enum Curve {
     /// Out of `a`, down to `below`, back along it and up into `b` (a loop backedge or a wire
     /// into a wrapped row), its legs swinging `reach` beside the sockets.
     Routed { a: [f32; 2], b: [f32; 2], below: f32, reach: f32 },
+    /// Straight out of `a`, one S-bend whose vertical travel runs down the free gutter at `x`
+    /// (swinging `bend` either side of it), then straight into `b`: a forward wire that would
+    /// otherwise cut through the nodes between its ends.
+    Gutter { a: [f32; 2], b: [f32; 2], x: f32, bend: f32 },
 }
 
 impl Curve {
     fn path(self) -> Path {
         match self {
             Curve::Cubic([a, c1, c2, b]) => Path::new().move_to(a).cubic_to(c1, c2, b),
+            Curve::Gutter { a, b, x, bend } => Path::new()
+                .move_to(a)
+                .line_to([x - bend, a[1]])
+                .cubic_to([x, a[1]], [x, b[1]], [x + bend, b[1]])
+                .line_to(b),
             Curve::Routed { a, b, below, reach } => Path::new()
                 .move_to(a)
                 .cubic_to([a[0] + reach, a[1]], [a[0] + reach, below], [a[0], below])
@@ -218,8 +243,184 @@ impl Curve {
                 pts
             }
             Curve::Routed { a, b, below, reach } => back_points(a, b, below, reach),
+            Curve::Gutter { a, b, x, bend } => {
+                let mut pts = vec![a];
+                cubic_points([x - bend, a[1]], [x, a[1]], [x, b[1]], [x + bend, b[1]], &mut pts);
+                pts.push(b);
+                pts
+            }
         }
     }
+}
+
+/// Clearance a gutter-routed wire keeps from node bodies.
+const NODE_CLEAR: f32 = 6.0;
+/// Most a gutter S-bend swings either side of its vertical run.
+const GUTTER_BEND: f32 = 28.0;
+/// Spacing between wires sharing a gutter, so their vertical runs don't merge.
+const GUTTER_LANE: f32 = 8.0;
+/// Where a wire passes behind a node, this much of it beside the node's edge is masked in the
+/// background colour, so it reads as passing behind rather than plugging in there.
+const BEHIND_GAP: f32 = 8.0;
+/// Wires shorter than this get no direction arrow: on a short hop the pins already show which
+/// way it runs, and an arrow there reads as a dashed double line. A hop straight across one
+/// layout column gap (80) is short; one that also climbs or drops a row or so is not.
+const ARROW_MIN_ROUTE: f32 = 96.0;
+
+/// Wires sharing one gutter: per gutter (keyed by its left edge), the source socket and run x of
+/// each wire placed in it so far.
+type GutterLanes = std::collections::HashMap<i32, Vec<((usize, usize), f32)>>;
+
+/// The part of segment `p`–`q` inside `r` (`[x0, y0, x1, y1]`), as a `t` range along it;
+/// `None` if it misses or only touches an edge. Liang–Barsky clipping.
+fn clip(p: [f32; 2], q: [f32; 2], r: [f32; 4]) -> Option<(f32, f32)> {
+    let d = [q[0] - p[0], q[1] - p[1]];
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (pk, qk) in [(-d[0], p[0] - r[0]), (d[0], r[2] - p[0]), (-d[1], p[1] - r[1]), (d[1], r[3] - p[1])] {
+        if pk == 0.0 {
+            if qk <= 0.0 {
+                return None;
+            }
+        } else if pk < 0.0 {
+            t0 = t0.max(qk / pk);
+        } else {
+            t1 = t1.min(qk / pk);
+        }
+    }
+    (t0 < t1).then_some((t0, t1))
+}
+
+/// Does segment `p`–`q` pass through the inside of `r`?
+fn seg_hits(p: [f32; 2], q: [f32; 2], r: [f32; 4]) -> bool {
+    clip(p, q, r).is_some()
+}
+
+/// Does a polyline pass through any of `rects`?
+fn crosses(pts: &[[f32; 2]], rects: &[[f32; 4]]) -> bool {
+    pts.windows(2).any(|s| rects.iter().any(|&r| seg_hits(s[0], s[1], r)))
+}
+
+fn pad(r: [f32; 4], by: f32) -> [f32; 4] {
+    [r[0] - by, r[1] - by, r[2] + by, r[3] + by]
+}
+
+/// The x spans strictly between `a` and `b` where a vertical run from `a`'s height to `b`'s
+/// meets none of `rects` (kept `NODE_CLEAR` away), left to right.
+fn gutters(a: [f32; 2], b: [f32; 2], rects: &[[f32; 4]]) -> Vec<(f32, f32)> {
+    let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+    let mut blocked: Vec<(f32, f32)> = rects.iter().map(|&r| pad(r, NODE_CLEAR))
+        .filter(|r| r[1] < y1 && r[3] > y0 && r[2] > a[0] && r[0] < b[0])
+        .map(|r| (r[0], r[2]))
+        .collect();
+    blocked.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut free = vec![];
+    let mut x = a[0];
+    for (l, r) in blocked {
+        if l > x {
+            free.push((x, l.min(b[0])));
+        }
+        x = x.max(r);
+    }
+    if x < b[0] {
+        free.push((x, b[0]));
+    }
+    free.retain(|&(l, r)| r - l >= 2.0 * NODE_CLEAR);
+    free
+}
+
+/// A forward wire from `a` to `b` whose S-curve would cut through some of `others` (the nodes
+/// other than its own two): its vertical travel moved into a free gutter between columns, with
+/// both straight legs clear of every node too. Gutters nearest the middle are tried first; each
+/// wire in a gutter takes its own lane, except wires from one socket, which run together.
+/// `None` when no gutter clears everything (the caller then masks where it passes behind).
+fn gutter_route(a: [f32; 2], b: [f32; 2], from: (usize, usize), others: &[[f32; 4]], lanes: &mut GutterLanes) -> Option<Curve> {
+    if b[0] <= a[0] {
+        return None;
+    }
+    let mid = (a[0] + b[0]) / 2.0;
+    let mut free = gutters(a, b, others);
+    free.sort_by(|p, q| ((p.0 + p.1) / 2.0 - mid).abs().total_cmp(&((q.0 + q.1) / 2.0 - mid).abs()));
+    let legs_clear = |x0: f32, x1: f32, y: f32| others.iter().all(|&r| {
+        let r = pad(r, NODE_CLEAR / 2.0);
+        !(y > r[1] && y < r[3] && x1 > r[0] && x0 < r[2])
+    });
+    for (l, r) in free {
+        let key = l.round() as i32;
+        let used = lanes.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+        let x = match used.iter().find(|u| u.0 == from) {
+            Some(u) => u.1,
+            None => {
+                // 0, +1, -1, +2, -2 … lanes out from the gutter's middle.
+                let k = used.len();
+                let step = if k % 2 == 1 { (k / 2 + 1) as f32 } else { -((k / 2) as f32) };
+                ((l + r) / 2.0 + step * GUTTER_LANE).clamp(l + 4.0, r - 4.0)
+            }
+        };
+        let bend = GUTTER_BEND.min(x - l).min(r - x);
+        if !legs_clear(a[0], x - bend, a[1]) || !legs_clear(x + bend, b[0], b[1]) {
+            continue;
+        }
+        let entry = lanes.entry(key).or_default();
+        if !entry.iter().any(|u| u.0 == from) {
+            entry.push((from, x));
+        }
+        return Some(Curve::Gutter { a, b, x, bend });
+    }
+    None
+}
+
+/// Total length of a polyline.
+fn polyline_len(pts: &[[f32; 2]]) -> f32 {
+    pts.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum()
+}
+
+/// Whether a wire along `route` gets a mid-wire direction arrow (see [`ARROW_MIN_ROUTE`]).
+fn wants_arrow(route: &[[f32; 2]]) -> bool {
+    polyline_len(route) >= ARROW_MIN_ROUTE
+}
+
+/// Where a polyline enters and leaves the inside of `r`: (distance along it, entering?).
+fn rect_crossings(pts: &[[f32; 2]], r: [f32; 4]) -> Vec<(f32, bool)> {
+    let mut out = vec![];
+    let mut along = 0.0;
+    for s in pts.windows(2) {
+        let (p, q) = (s[0], s[1]);
+        let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+        if let Some((t0, t1)) = clip(p, q, r) {
+            // A clip starting or ending mid-segment is an edge; at a segment's end the polyline
+            // carries on inside.
+            if t0 > 0.0 {
+                out.push((along + len * t0, true));
+            }
+            if t1 < 1.0 {
+                out.push((along + len * t1, false));
+            }
+        }
+        along += len;
+    }
+    out
+}
+
+/// The part of a polyline between distances `s0` and `s1` along it.
+fn sub_polyline(pts: &[[f32; 2]], s0: f32, s1: f32) -> Vec<[f32; 2]> {
+    let mut out = vec![];
+    let mut along = 0.0;
+    for s in pts.windows(2) {
+        let (p, q) = (s[0], s[1]);
+        let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+        let at = |d: f32| {
+            let t = if len > 0.0 { ((d - along) / len).clamp(0.0, 1.0) } else { 0.0 };
+            [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]
+        };
+        if along + len >= s0 && along <= s1 {
+            if out.is_empty() {
+                out.push(at(s0));
+            }
+            out.push(at(s1.min(along + len)));
+        }
+        along += len;
+    }
+    out
 }
 
 fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
@@ -244,6 +445,17 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
     }).collect::<Vec<_>>());
     let mut backs = backs.into_iter();
     let mut gap_lanes = std::collections::HashMap::<usize, usize>::new();
+    // Node bodies as drawn (a collapsed group's stacked plates included), in canvas space.
+    let rects: Vec<[f32; 4]> = (0..g.nodes.len()).map(|i| {
+        let (x, y) = (pl.pos[i][0] + o[0], pl.pos[i][1] + o[1]);
+        let stack = if g.nodes[i].kind == Kind::Group { STACK_STEP * STACK_PLATES as f32 } else { 0.0 };
+        [x, y, x + pl.size[i][0] + stack, y + pl.size[i][1] + stack]
+    }).collect();
+    // The nodes a wire doesn't plug into: what it must not seem to plug into either.
+    let others = |w: &model::Wire| -> Vec<[f32; 4]> {
+        rects.iter().enumerate().filter(|&(j, _)| j != w.from.0 && j != w.to.0).map(|(_, &r)| r).collect()
+    };
+    let mut gutter_lanes = GutterLanes::new();
     let curves: Vec<Curve> = g.wires.iter().zip(&ends).map(|(w, &(a, b))| {
         if w.back {
             let (below, reach) = backs.next().expect("one lane per backedge");
@@ -261,10 +473,24 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
             return Curve::Routed { a, b, below, reach: BACK_REACH };
         }
         let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
-        Curve::Cubic([a, [a[0] + dx, a[1]], [b[0] - dx, b[1]], b])
+        let cubic = Curve::Cubic([a, [a[0] + dx, a[1]], [b[0] - dx, b[1]], b]);
+        // An S-curve that would cut through other nodes drops down a gutter instead.
+        let obstacles = others(w);
+        if crosses(&cubic.points(), &obstacles)
+            && let Some(c) = gutter_route(a, b, w.from, &obstacles, &mut gutter_lanes)
+        {
+            return c;
+        }
+        cubic
     }).collect();
     let routes: Vec<Vec<[f32; 2]>> = curves.iter().map(|c| c.points()).collect();
     let boxes: Vec<[f32; 4]> = routes.iter().map(|r| bbox(r)).collect();
+    // What shows behind a wire: the canvas, or an expanded frame's fill over it.
+    let frames: Vec<[f32; 4]> = pl.frames.iter().filter(|f| f[2] > 0.0).map(|f| [f[0] + o[0], f[1] + o[1], f[0] + f[2] + o[0], f[1] + f[3] + o[1]]).collect();
+    let framed = p.canvas.mix(p.frame_fill.alpha(1.0), p.frame_fill.a);
+    let backdrop = |pt: [f32; 2]| {
+        if frames.iter().any(|f| pt[0] > f[0] && pt[0] < f[2] && pt[1] > f[1] && pt[1] < f[3]) { framed } else { p.canvas }
+    };
 
     // Faded wires first, then data, exec on top.
     let mut order: Vec<usize> = (0..g.wires.len()).collect();
@@ -301,6 +527,21 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
                 s = s.stroke_path(&path, width + 2.0 * out, LineCap::Round, c);
             }
             s = s.stroke_path(&path, width, LineCap::Round, core);
+        }
+        // Where it still passes behind a node, mask a short stretch beside the node's edge.
+        let mask = width + 2.0 * under.map_or(0.0, |u| u.0) + 2.0;
+        for r in others(w) {
+            for (at, entering) in rect_crossings(&routes[i], r) {
+                let (s0, s1) = if entering { (at - BEHIND_GAP, at + 1.0) } else { (at - 1.0, at + BEHIND_GAP) };
+                let piece = sub_polyline(&routes[i], s0, s1);
+                if piece.len() > 1 {
+                    let c = backdrop(piece[if entering { 0 } else { piece.len() - 1 }]);
+                    s = s.stroke_with(piece, false, mask, LineCap::Butt, c);
+                }
+            }
+        }
+        if !wants_arrow(&routes[i]) {
+            continue;
         }
         // One direction arrow along the route, clear of other wires: its outline, then its core.
         // Wires sharing a socket run together there, so they don't push each other's arrows.
@@ -538,11 +779,11 @@ fn dashes(pts: &[[f32; 2]], on: f32, off: f32) -> Vec<Vec<[f32; 2]>> {
 }
 
 /// Headers that hold source code are set in monospace, so `&` and `&&`, `=` and `==` stay
-/// distinct; the function's own Input/Output keep the UI face.
-fn header_font(kind: Kind) -> TextStyle {
+/// distinct; the function's own Input/Output keep the UI face. `size`: see [`title_size`].
+fn header_font(kind: Kind, size: f32) -> TextStyle {
     match kind {
-        Kind::GroupIn | Kind::GroupOut => TextStyle::new(11.5, 650.0),
-        _ => TextStyle::new(11.5, 600.0).family(rune_ui::Family::Named("JetBrains Mono, DejaVu Sans Mono")),
+        Kind::GroupIn | Kind::GroupOut => TextStyle::new(size, 650.0),
+        _ => TextStyle::new(size, 600.0).family(rune_ui::Family::Named("JetBrains Mono, DejaVu Sans Mono")),
     }
 }
 
@@ -618,7 +859,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         let card = row().size(w, h).px(10.0).gap(7.0).items_center().fill(fill).radius(h / 2.0)
             .border(edge.0, edge.1)
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.0, 600.0)).color(fg.alpha(0.7)))
-            .child(text(n.title.clone()).font(TextStyle::new(11.5, 600.0)).color(fg).single_line())
+            .child(text(n.title.clone()).font(TextStyle::new(look.title, 600.0)).color(fg).single_line().truncate().grow(1.0).min_w(0.0))
             .child(socket(p, n.outs[0].ty, model::socket_local(n, w, true, 0)));
         return interact(decorate(p, emphasis(p, card, look), [w, h], h / 2.0, n.evidence, n.claim, look));
     }
@@ -638,7 +879,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     let mut header = row().h(model::HEADER).pl(10.0).pr(pr).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, bottom, bottom])
         .child(el().w(16.0).center()
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)).single_line()))
-        .child(text(n.title.clone()).font(header_font(n.kind)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
+        .child(text(n.title.clone()).font(header_font(n.kind, look.title)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
     if n.kind == Kind::Group {
         header = header.child(row().h(CHIP_H).px(5.0).radius(chip_r).fill(Color::BLACK.alpha(0.25)).items_center()
             .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE)));
@@ -649,8 +890,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     if expandable {
         header = header.child(group_button(Color::WHITE.alpha(0.95), Color::BLACK.alpha(0.25), true, look.badge_scale)
             .key(format!("expand-group-{i}"))
-            .on_press(move |s: &mut State| s.expand_node(i))
-            .help("Expand group"));
+            .on_press(move |s: &mut State| s.expand_node(i)));
     }
 
     let mut body = col().py(model::BODY_PAD);
@@ -668,11 +908,10 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     if !pinless {
         card = card.child(body);
     }
-    card = card
-        .shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
-    if n.kind == Kind::Group {
-        // A collapsed group reads as a stack of cards.
-        card = card.box_shadow(rune_ui::Shadow { x: 5.0, y: 5.0, blur: 0.0, spread: 0.0, color: p.node_border, inset: false });
+    let stacked = n.kind == Kind::Group;
+    // A stack casts one shadow, from its back plate.
+    if !stacked {
+        card = card.shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
     }
     for (pi, pin) in n.outs.iter().enumerate() {
         card = card.child(socket(p, pin.ty, model::socket_local(n, w, true, pi)));
@@ -680,8 +919,31 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     for (pi, pin) in n.ins.iter().enumerate() {
         card = card.child(socket(p, pin.ty, model::socket_local(n, w, false, pi)));
     }
-    interact(decorate(p, emphasis(p, card, look), [w, h], RADIUS, n.evidence, n.claim, look))
+    let card = decorate(p, emphasis(p, card, look), [w, h], RADIUS, n.evidence, n.claim, look);
+    if !stacked {
+        return interact(card);
+    }
+    // A collapsed group is a stack of cards, as in UE's collapsed graphs: plates step down and
+    // right behind its body, each a shade deeper, edged and topped in its header colour. The
+    // first step clears the hover/selection ring around the body.
+    let mut stack = el().size(w, h);
+    for k in (1..=STACK_PLATES).rev() {
+        let d = STACK_STEP * k as f32;
+        let t = k as f32 / (STACK_PLATES as f32 + 1.0);
+        let mut plate = el().size(w, h).absolute(d, d).radius(RADIUS)
+            .fill(p.node_body.mix(p.canvas, t * 0.6)).border(1.5, head.mix(p.canvas, 0.15 + 0.3 * t))
+            .child(el().size(w, model::HEADER).corners([RADIUS, RADIUS, 0.0, 0.0]).fill(head.mix(p.canvas, 0.25 + 0.25 * t)));
+        if k == STACK_PLATES {
+            plate = plate.shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
+        }
+        stack = stack.child(plate);
+    }
+    interact(stack.child(card.absolute(0.0, 0.0)))
 }
+
+/// A collapsed group's back plates: how many, and how far each steps down and right.
+const STACK_PLATES: usize = 2;
+const STACK_STEP: f32 = 6.0;
 
 /// Evidence badge (top-right), worker avatar (top-left) and, for active work, a dashed ring in
 /// the worker's colour. Badges keep a readable screen size when zoomed out.
@@ -857,6 +1119,79 @@ mod tests {
             let data = area(arrow(([0.0, 0.0], [1.0, 0.0]), 1.8 + extra, false));
             assert!((1.3..=1.7).contains(&(exec / data)), "exec:data {}", exec / data);
         }
+    }
+
+    #[test]
+    fn a_wire_past_a_middle_column_node_drops_down_the_gutter() {
+        // Three columns, 80 apart: a source at the top of the first, a target at the bottom of
+        // the third, and a node in the middle column between their rows.
+        let a = [100.0, 40.0];
+        let b = [360.0, 300.0];
+        let middle = [180.0, 100.0, 280.0, 220.0];
+        let (dx, rects) = ((b[0] - a[0]) * 0.5, [middle]);
+        // The plain S-curve cuts through it.
+        assert!(crosses(&Curve::Cubic([a, [a[0] + dx, a[1]], [b[0] - dx, b[1]], b]).points(), &rects));
+        let route = gutter_route(a, b, (0, 0), &rects, &mut GutterLanes::new()).expect("a free gutter");
+        let pts = route.points();
+        assert!(!crosses(&pts, &[pad(middle, NODE_CLEAR - 0.5)]), "{pts:?}");
+        assert!(close(pts[0], a) && close(*pts.last().unwrap(), b));
+        // Its vertical travel sits in a gutter: left or right of the middle column.
+        let Curve::Gutter { x, .. } = route else { panic!("gutter route") };
+        assert!(x < middle[0] - NODE_CLEAR || x > middle[2] + NODE_CLEAR, "{x}");
+
+        // A second wire in the same gutter takes its own lane; one from the same socket shares.
+        let mut lanes = GutterLanes::new();
+        let run = |c: Curve| match c {
+            Curve::Gutter { x, .. } => x,
+            _ => panic!("gutter route"),
+        };
+        let x0 = run(gutter_route(a, b, (0, 0), &rects, &mut lanes).unwrap());
+        let x1 = run(gutter_route([a[0], 50.0], [b[0], 310.0], (1, 0), &rects, &mut lanes).unwrap());
+        let x2 = run(gutter_route(a, [b[0], 320.0], (0, 0), &rects, &mut lanes).unwrap());
+        assert!((x0 - x1).abs() >= GUTTER_LANE - 1e-3 && x2 == x0, "{x0} {x1} {x2}");
+
+        // With the gutters walled in too, there is no clear route.
+        let walls = [middle, [120.0, 0.0, 180.0, 400.0], [280.0, 0.0, 340.0, 400.0]];
+        assert!(gutter_route(a, b, (0, 0), &walls, &mut GutterLanes::new()).is_none());
+    }
+
+    #[test]
+    fn a_wire_behind_a_node_is_masked_where_it_enters_and_leaves() {
+        let line = [[0.0, 50.0], [200.0, 50.0]];
+        let hits = rect_crossings(&line, [80.0, 0.0, 120.0, 100.0]);
+        assert_eq!(hits.len(), 2);
+        assert!((hits[0].0 - 80.0).abs() < 0.01 && hits[0].1, "{hits:?}");
+        assert!((hits[1].0 - 120.0).abs() < 0.01 && !hits[1].1, "{hits:?}");
+        let piece = sub_polyline(&line, hits[0].0 - BEHIND_GAP, hits[0].0 + 1.0);
+        assert!(close(piece[0], [80.0 - BEHIND_GAP, 50.0]) && close(*piece.last().unwrap(), [81.0, 50.0]), "{piece:?}");
+        // A wire that only touches an edge neither crosses nor gets masked.
+        assert!(rect_crossings(&[[0.0, 0.0], [200.0, 0.0]], [80.0, 0.0, 120.0, 100.0]).is_empty());
+        assert!(!crosses(&[[0.0, 0.0], [200.0, 0.0]], &[[80.0, 0.0, 120.0, 100.0]]));
+    }
+
+    #[test]
+    fn short_hops_get_no_direction_arrow() {
+        // Adjacent nodes: `start → run` straight across one 80-point column gap, or with a
+        // small step.
+        for drop in [0.0, 12.0] {
+            let hop = Curve::Cubic([[0.0, 0.0], [40.0, 0.0], [40.0, drop], [80.0, drop]]).points();
+            assert!(!wants_arrow(&hop), "{drop}");
+        }
+        let long = Curve::Cubic([[0.0, 0.0], [100.0, 0.0], [100.0, 120.0], [200.0, 120.0]]).points();
+        assert!(wants_arrow(&long));
+    }
+
+    #[test]
+    fn zoomed_out_titles_keep_a_readable_screen_size() {
+        assert_eq!(title_size(1.0), TITLE_SIZE);
+        assert_eq!(title_size(0.9), TITLE_SIZE);
+        // At the fit floor the title is counter-scaled to the minimum on screen.
+        for zoom in [0.72, 0.8] {
+            assert!((title_size(zoom) * zoom - TITLE_MIN_SCREEN).abs() < 1e-3, "{zoom}");
+        }
+        // Far out it stops growing, so it still fits its header.
+        assert_eq!(title_size(0.2), TITLE_MAX);
+        const { assert!(TITLE_MAX < model::HEADER - 8.0) };
     }
 
     #[test]

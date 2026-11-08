@@ -58,14 +58,14 @@ impl Pal {
     /// Blender-style full header fill per node family.
     pub fn header(&self, c: Category) -> Color {
         let (dark, light) = match c {
-            Category::Interface => ("#1d6b5b", "#2a8a74"),
+            Category::Interface => ("#1d6b5b", "#26816c"),
             // Magenta, so red stays reserved for rejected/error state.
             Category::Control => ("#86377b", "#a54c98"),
             Category::Function => ("#2a5d82", "#3a75a3"),
             Category::Expression => ("#474c99", "#5a60b4"),
             Category::Variable => ("#6b5326", "#8f6e2f"),
             Category::Statement => ("#4a5160", "#5f6878"),
-            Category::Type => ("#56622a", "#6e7d35"),
+            Category::Type => ("#56622a", "#6b7a33"),
         };
         h(if self.dark { dark } else { light })
     }
@@ -130,11 +130,12 @@ fn dark_pal() -> Pal {
         panel_border: h("#38383e"),
         text: h("#e4e4e7"),
         muted: h("#aeb4be"),
-        faint: h("#7a7f88"),
+        faint: h("#888d96"),
         accent: h("#3b6fd9"),
         code_bg: h("#1c1c1f"),
         shadow: Color::BLACK.alpha(0.5),
-        exec: h("#e8e8e8"),
+        // About 75 % of white's lightness, so exec reads first without drowning the data wires.
+        exec: h("#b8b8bc"),
         exec_casing: h("#0d0d0f"),
         wire_dim: h("#18181a"),
         u32_: h("#3fb6a2"),
@@ -196,9 +197,16 @@ mod tests {
             // White primary-button labels on the accent.
             assert!(contrast(Color::WHITE, p.accent) >= 4.5, "white/accent {}", contrast(Color::WHITE, p.accent));
         }
-        // Light-mode faint text on panels and on the canvas.
-        assert!(contrast(light.faint, light.panel) >= 4.5, "faint/panel {}", contrast(light.faint, light.panel));
-        assert!(contrast(light.faint, light.canvas) >= 4.5, "faint/canvas {}", contrast(light.faint, light.canvas));
+        // Faint text on panels and on the canvas, in both modes.
+        for (mode, p) in [("light", light), ("dark", dark)] {
+            assert!(contrast(p.faint, p.panel) >= 4.5, "{mode} faint/panel {}", contrast(p.faint, p.panel));
+            assert!(contrast(p.faint, p.canvas) >= 4.5, "{mode} faint/canvas {}", contrast(p.faint, p.canvas));
+            // White header titles on every node family's header.
+            for c in [Category::Interface, Category::Control, Category::Function, Category::Expression, Category::Variable, Category::Statement, Category::Type] {
+                let r = contrast(Color::WHITE, p.header(c));
+                assert!(r >= 4.5, "{mode} white on {c:?} header {r}");
+            }
+        }
         // The darker dark-mode accent still marks a selection on the canvas (3:1, non-text).
         assert!(contrast(dark.accent, dark.canvas) >= 3.0, "accent/canvas {}", contrast(dark.accent, dark.canvas));
     }
