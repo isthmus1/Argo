@@ -4,6 +4,8 @@ use std::error::Error;
 use std::future::Future;
 use std::time::Duration;
 
+use crate::proxy::Proxy;
+
 /// Why a completion gave no usable reply. The split decides whether the chunk pays for it: a
 /// misconfigured or unreachable endpoint must not exhaust every chunk's attempts and mark the
 /// whole repository `Failed` (terminal) within seconds.
@@ -26,37 +28,77 @@ pub trait Model {
     ) -> impl Future<Output = Result<String, ModelError>>;
 }
 
-/// The environment iterator's client reads.
+/// The environment iterator's client reads in `--direct` mode.
 const ENV: [&str; 2] = ["OPENAI_API_KEY", "OPENAI_BASE_URL"];
 
-/// Nemotron through iterator's OpenAI-compatible client (`OPENAI_API_KEY`, `OPENAI_BASE_URL`).
+/// Nemotron through iterator's OpenAI-compatible client.
 pub struct Nemotron {
     /// A hung request would hold the claim forever while the heartbeat keeps its lease alive.
     /// Running out counts as an attempt: it is bounded, so it cannot fail chunks in a burst.
     pub timeout: Duration,
+    pub access: Access,
+}
+
+/// How the worker reaches the model.
+pub enum Access {
+    /// The provider itself, with `OPENAI_API_KEY` and `OPENAI_BASE_URL` from the environment.
+    Direct,
+    /// `argo-server`'s model proxy, with the key it minted for this worker.
+    Proxy(Proxy),
 }
 
 impl Nemotron {
-    /// Whether the endpoint is configured, checked before claiming anything.
+    /// Whether the direct endpoint is configured, checked before claiming anything.
     pub fn configured() -> Result<(), String> {
         match ENV.into_iter().find(|var| std::env::var(var).is_err()) {
             Some(var) => Err(format!("{var} is not set")),
             None => Ok(()),
         }
     }
+
+    async fn ask(&self, model: &str, prompt: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+        match &self.access {
+            Access::Direct => iterator::nemo::complete(model, prompt).await,
+            Access::Proxy(p) => iterator::nemo::complete_at(p.url(), &p.key(), model, prompt).await,
+        }
+    }
 }
 
 impl Model for Nemotron {
     async fn complete(&self, model: &str, prompt: &str) -> Result<String, ModelError> {
-        Nemotron::configured().map_err(ModelError::Unavailable)?;
-        match tokio::time::timeout(self.timeout, iterator::nemo::complete(model, prompt)).await {
-            Ok(reply) => reply.map_err(|e| classify(&*e)),
-            Err(_) => Err(ModelError::Reply(format!(
-                "model gave no reply within {:?}",
-                self.timeout
-            ))),
+        if let Access::Direct = self.access {
+            Nemotron::configured().map_err(ModelError::Unavailable)?;
+        }
+        let e = match tokio::time::timeout(self.timeout, self.ask(model, prompt)).await {
+            Ok(Ok(reply)) => return Ok(reply),
+            Ok(Err(e)) => e,
+            Err(_) => {
+                return Err(ModelError::Reply(format!(
+                    "model gave no reply within {:?}",
+                    self.timeout
+                )));
+            }
+        };
+        match (&self.access, status(&*e)) {
+            // The proxy forgot this worker's key (the server restarted): attach again, then let
+            // the outage backoff retry with the new key.
+            (Access::Proxy(p), Some(401)) => {
+                Err(ModelError::Unavailable(match p.reattach().await {
+                    Ok(name) => format!(
+                        "the model proxy refused this worker's key; attached again as {name}"
+                    ),
+                    Err(why) => format!("the model proxy refused this worker's key; {why}"),
+                }))
+            }
+            _ => Err(classify(&*e)),
         }
     }
+}
+
+/// The HTTP status of a failed request, if it got that far.
+fn status(e: &(dyn Error + Send + Sync + 'static)) -> Option<u16> {
+    let status = e.downcast_ref::<reqwest::Error>()?.status()?;
+    Some(status.as_u16())
 }
 
 /// HTTP 400, 413 and 422 reject this request (too long, malformed for the model); every other
@@ -72,3 +114,6 @@ fn classify(e: &(dyn Error + Send + Sync + 'static)) -> ModelError {
         Some(_) => ModelError::Unavailable(why),
     }
 }
+
+#[cfg(test)]
+mod tests;

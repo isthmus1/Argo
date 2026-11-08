@@ -83,12 +83,15 @@ terminal per process:
 ```sh
 # Server: starts SpacetimeDB on 127.0.0.1:3100, publishes argo-db, ingests the repository's C
 # chunks, and stops the database on Ctrl-C. `--fresh` replaces a different ingested commit.
+# With the provider's endpoint and key set it also runs the model proxy on port 3101.
+export OPENAI_BASE_URL=https://integrate.api.nvidia.com OPENAI_API_KEY=...
 cargo run --release -p argo-server -- ~/src/project            # or a git URL[#ref]; -D/-I flags
 
-# Workers (any number): each clones the recorded commit, claims chunks and submits Rust.
-export OPENAI_BASE_URL=https://integrate.api.nvidia.com OPENAI_API_KEY=... OPENAI_MODEL=...
-cargo run --release -p argo-worker -- --db ws://127.0.0.1:3100 --module argo \
-  [--max-attempts 3] [--escalation-model M --escalate-after 2] [--once]
+# Workers (any number): each clones the recorded commit, claims chunks and submits Rust. No
+# provider key: each attaches to the server's model proxy (the --db host, port + 1) for a key
+# of its own. `--direct` uses OPENAI_API_KEY/OPENAI_BASE_URL instead (no proxy, e.g. --server).
+cargo run --release -p argo-worker -- --db ws://127.0.0.1:3100 --module argo --model <model> \
+  [--jobs N] [--max-attempts 3] [--escalation-model M --escalate-after 2] [--once]
 
 # GUI: watches the rows live, read-only; it never clones or parses the repository. The database
 # is its only data source: without --db (or ARGO_DB) it prints its usage and exits.
@@ -102,6 +105,14 @@ way: they serve a small sample project (`scripts/sample-db.sh`) through `argo-se
 port, with its data under `target/`.
 
 `OPENAI_BASE_URL` is the host without `/v1`; the client appends `/v1/chat/completions`.
+
+**Model proxy.** `argo-server` holds the only provider key. A worker `POST`s `/attach` to the proxy
+and gets a key minted for it alone, kept in memory, never in its environment. It sends its
+completions to the proxy, which checks the key, forwards them with the real key, and appends
+one line per attach and per request to `usage.log` in the data dir. Each line carries that
+worker's and the overall request/token totals. Worker keys die with the server; a worker whose
+key is refused attaches again. Attaching is open to anyone who can reach the port, like the
+database itself. `--proxy-port` moves it; it is off (with a message) when either variable is unset.
 Candidates are submitted as *unvalidated* until the compile/link/C-test `Validator` lands.
 
 ## Parser and graph prototype

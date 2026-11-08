@@ -21,6 +21,7 @@
 - **Worker pool:** `--jobs N` runs N workers in one process, each translating one row at a time. Starting more processes adds more workers.
 - **Compile check:** each Rust reply is compiled with `rustc` before it's saved. If it fails, the compiler errors go into the next prompt, up to `--max-attempts` (default 3), then the row is marked `Failed`.
 - Rust that compiles is saved as `Unvalidated`, because it isn't linked into the C program or tested yet.
+- **Model proxy:** only `argo-server` holds the Nemotron key. Each worker attaches to the server's proxy (port 3101) and gets its own key; the proxy forwards its requests with the real key and logs requests and tokens per worker and overall to `usage.log` in the data dir.
 
 ## Compile helpers (`argo/src/comp`)
 - `comp::compiles(rust)`: compiles one Rust snippet on its own.
@@ -44,12 +45,17 @@ are in `target/release/`.
 Add `--fresh` to replace a different repository already in the database. The local database
 keeps its data in `~/.local/state/argo-server/3100`.
 
+Give the server the Nemotron endpoint and key (`OPENAI_BASE_URL=... OPENAI_API_KEY=...`) and it
+also runs the model proxy for workers on port 3101 (`--proxy-port`), logging usage to
+`usage.log` in the data dir.
+
 **2. Workers: translate rows with Nemotron**
 ```sh
-OPENAI_API_KEY=... OPENAI_BASE_URL=... ./target/release/argo-worker \
-  --db ws://127.0.0.1:3100 --module argo --model <nemotron-model> --jobs 20
+./target/release/argo-worker --db ws://127.0.0.1:3100 --module argo --model <nemotron-model> --jobs 20
 ```
-Needs `rustc` on the machine. Start more processes to add workers.
+No API key needed: workers use the server's model proxy (the `--db` host, port + 1; `--proxy URL`
+to change it). `--direct` with `OPENAI_API_KEY`/`OPENAI_BASE_URL` skips the proxy, for a database
+set up with `--server`. Needs `rustc` on the machine. Start more processes to add workers.
 
 **3. UI: watch the database live**
 ```sh

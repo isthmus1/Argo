@@ -42,6 +42,17 @@ pub async fn complete(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let api_key = std::env::var("OPENAI_API_KEY").map_err(|e| format!("OPENAI_API_KEY: {e}"))?;
     let base_url = std::env::var("OPENAI_BASE_URL").map_err(|e| format!("OPENAI_BASE_URL: {e}"))?;
+    complete_at(&base_url, &api_key, model, prompt).await
+}
+
+/// [`complete`] against an explicit endpoint and key: `argo-server`'s model proxy and the
+/// per-worker key it minted, so the worker's environment holds no provider key at all.
+pub async fn complete_at(
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,

@@ -17,6 +17,8 @@ clap = { workspace = true, features = ["env"] }
 # Only to tell an unavailable endpoint from a rejected request in iterator's errors; the
 # version iterator uses.
 reqwest = { version = "0.13.5", default-features = false }
+# Attaching to argo-server's model proxy (`proxy`): the attach request and its reply.
+serde_json.workspace = true
 spacetimedb-sdk.workspace = true
 tokio.workspace = true
 

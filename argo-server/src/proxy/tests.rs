@@ -1,0 +1,164 @@
+//! The proxy end to end against a fake provider: attach, forward with the provider key, refuse
+//! unknown keys, and log usage per worker and overall without ever logging a key.
+
+use std::convert::Infallible;
+use std::net::SocketAddr;
+
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::body::Incoming;
+use hyper::header::AUTHORIZATION;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use serde_json::{Value, json};
+
+use super::{Proxy, Upstream};
+
+const REAL_KEY: &str = "nvapi-real-provider-key";
+
+/// A provider that answers only `REAL_KEY`, with fixed usage.
+async fn provider() -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let auth = req.headers().get(AUTHORIZATION).cloned();
+                let ok = auth.is_some_and(|v| v == format!("Bearer {REAL_KEY}").as_str());
+                let (status, body) = if ok {
+                    let usage =
+                        json!({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120});
+                    let reply =
+                        json!({"choices": [{"message": {"content": "fn f() {}"}}], "usage": usage});
+                    (StatusCode::OK, reply.to_string())
+                } else {
+                    (StatusCode::UNAUTHORIZED, "{}".into())
+                };
+                let mut reply = Response::new(Full::new(Bytes::from(body)));
+                *reply.status_mut() = status;
+                Ok::<_, Infallible>(reply)
+            });
+            tokio::spawn(http1::Builder::new().serve_connection(TokioIo::new(stream), service));
+        }
+    });
+    addr
+}
+
+async fn proxy(provider: SocketAddr, key: &str, log: &std::path::Path) -> String {
+    let upstream = Upstream::new(&format!("http://{provider}/"), key).unwrap();
+    let proxy = Proxy::bind("127.0.0.1:0".parse().unwrap(), upstream, log).unwrap();
+    let url = format!("http://{}", proxy.addr());
+    tokio::spawn(proxy.serve());
+    url
+}
+
+async fn post(url: &str, key: Option<&str>, body: Value) -> (u16, Value) {
+    let mut req = reqwest::Client::new().post(url).body(body.to_string());
+    if let Some(key) = key {
+        req = req.bearer_auth(key);
+    }
+    let reply = req.send().await.unwrap();
+    let status = reply.status().as_u16();
+    (
+        status,
+        serde_json::from_slice(&reply.bytes().await.unwrap()).unwrap(),
+    )
+}
+
+fn completion() -> Value {
+    json!({"model": "nemotron-x", "messages": [{"role": "user", "content": "hi"}]})
+}
+
+#[tokio::test]
+async fn workers_attach_and_complete_through_the_provider_key() {
+    let dir = crate::scratch::dir("proxy");
+    let log = dir.join("usage.log");
+    let url = proxy(provider().await, REAL_KEY, &log).await;
+    let completions = format!("{url}/v1/chat/completions");
+
+    assert_eq!(post(&completions, None, completion()).await.0, 401);
+    assert_eq!(
+        post(&completions, Some("argo-made-up"), completion())
+            .await
+            .0,
+        401
+    );
+    // The provider key itself is no worker key.
+    assert_eq!(
+        post(&completions, Some(REAL_KEY), completion()).await.0,
+        401
+    );
+
+    let label = json!({"host": "box\nforged line", "job": 0, "identity": "c200ab"});
+    let (status, attached) = post(&format!("{url}/attach"), None, label).await;
+    assert_eq!(status, 200);
+    assert_eq!(attached["worker"], "w1");
+    let key = attached["key"].as_str().unwrap().to_string();
+    let (_, other) = post(&format!("{url}/attach"), None, json!({})).await;
+    let other = other["key"].as_str().unwrap().to_string();
+
+    let (status, reply) = post(&completions, Some(&key), completion()).await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["choices"][0]["message"]["content"], "fn f() {}");
+    post(&completions, Some(&key), completion()).await;
+    assert_eq!(post(&completions, Some(&other), completion()).await.0, 200);
+
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        text.contains("attach w1 host=boxforgedline job=0 identity=c200ab"),
+        "{text}"
+    );
+    assert!(text.contains("attach w2 unlabelled"), "{text}");
+    assert!(
+        text.contains("w1 model=nemotron-x status=200 ")
+            && text.contains("tokens=100+20=120 | w1: 2 requests (0 failed), tokens 200+40=240"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| all: 3 requests (0 failed), tokens 300+60=360"),
+        "{text}"
+    );
+    assert_eq!(text.lines().count(), 6, "{text}");
+    assert!(!text.contains(&key) && !text.contains(REAL_KEY), "{text}");
+}
+
+#[tokio::test]
+async fn a_refused_provider_key_is_a_gateway_error_not_a_dead_worker_key() {
+    let dir = crate::scratch::dir("proxy-refused");
+    let log = dir.join("usage.log");
+    let url = proxy(provider().await, "wrong-provider-key", &log).await;
+    let (_, attached) = post(&format!("{url}/attach"), None, json!({"host": "box"})).await;
+    let key = attached["key"].as_str().unwrap();
+    let (status, reply) = post(
+        &format!("{url}/v1/chat/completions"),
+        Some(key),
+        completion(),
+    )
+    .await;
+    assert_eq!(status, 502, "{reply}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("w1 model=nemotron-x status=401 "), "{text}");
+    assert!(
+        text.contains("tokens=? | w1: 1 requests (1 failed)"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn an_unreachable_provider_is_a_gateway_error() {
+    let dir = crate::scratch::dir("proxy-down");
+    let closed = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let url = proxy(closed, REAL_KEY, &dir.join("usage.log")).await;
+    let (_, attached) = post(&format!("{url}/attach"), None, json!({})).await;
+    let key = attached["key"].as_str().unwrap();
+    let completions = format!("{url}/v1/chat/completions");
+    assert_eq!(post(&completions, Some(key), completion()).await.0, 502);
+    let (status, _) = post(&format!("{url}/v1/models"), Some(key), json!({})).await;
+    assert_eq!(status, 404, "only chat completions are forwarded");
+}

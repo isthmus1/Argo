@@ -39,12 +39,13 @@ impl Endpoint {
     }
 }
 
-/// The URI to give workers and the GUI for a host listening on `listen:port`.
-pub fn advertised(listen: IpAddr, port: u16) -> String {
+/// The URI to give workers and the GUI for a service listening on `listen:port`: the database
+/// (`ws`) or the model proxy (`http`).
+pub fn advertised(scheme: &str, listen: IpAddr, port: u16) -> String {
     if listen.is_unspecified() {
-        format!("ws://<this machine's address>:{port}")
+        format!("{scheme}://<this machine's address>:{port}")
     } else {
-        format!("ws://{}", std::net::SocketAddr::new(listen, port))
+        format!("{scheme}://{}", std::net::SocketAddr::new(listen, port))
     }
 }
 
@@ -69,13 +70,16 @@ mod tests {
     #[test]
     fn advertised_uris() {
         assert_eq!(
-            advertised("0.0.0.0".parse().unwrap(), 3100),
+            advertised("ws", "0.0.0.0".parse().unwrap(), 3100),
             "ws://<this machine's address>:3100"
         );
         assert_eq!(
-            advertised("127.0.0.1".parse().unwrap(), 3100),
-            "ws://127.0.0.1:3100"
+            advertised("http", "127.0.0.1".parse().unwrap(), 3100),
+            "http://127.0.0.1:3100"
         );
-        assert_eq!(advertised("::1".parse().unwrap(), 3100), "ws://[::1]:3100");
+        assert_eq!(
+            advertised("ws", "::1".parse().unwrap(), 3100),
+            "ws://[::1]:3100"
+        );
     }
 }

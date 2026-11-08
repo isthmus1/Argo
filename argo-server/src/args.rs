@@ -28,6 +28,12 @@ pub struct Args {
     /// machines; put it behind a TLS proxy before exposing it to a network you don't trust.
     #[arg(long, default_value = "127.0.0.1", conflicts_with = "server")]
     pub listen: std::net::IpAddr,
+    /// Port for the model proxy on the `--listen` address (default: `--port` + 1, where workers
+    /// look for it). Workers attach there for a key of their own; it forwards their completions to
+    /// `OPENAI_BASE_URL` with this machine's `OPENAI_API_KEY`, so workers hold neither, and logs
+    /// usage per worker to `usage.log` in the data dir. Off when either variable is unset.
+    #[arg(long, conflicts_with = "server")]
+    pub proxy_port: Option<u16>,
     /// SpacetimeDB data directory, kept across runs so a restart resumes instead of re-ingesting;
     /// it also holds a full checkout of the repository, which is parsed. Must be outside the
     /// repository (default: `$XDG_STATE_HOME/argo-server/<port>`, `~/.local/state/...` without
@@ -94,6 +100,13 @@ impl Args {
             .unwrap_or_else(|| state_home().join("argo-server").join(self.port.to_string()))
     }
 
+    /// The model proxy's port: `--proxy-port`, else the database's port + 1.
+    pub fn proxy_port(&self) -> Result<u16, String> {
+        self.proxy_port
+            .or_else(|| self.port.checked_add(1))
+            .ok_or_else(|| format!("--port {}: choose a --proxy-port", self.port))
+    }
+
     /// Where a commit is checked out to be parsed, reused across runs.
     pub fn checkout_dir(&self) -> PathBuf {
         self.data_dir().join("checkout")
@@ -155,7 +168,10 @@ mod tests {
     fn defaults() {
         let a = parse(&["https://example.com/r.git"]);
         assert_eq!((a.port, a.module.as_str(), a.fresh), (3100, "argo", false));
-        assert_eq!((a.server.as_deref(), a.listen), (None, "127.0.0.1".parse().unwrap()));
+        assert_eq!(
+            (a.server.as_deref(), a.listen),
+            (None, "127.0.0.1".parse().unwrap())
+        );
         assert!(!a.delete_data && !a.allow_dirty);
         assert!(
             a.module_path.join("Cargo.toml").is_file(),
@@ -166,6 +182,22 @@ mod tests {
         assert!(a.flags().is_empty());
         assert!(!a.loader, "hidden");
         assert_eq!(a.checkout_dir(), a.data_dir().join("checkout"));
+        assert_eq!(a.proxy_port(), Ok(3101));
+        let p = parse(&["r", "--port", "4000", "--proxy-port", "5000"]);
+        assert_eq!(p.proxy_port(), Ok(5000));
+        assert!(parse(&["r", "--port", "65535"]).proxy_port().is_err());
+        let remote = [
+            "argo-server",
+            "r",
+            "--server",
+            "maincloud",
+            "--proxy-port",
+            "1",
+        ];
+        assert!(
+            Args::try_parse_from(remote).is_err(),
+            "no proxy without a local host"
+        );
     }
 
     #[test]

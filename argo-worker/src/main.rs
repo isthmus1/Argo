@@ -10,6 +10,11 @@
 //! `--jobs N` runs N such workers side by side, each claiming one chunk at a time; together they
 //! drain the open chunks like a pool. Each has its own connection (so its own identity and
 //! claims) and its own clone (`--workdir DIR` becomes `DIR/0`, `DIR/1`, ...).
+//!
+//! The model is reached through `argo-server`'s model proxy (beside the database, port + 1, or
+//! `--proxy URL`): each worker attaches for a key of its own, so no provider key is needed here.
+//! `--direct` talks to the provider with `OPENAI_API_KEY` and `OPENAI_BASE_URL` instead, for a
+//! database without a proxy (`argo-server --server ...`).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,7 +26,8 @@ use clap::Parser;
 use argo_worker::attempt::{Budget, Escalation};
 use argo_worker::checkout::Checkout;
 use argo_worker::db::Db;
-use argo_worker::model::Nemotron;
+use argo_worker::model::{Access, Nemotron};
+use argo_worker::proxy::{self, Proxy};
 use argo_worker::validate::CompileCheck;
 use argo_worker::work::Worker;
 use argo_worker::workdir;
@@ -59,6 +65,12 @@ struct Args {
     /// with its own database connection and clone. Run more processes to add workers later.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     jobs: u32,
+    /// `argo-server`'s model proxy (default: the `--db` host at its port + 1).
+    #[arg(long, value_name = "URL")]
+    proxy: Option<String>,
+    /// Reach the provider directly with `OPENAI_API_KEY` and `OPENAI_BASE_URL`, not the proxy.
+    #[arg(long, conflicts_with = "proxy")]
+    direct: bool,
 }
 
 /// The module rejects a longer model name in `submit_rust`; refuse it before any work is done.
@@ -89,7 +101,14 @@ async fn main() -> ExitCode {
 
 async fn run(args: Args) -> Result<(), String> {
     // A worker that cannot reach a model, or compile what it returns, must not claim anything.
-    Nemotron::configured()?;
+    let proxy_url = match (&args.proxy, args.direct) {
+        (_, true) => {
+            Nemotron::configured()?;
+            None
+        }
+        (Some(url), false) => Some(url.clone()),
+        (None, false) => Some(proxy::beside(&args.db)?),
+    };
     CompileCheck::available()?;
     if args.escalation_model.is_some() && args.escalate_after >= args.max_attempts {
         return Err(format!(
@@ -119,8 +138,16 @@ async fn run(args: Args) -> Result<(), String> {
             None => workdir::slot(&args.module)?,
         };
         let db = Db::connect(&args.db, &args.module).await?;
+        let access = match &proxy_url {
+            Some(url) => Access::Proxy(Proxy::attach(url, job, &db.me.to_hex()).await?),
+            None => Access::Direct,
+        };
+        let model = match &access {
+            Access::Proxy(p) => format!("model proxy {} as {}", p.url(), p.name()),
+            Access::Direct => "the provider directly".into(),
+        };
         eprintln!(
-            "argo-worker: worker {job} connected as {} (clone in {})",
+            "argo-worker: worker {job} connected as {} (clone in {}; {model})",
             db.me.to_hex(),
             workdir.dir.display()
         );
@@ -128,6 +155,7 @@ async fn run(args: Args) -> Result<(), String> {
             db,
             model: Nemotron {
                 timeout: MODEL_TIMEOUT,
+                access,
             },
             validator: CompileCheck,
             budget: budget.clone(),
