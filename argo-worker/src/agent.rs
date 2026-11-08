@@ -5,9 +5,8 @@
 //! in the same conversation, so it always sees its own earlier code and every earlier failure.
 //!
 //! Budgets: `max_attempts` rejected submissions (and failed requests), and `max_turns` model
-//! turns in all. After `escalation.after` failures the escalation model takes over the same
-//! conversation (opt-in, so never a silent switch, §5.8). An unavailable endpoint is waited out
-//! instead, and if it stays down the chunk is left to its lease, never failed.
+//! turns in all, every one with the same model. An unavailable endpoint is waited out instead,
+//! and if it stays down the chunk is left to its lease, never failed.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -26,8 +25,8 @@ use crate::{prompt, shape};
 
 mod budget;
 
+pub use budget::Budget;
 use budget::OUTAGES;
-pub use budget::{Budget, Escalation};
 
 /// The model's request is answered with this when it called no tool.
 const NUDGE: &str = "You must call a tool. Use read, grep or glob to look at the code, or call \
@@ -89,7 +88,7 @@ pub async fn translate(
     let mut messages = prompt::conversation(task, budget);
     let mut log = String::new();
     let (mut failures, mut outages, mut turns, mut submissions) = (0u32, 0u32, 0u32, 0u32);
-    let mut current = budget.model(0);
+    let name = budget.model.as_str();
     'turns: while failures < budget.max_attempts {
         if turns >= budget.max_turns {
             let _ = writeln!(
@@ -97,11 +96,6 @@ pub async fn translate(
                 "gave up after {turns} turns without an accepted submission"
             );
             break;
-        }
-        let name = budget.model(failures);
-        if name != current {
-            let _ = writeln!(log, "escalated from {current} to {name}");
-            current = name;
         }
         compact(&mut messages);
         let reply = match model.chat(name, &messages, &specs).await {

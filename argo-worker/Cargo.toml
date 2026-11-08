@@ -11,10 +11,8 @@ description = "Claims C chunks from SpacetimeDB and runs a read-only tool-using 
 # (`project::make`) and line-marker stripping (`project::lines`).
 argo-c = { package = "Argo", path = "../argo" }
 argo-db-client = { path = "../argo-db-client" }
-# `getLines`, for the original-source context in the task prompt.
-iterator = { path = "../iterator" }
 clap.workspace = true
-# The chat-completions client (tool calls); the version and TLS backend iterator uses.
+# The chat-completions client (tool calls).
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 # The chat-completions wire format, and attaching to argo-server's model proxy (`proxy`).
 serde_json.workspace = true

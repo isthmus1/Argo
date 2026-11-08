@@ -27,7 +27,7 @@ use std::time::Duration;
 use argo_db_client::MAX_MODEL_BYTES;
 use clap::Parser;
 
-use argo_worker::agent::{Budget, Escalation};
+use argo_worker::agent::Budget;
 use argo_worker::checkout::Checkout;
 use argo_worker::db::Db;
 use argo_worker::model::{Access, ModelError, Nemotron};
@@ -50,7 +50,7 @@ struct Args {
     /// reused. By default, a free slot under `$XDG_CACHE_HOME/argo-worker/<module>/`.
     #[arg(long)]
     workdir: Option<PathBuf>,
-    /// With `--direct`, the OpenRouter model for every turn until escalation. Through the
+    /// With `--direct`, the OpenRouter model for every turn. Through the
     /// proxy, `argo-server --model` decides it instead.
     #[arg(long, value_parser = model_name, requires = "direct")]
     model: Option<String>,
@@ -61,13 +61,6 @@ struct Args {
     /// Model turns (each a reply that reads, searches or submits) per chunk before giving up.
     #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(1..))]
     max_turns: u32,
-    /// A stronger model to take over the conversation after `--escalate-after` rejections
-    /// (`--direct` only: the proxy sends everything as its own model).
-    #[arg(long, value_parser = model_name, requires = "direct")]
-    escalation_model: Option<String>,
-    /// Rejections before escalating; fewer than `--max-attempts`, or it never happens.
-    #[arg(long, default_value_t = 2, requires = "escalation_model")]
-    escalate_after: u32,
     /// Translate one chunk, then exit.
     #[arg(long)]
     once: bool,
@@ -138,21 +131,10 @@ async fn run(args: Args) -> Result<(), String> {
     if let Some(warning) = warning {
         eprintln!("argo-worker: {warning}");
     }
-    if args.escalation_model.is_some() && args.escalate_after >= args.max_attempts {
-        return Err(format!(
-            "--escalate-after {} never escalates within --max-attempts {}",
-            args.escalate_after, args.max_attempts
-        ));
-    }
-    let escalation = args.escalation_model.clone().map(|model| Escalation {
-        model,
-        after: args.escalate_after,
-    });
     let budget = |model: String| Budget {
         max_attempts: args.max_attempts,
         max_turns: args.max_turns,
         model,
-        escalation: escalation.clone(),
         backoff: BACKOFF,
     };
     // Each worker's clone directory and connection first, here on the multi-threaded runtime:
@@ -191,10 +173,7 @@ async fn run(args: Args) -> Result<(), String> {
         if job == 0 {
             // An endpoint that rejects tool calls would fail every chunk it is given (a
             // rejected request counts against the chunk), so it is caught before any claim.
-            let models = std::iter::once(&model).chain(&args.escalation_model);
-            for m in models {
-                tools_supported(&nemotron, m).await?;
-            }
+            tools_supported(&nemotron, &model).await?;
         }
         workers.push(Worker {
             db,

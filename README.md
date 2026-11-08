@@ -4,7 +4,7 @@
 
 Argo is a Rust-first legacy-modernization project built around SpacetimeDB, agent-assisted understanding, and incremental C/Rust interoperability.
 
-> **Status: parser/syntax-graph prototype.** A standalone Rust CLI builds an owned C syntax tree and expands templates into a source-retaining containment graph, exportable as JSON. The application, executable graph, migrations, and golden boot remain unimplemented. See [ARCHITECTURE.md](ARCHITECTURE.md) for the broader design and acceptance gates.
+> **Status: hackathon prototype.** `argo-server` parses a C project into SpacetimeDB, one row per function or region. `argo-worker` runs a read-only Nemotron agent on each row, which submits Rust once it compiles, links into the C program and matches the C function's ABI. `argo-ui` watches it all live. Running the program with the Rust linked in is in progress; merging Rust nodes upward and cleaning up the Rust are stretch goals. See [completed.md](completed.md) for what works, how to run it and what's left, and [ARCHITECTURE.md](ARCHITECTURE.md) for the full design, much of which is beyond the hackathon scope.
 
 ## The idea
 
@@ -95,7 +95,7 @@ cargo run --release -p argo-server -- ~/src/project            # or a git URL[#r
 # into the C program and matches the C function's ABI; needs rustc and cc. No key
 # and no model: each attaches to the server's model proxy (the --db host, port + 1) for a key of
 # its own and the server's model. `--direct --model M` uses OPENROUTER_API_KEY instead (no proxy,
-# e.g. with --server; only then --escalation-model M --escalate-after 2).
+# e.g. with --server).
 cargo run --release -p argo-worker -- --db ws://127.0.0.1:3100 --module argo \
   [--jobs N] [--max-attempts 5] [--max-turns 40] [--once]
 

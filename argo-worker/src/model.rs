@@ -85,6 +85,9 @@ pub trait Model {
 
 /// The OpenRouter key `--direct` mode reads.
 const KEY_VAR: &str = "OPENROUTER_API_KEY";
+/// OpenRouter's OpenAI-compatible API, which `--direct` mode sends to (`/v1/chat/completions`
+/// is appended); `argo-server --model-url` defaults to the same.
+const OPENROUTER: &str = "https://openrouter.ai/api";
 
 /// Nemotron behind an OpenAI-compatible endpoint: OpenRouter, or `argo-server`'s model proxy.
 pub struct Nemotron {
@@ -134,7 +137,7 @@ impl Nemotron {
         match &self.access {
             Access::Direct => {
                 let key = Nemotron::configured().map_err(ModelError::Unavailable)?;
-                Ok((iterator::nemo::OPENROUTER.to_string(), key))
+                Ok((OPENROUTER.to_string(), key))
             }
             Access::Proxy(p) => Ok((p.url().to_string(), p.key())),
         }

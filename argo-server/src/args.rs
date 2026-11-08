@@ -7,6 +7,9 @@ use clap::Parser;
 
 /// The OpenRouter model workers use unless `--model` says otherwise: free, rate-limited.
 const MODEL: &str = "nvidia/nemotron-3.5-lightning:free";
+/// OpenRouter's OpenAI-compatible API, the proxy's default upstream; `argo-worker --direct`
+/// sends to the same.
+const OPENROUTER: &str = "https://openrouter.ai/api";
 
 /// Where `argo-db` lives in this checkout; the default module project to build and publish.
 const MODULE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../argo-db");
@@ -47,7 +50,7 @@ pub struct Args {
     #[arg(long, value_name = "SLUG", conflicts_with = "server")]
     pub model_provider: Option<String>,
     /// The OpenAI-compatible API the proxy forwards to with `OPENROUTER_API_KEY`.
-    #[arg(long, value_name = "URL", default_value = iterator::nemo::OPENROUTER, conflicts_with = "server")]
+    #[arg(long, value_name = "URL", default_value = OPENROUTER, conflicts_with = "server")]
     pub model_url: String,
     /// SpacetimeDB data directory, kept across runs so a restart resumes instead of re-ingesting;
     /// it also holds a full checkout of the repository, which is parsed. Must be outside the
