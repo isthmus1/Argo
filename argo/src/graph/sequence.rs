@@ -6,7 +6,11 @@ use crate::{CNode, CNodeType as Kind};
 /// declares, so it is never a work unit.
 pub(super) fn template(nodes: &[&CNode]) -> &'static str {
     let declares = |n: &&CNode| matches!(n.node_type, Kind::Declaration | Kind::Variable);
-    if nodes.iter().all(declares) { DECLARATIONS } else { "sequence" }
+    if nodes.iter().all(declares) {
+        DECLARATIONS
+    } else {
+        "sequence"
+    }
 }
 
 /// The template of a run of declarations only.

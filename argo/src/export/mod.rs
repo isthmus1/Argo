@@ -176,10 +176,16 @@ impl ProgramBuilder {
     /// gets its own row and is translated by itself before the function as a whole.
     pub fn finish(self) -> argo_protocol::Graph {
         let mut graph = self.b.finish();
-        let kind: HashMap<NodeId, (NodeKind, Option<NodeId>)> =
-            graph.nodes.iter().map(|n| (n.id, (n.kind, n.parent))).collect();
+        let kind: HashMap<NodeId, (NodeKind, Option<NodeId>)> = graph
+            .nodes
+            .iter()
+            .map(|n| (n.id, (n.kind, n.parent)))
+            .collect();
         for n in &mut graph.nodes {
-            let body = n.parent.and_then(|p| kind.get(&p)).filter(|(k, _)| *k == NodeKind::Scope);
+            let body = n
+                .parent
+                .and_then(|p| kind.get(&p))
+                .filter(|(k, _)| *k == NodeKind::Scope);
             let in_function = body
                 .and_then(|(_, f)| f.and_then(|f| kind.get(&f)))
                 .is_some_and(|(k, _)| *k == NodeKind::Function);
