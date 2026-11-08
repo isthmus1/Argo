@@ -210,7 +210,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         });
         origin.push(ln.id);
     }
-    let wires = level
+    let mut wires: Vec<Wire> = level
         .wires
         .iter()
         .filter_map(|w| {
@@ -219,6 +219,29 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
             Some(Wire { from, to, back: is_backedge(&ix, &w.to) })
         })
         .collect();
+
+    // One Output per exit path, like UE5's repeated Return nodes: each `return` ends right next to
+    // the statement that returns instead of in one long merge. The protocol node is shared.
+    for vi in 0..nodes.len() {
+        if nodes[vi].kind != Kind::GroupOut {
+            continue;
+        }
+        let exec_in: Vec<usize> = (0..wires.len())
+            .filter(|&w| wires[w].to.0 == vi && nodes[vi].ins[wires[w].to.1].ty == Ty::Exec)
+            .collect();
+        for &wi in exec_in.iter().skip(1) {
+            let src = wires[wi].from.0;
+            nodes.push(nodes[vi].clone());
+            origin.push(origin[vi]);
+            let ci = nodes.len() - 1;
+            wires[wi].to.0 = ci;
+            for w in wires.iter_mut() {
+                if w.to.0 == vi && w.from.0 == src && nodes[vi].ins[w.to.1].ty != Ty::Exec {
+                    w.to.0 = ci;
+                }
+            }
+        }
+    }
 
     let mut crumbs: Vec<String> = container
         .into_iter()

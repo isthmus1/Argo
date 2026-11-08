@@ -20,11 +20,17 @@ impl Outputs {
     /// Wire `from` to the group output for the container's exec output `exit`.
     pub(super) fn to(&mut self, b: &mut GraphBuilder, from: (NodeId, &str), exit: &'static str) {
         let values: &[&str] = if self.function { &[key::RETURN] } else { &[] };
-        let container = self.container;
+        let (container, function) = (self.container, self.function);
         let go = *self
             .by_exit
             .entry(exit)
-            .or_insert_with(|| b.group_output(container, exit, values));
+            .or_insert_with(|| {
+                let go = b.group_output(container, exit, values);
+                if function {
+                    typed_result(b, go);
+                }
+                go
+            });
         b.exec(from, (go, exit));
     }
 
@@ -131,6 +137,18 @@ impl Exporter<'_> {
                     out.to(&mut self.b, (cn, exit.key()), target);
                 }
             }
+        }
+    }
+}
+
+/// Inside a function, its result reads like a declaration: `int result`.
+fn typed_result(b: &mut GraphBuilder, go: NodeId) {
+    for spec in b.specs(go) {
+        if spec.key.as_str() == key::RETURN
+            && let Some(ty) = spec.kind.value_type()
+        {
+            let label = format!("{} result", ty.c());
+            b.relabel(&argo_protocol::PinRef::new(go, spec.key.clone()), label);
         }
     }
 }

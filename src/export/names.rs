@@ -44,19 +44,55 @@ pub(super) fn role(r: CNodeRole) -> SyntaxRole {
 }
 
 impl Exporter<'_> {
-    /// `case 0, 1, 2`, `default`, or both for a group that holds `default` among cases.
+    /// A case group's labels: those that start it, and those control falls onto partway through
+    /// (`case 0: case 1: x++; case 2: …` starts at 0 and 1; 2 enters after `x++`).
+    fn case_labels(&self, n: &GraphNode) -> (Vec<String>, Vec<String>) {
+        let body = n.children.first().map_or(u32::MAX, |&c| self.g.nodes[c].span.lo);
+        let (mut leading, mut inner) = (Vec::new(), Vec::new());
+        for p in &n.parts {
+            let label = match p.role {
+                CNodeRole::CaseValue => format!("case {}", self.text(p.span.lo, p.span.hi)),
+                CNodeRole::DefaultLabel => "default".into(),
+                _ => continue,
+            };
+            if p.span.lo < body { leading.push(label) } else { inner.push(label) }
+        }
+        (leading, inner)
+    }
+
+    /// `case 0, 1`, `default`: compact, one `case` keyword.
+    fn join_labels(labels: &[String]) -> String {
+        let mut values = Vec::new();
+        let mut rest = Vec::new();
+        for l in labels {
+            match l.strip_prefix("case ") {
+                Some(v) => values.push(v.to_string()),
+                None => rest.push(l.clone()),
+            }
+        }
+        let mut parts = Vec::new();
+        if !values.is_empty() {
+            parts.push(format!("case {}", values.join(", ")));
+        }
+        parts.extend(rest);
+        parts.join(", ")
+    }
+
+    /// The dispatch arm into a case group: its leading labels, plus any label it falls onto.
     pub(super) fn case_label(&self, n: &GraphNode) -> String {
-        let values: Vec<_> = n
-            .parts
-            .iter()
-            .filter(|p| p.role == CNodeRole::CaseValue)
-            .map(|p| self.text(p.span.lo, p.span.hi))
-            .collect();
-        let default = n.parts.iter().any(|p| p.role == CNodeRole::DefaultLabel);
-        match (values.is_empty(), default) {
-            (true, _) => "default".into(),
-            (false, false) => format!("case {}", values.join(", ")),
-            (false, true) => format!("case {}, default", values.join(", ")),
+        let (leading, inner) = self.case_labels(n);
+        match inner.is_empty() {
+            true => Self::join_labels(&leading),
+            false => format!("{} · {} joins inside", Self::join_labels(&leading), Self::join_labels(&inner)),
+        }
+    }
+
+    /// The case group's header, in source order: `case 0, 1: … case 2:`.
+    fn case_header(&self, n: &GraphNode) -> String {
+        let (leading, inner) = self.case_labels(n);
+        match inner.is_empty() {
+            true => format!("{}:", Self::join_labels(&leading)),
+            false => format!("{}: … {}:", Self::join_labels(&leading), Self::join_labels(&inner)),
         }
     }
 
@@ -92,7 +128,7 @@ impl Exporter<'_> {
                 format!("do … while ({})", part(CNodeRole::Condition))
             }
             (GraphNodeKind::Switch, _) => format!("switch ({})", part(CNodeRole::Selector)),
-            (GraphNodeKind::CaseGroup, _) => format!("{}:", self.case_label(n)),
+            (GraphNodeKind::CaseGroup, _) => self.case_header(n),
             (GraphNodeKind::Scope, _) if n.name.as_deref() == Some("else") => "else".into(),
             (GraphNodeKind::Scope, _) => "{ … }".into(),
             (GraphNodeKind::Sequence | GraphNodeKind::Opaque, _) => {
@@ -105,7 +141,7 @@ impl Exporter<'_> {
 }
 
 /// Header text longer than this is cut with an ellipsis.
-const HEADER_MAX: usize = 72;
+const HEADER_MAX: usize = 96;
 
 /// Source text on one line: newlines and runs of spaces become single spaces.
 fn collapse(text: &str) -> String {

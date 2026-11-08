@@ -126,7 +126,7 @@ pub fn label_for_key(key: &str) -> String {
     match key {
         key::ENTER => "run".into(),
         key::THEN => "then".into(),
-        key::NEXT => "continue".into(),
+        key::NEXT => "next iteration".into(),
         key::RETURN => "result".into(),
         key::VALUE => "value".into(),
         key::ELSE => "false".into(),
@@ -353,7 +353,7 @@ impl PinSpec {
     pub fn backedge() -> Self {
         Self::exec(
             key::NEXT,
-            "continue",
+            "next iteration",
             Direction::In,
             Flow::Backedge,
             PinOrigin::Syntax,

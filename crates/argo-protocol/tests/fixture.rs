@@ -201,7 +201,7 @@ fn pins_read_like_their_meaning() {
     };
     assert_eq!(
         labels(ids.loop_dispatch, true),
-        ["run", "continue", "n", "initial acc", "next acc"]
+        ["run", "next iteration", "n", "initial acc", "next acc"]
     );
     assert_eq!(
         labels(ids.loop_dispatch, false),

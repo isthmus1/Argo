@@ -170,6 +170,9 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
             s = s.stroke_path(&path, width + 1.6, LineCap::Round, p.canvas.mix(Color::BLACK, 0.4));
         }
         s = s.stroke_path(&path, width, LineCap::Round, core);
+        // Arrowhead just before the target socket: direction never depends on layout.
+        let (tip, back, half) = (b[0] - 7.0, b[0] - 15.0, if exec { 5.0 } else { 4.0 });
+        s = s.fill(vec![[back, b[1] - half], [tip, b[1]], [back, b[1] + half]], core);
     }
     s
 }

@@ -104,7 +104,7 @@ pub fn layout(g: &Graph) -> Placed {
     })).collect();
     let sizes: Vec<[f32; 2]> = units.iter().map(|u| u.size).collect();
     let (upos, _, _) = layered(&sizes, &edges, &pure);
-    let (upos, row_gaps) = wrap_rows(upos, &sizes);
+    let (upos, row_gaps) = wrap_rows(upos, &sizes, &edges);
 
     for (ui, u) in units.iter().enumerate() {
         let [ux, uy] = upos[ui];
@@ -134,7 +134,7 @@ pub fn layout(g: &Graph) -> Placed {
 /// A long left-to-right chain shrinks to unreadable when framed. Cut it into rows at column
 /// boundaries so the whole graph keeps roughly the canvas's shape, reading order intact: each row
 /// continues where the previous one ended, like lines of text.
-fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]]) -> (Vec<[f32; 2]>, Vec<f32>) {
+fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge]) -> (Vec<[f32; 2]>, Vec<f32>) {
     if pos.is_empty() {
         return (pos, vec![]);
     }
@@ -158,12 +158,26 @@ fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]]) -> (Vec<[f32; 2]>, Vec<
             breaks.push(s);
         }
     }
-    let row_of = |x: f32| breaks.iter().rposition(|&b| x >= b).unwrap_or(0);
+    let row_at = |x: f32| breaks.iter().rposition(|&b| x >= b).unwrap_or(0);
+    let mut row: Vec<usize> = pos.iter().map(|p| row_at(p[0])).collect();
+    // A dead end fed by one node (an exit's Output) stays beside that node rather than starting
+    // the next row behind a long wire.
+    for u in 0..pos.len() {
+        let preds: Vec<usize> = edges.iter().filter(|e| e.to == u).map(|e| e.from).collect();
+        let sink = !edges.iter().any(|e| e.from == u);
+        if let [p, rest @ ..] = preds.as_slice()
+            && sink
+            && rest.iter().all(|r| r == p)
+            && row[*p] < row[u]
+        {
+            row[u] = row[*p];
+            pos[u] = [pos[*p][0] + sizes[*p][0] + COL_GAP / 2.0, pos[*p][1]];
+        }
+    }
     let n_rows = breaks.len();
     let mut top = vec![f32::MAX; n_rows];
     let mut bottom = vec![f32::MIN; n_rows];
-    for (p, s) in pos.iter().zip(sizes) {
-        let r = row_of(p[0]);
+    for ((p, s), &r) in pos.iter().zip(sizes).zip(&row) {
         top[r] = top[r].min(p[1]);
         bottom[r] = bottom[r].max(p[1] + s[1]);
     }
@@ -180,8 +194,7 @@ fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]]) -> (Vec<[f32; 2]>, Vec<
             gaps.push(y - WRAP_GAP / 2.0);
         }
     }
-    for p in &mut pos {
-        let r = row_of(p[0]);
+    for (p, &r) in pos.iter_mut().zip(&row) {
         p[0] -= breaks[r] - x0;
         p[1] += offset[r];
     }

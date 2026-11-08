@@ -8,7 +8,7 @@
       "analysis": "interfaces",
       "state": {
         "state": "frozen",
-        "hash": "374c93e6cfdc2f8faf18394a1b861707c740da8a01523946f5bb17f310550d8f"
+        "hash": "eba3c9f561f58e05a7d65f3725f7864f492b5bb04db2322872588c78bb8a5ba3"
       }
     },
     "files": [
@@ -1534,7 +1534,7 @@
       {
         "node": 22,
         "key": "exec.next",
-        "label": "continue",
+        "label": "next iteration",
         "direction": "in",
         "kind": {
           "pin": "exec",
