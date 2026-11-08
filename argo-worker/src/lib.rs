@@ -9,6 +9,7 @@ pub mod db;
 pub mod log;
 pub mod model;
 pub mod piece;
+pub mod oracle;
 pub mod program;
 pub mod prompt;
 pub mod proxy;

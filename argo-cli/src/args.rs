@@ -106,6 +106,9 @@ pub struct WorkerOpts {
     /// Model turns per chunk before giving up.
     #[arg(long)]
     pub max_turns: Option<u32>,
+    /// The project's build and tests, run with each piece spliced in; exit 0 accepts it.
+    #[arg(long, value_name = "SHELL")]
+    pub test_cmd: Option<String>,
     /// Translate one chunk per worker, then stop.
     #[arg(long)]
     pub once: bool,
