@@ -39,12 +39,13 @@ impl Host {
     /// process already answering there.
     pub fn spawn(listen: IpAddr, port: u16, data_dir: &Path) -> Result<Host, String> {
         let bind = SocketAddr::new(listen, port);
-        std::net::TcpListener::bind(bind).map_err(|e| format!("{bind} is not free: {e}"))?;
         let local = if listen.is_unspecified() {
             IpAddr::V4(Ipv4Addr::LOCALHOST)
         } else {
             listen
         };
+        let reach = SocketAddr::new(local, port);
+        std::net::TcpListener::bind(bind).map_err(|e| busy(bind, reach, &e))?;
         std::fs::create_dir_all(data_dir)
             .map_err(|e| format!("cannot create {}: {e}", data_dir.display()))?;
         let log = data_dir.join("host.log");
@@ -71,7 +72,7 @@ impl Host {
         });
         Ok(Host {
             pid,
-            addr: SocketAddr::new(local, port),
+            addr: reach,
             exit,
             log,
         })
@@ -128,11 +129,43 @@ impl Host {
     }
 }
 
+fn ping_request(addr: SocketAddr) -> String {
+    format!("GET /v1/ping HTTP/1.0\r\nHost: {addr}\r\n\r\n")
+}
+
+/// Why `bind` can't be used. A SpacetimeDB host answering there (probed at `reach`) is most
+/// likely one an earlier `argo-server` left when it was killed hard (outside Linux nothing stops
+/// its children then; see [`crate::group::isolate`]), so say so instead of starting a second host.
+fn busy(bind: SocketAddr, reach: SocketAddr, e: &std::io::Error) -> String {
+    if !ping_now(reach) {
+        return format!("{bind} is not free: {e}");
+    }
+    format!(
+        "a SpacetimeDB host is already answering on {reach}, probably left by an argo-server \
+         that was killed; stop it (`pgrep -af spacetimedb-standalone`) or use another --port"
+    )
+}
+
+/// [`ping`] for the synchronous start-up check.
+fn ping_now(addr: SocketAddr) -> bool {
+    use std::io::{Read, Write};
+    let timeout = Some(Duration::from_secs(1));
+    let probe = || {
+        let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+        s.set_read_timeout(timeout)?;
+        s.set_write_timeout(timeout)?;
+        s.write_all(ping_request(addr).as_bytes())?;
+        let mut head = [0; 12];
+        s.read_exact(&mut head)?;
+        std::io::Result::Ok(head.ends_with(b" 200"))
+    };
+    probe().unwrap_or(false)
+}
+
 async fn ping(addr: SocketAddr) -> bool {
     let probe = async {
         let mut s = TcpStream::connect(addr).await?;
-        let request = format!("GET /v1/ping HTTP/1.0\r\nHost: {addr}\r\n\r\n");
-        s.write_all(request.as_bytes()).await?;
+        s.write_all(ping_request(addr).as_bytes()).await?;
         let mut head = [0; 12];
         s.read_exact(&mut head).await?;
         std::io::Result::Ok(head.ends_with(b" 200"))
@@ -141,4 +174,44 @@ async fn ping(addr: SocketAddr) -> bool {
         tokio::time::timeout(Duration::from_secs(1), probe).await,
         Ok(Ok(true))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+
+    use super::busy;
+
+    fn taken() -> (TcpListener, SocketAddr, std::io::Error) {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap();
+        let e = TcpListener::bind(addr).unwrap_err();
+        (held, addr, e)
+    }
+
+    #[test]
+    fn a_host_left_on_the_port_is_named() {
+        let (held, addr, e) = taken();
+        let answer = std::thread::spawn(move || {
+            let (mut s, _) = held.accept().unwrap();
+            let mut req = [0; 16];
+            let _ = s.read(&mut req);
+            s.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        });
+        let why = busy(addr, addr, &e);
+        answer.join().unwrap();
+        assert!(
+            why.contains("SpacetimeDB host is already answering"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn anything_else_on_the_port_is_just_busy() {
+        let (held, addr, e) = taken();
+        let why = busy(addr, addr, &e);
+        drop(held);
+        assert!(why.contains("is not free"), "{why}");
+    }
 }

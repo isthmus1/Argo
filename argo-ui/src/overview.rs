@@ -61,7 +61,7 @@ pub fn centre_on(s: &mut State, m: Map, p: [f32; 2]) {
 
 /// The overview card, positioned absolutely, when the graph overflows the free area.
 pub fn view(p: &Pal, s: &State) -> Option<El> {
-    if s.modal.is_some() || !overflows(s) {
+    if !overflows(s) {
         return None;
     }
     let m = map(s)?;

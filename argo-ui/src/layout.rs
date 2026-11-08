@@ -961,11 +961,11 @@ mod tests {
                 let max = |k: usize| m.iter().map(|&i| pl.pos[i][k] + pl.size[i][k]).fold(f32::MIN, f32::max);
                 let insets = [min(0) - f[0], f[0] + f[2] - max(0), f[1] + f[3] - max(1), min(1) - f[1]];
                 let want = [FRAME_PAD, FRAME_PAD, FRAME_PAD, FRAME_TITLE];
-                assert!(insets.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3), "{}: group {gi} insets {insets:?}", s.scene);
+                assert!(insets.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3), "{}: group {gi} insets {insets:?}", s.name());
                 // Each column of members hangs from the title: its top member right under it.
                 for &i in &m {
                     let top = m.iter().filter(|&&j| pl.pos[j][0] == pl.pos[i][0]).map(|&j| pl.pos[j][1]).fold(f32::MAX, f32::min);
-                    assert!((top - (f[1] + FRAME_TITLE)).abs() < 1e-3, "{}: group {gi}: {} column starts {} below the title", s.scene, g.nodes[i].title, top - f[1] - FRAME_TITLE);
+                    assert!((top - (f[1] + FRAME_TITLE)).abs() < 1e-3, "{}: group {gi}: {} column starts {} below the title", s.name(), g.nodes[i].title, top - f[1] - FRAME_TITLE);
                 }
                 checked += 1;
             }

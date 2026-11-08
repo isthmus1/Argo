@@ -1,8 +1,7 @@
-//! Rows onto the canvas through the same live-snapshot path a C project or snapshot file uses.
+//! Rows onto the canvas: the rebuilt snapshot, the explorer's index, and where the user was.
 
 use std::collections::HashSet;
 
-use argo_c::project::Unit;
 use argo_db_client::Origin;
 use argo_protocol::{NodeId, NodeKind, Snapshot};
 
@@ -52,13 +51,16 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
     let modules = project::index(&snap);
     let declarations = project::declarations(&snap);
     let entry = project::entry(&modules);
+    // With no function to open, the canvas shows what there is: the one file's declarations, or
+    // each file as a group of them.
+    let level = project::file_level(&snap);
     let name = snap
         .graph
         .nodes
         .iter()
         .find(|n| n.kind == NodeKind::Program)
         .map_or_else(|| origin.locator.clone(), |n| n.name.clone());
-    let mut next = State::from_snapshot("db", snap, None, HashSet::new(), vec![]);
+    let mut next = State::from_snapshot(snap, None, HashSet::new());
     next.project = Some(Project {
         name,
         source: origin.locator.clone(),
@@ -71,15 +73,7 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
             },
             |c| format!("commit {c}"),
         ),
-        units: origin
-            .units
-            .iter()
-            .map(|u| Unit {
-                path: u.path.clone(),
-                skipped: u.skipped.clone(),
-                flags: vec![],
-            })
-            .collect(),
+        units: origin.units.clone(),
         flags: origin.flags.clone(),
         modules,
         declarations,
@@ -102,6 +96,8 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
         None => {
             if let Some(f) = entry {
                 project::open_function(s, f);
+            } else if let Some(c) = level {
+                project::show_level(s, c);
             }
         }
     }
