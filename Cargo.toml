@@ -7,7 +7,6 @@ members = [
     "argo-server",
     "argo-ui",
     "argo-worker",
-    "iterator",
 ]
 # The SpacetimeDB module builds only for wasm32 and is published to the host, so it keeps its own
 # Cargo.lock and stays out of native workspace builds.

@@ -12,7 +12,7 @@ argo-db-client = { path = "../argo-db-client" }
 argo-c = { package = "Argo", path = "../argo" }
 clap.workspace = true
 # The model proxy (`proxy`): a small HTTP/1 server, worker keys from the OS RNG, and the client
-# that forwards to the provider (the reqwest iterator uses).
+# that forwards to the provider.
 bytes = "1"
 getrandom = "0.3"
 http-body-util = "0.1"
@@ -20,8 +20,6 @@ humantime = "2"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
-# The model client crate, for the OpenRouter base URL workers' `--direct` mode shares.
-iterator = { path = "../iterator" }
 # Signals the host's process group: SIGINT for a clean stop, SIGKILL if it doesn't.
 libc = "0.2"
 # The loader child process hands the origin back as JSON (the rows go as BSATN).
