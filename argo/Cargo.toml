@@ -13,22 +13,24 @@ path = "src/lib.rs"
 name = "main"
 path = "src/main.rs"
 
-# The C front end is rucc's, pinned exactly. rucc's AST and parser crates are
-# tier 3: their Rust API is documented as changing without a major version bump,
-# so a caret range would break this crate on a patch release. The graph records
-# are the stable thing here; the parser is an implementation detail behind them.
+# The C front end is rucc's, from our fork (github.com/isthmus1/rucc), pinned to
+# one commit. The fork is upstream plus fixes we need and make at the source
+# there: `__bf16` as a type, which gcc's <immintrin.h> needs. rucc's AST and parser
+# crates are tier 3: their Rust API changes without a major version bump, so this
+# moves only by changing the rev. The graph records are the stable thing here; the
+# parser is an implementation detail behind them.
 [dependencies]
 argo-protocol = { path = "../argo-protocol" }
 clang = { version = "2.1.0", features = ["runtime"] }
 serde.workspace = true
 serde_json.workspace = true
-rucc-ast = "=0.30.15"
-rucc-base = "=0.30.15"
-rucc-diag = "=0.30.15"
-rucc-lex = "=0.30.15"
-rucc-parse = "=0.30.15"
-rucc-session = "=0.30.15"
-rucc-target = "=0.30.15"
+rucc-ast = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
+rucc-base = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
+rucc-diag = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
+rucc-lex = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
+rucc-parse = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
+rucc-session = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
+rucc-target = { git = "https://github.com/isthmus1/rucc", rev = "5e9d34c99c870dff1753a6b3758decf20b7bbd3f" }
 cc = "1.11.1"
 
 [dev-dependencies]

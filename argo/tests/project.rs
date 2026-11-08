@@ -454,61 +454,6 @@ fn makefile_conditionals_per_file_rules_and_optional_features() {
     );
 }
 
-/// clang-only spellings in system headers, as the macOS SDK has them in `<stdio.h>` and friends.
-/// Run with clang and `-fblocks` (Apple clang's default) when clang is installed.
-#[test]
-fn apple_sdk_spellings_in_system_headers_are_tolerated() {
-    if !have("clang") {
-        eprintln!("skipped: no `clang`");
-        return;
-    }
-    let base = std::env::temp_dir().join(format!("argo-project-apple-{}", std::process::id()));
-    // The fake SDK sits outside the project, like the real one.
-    let (root, sdk) = (base.join("project"), base.join("sdk"));
-    write(
-        &base,
-        &[
-            (
-                "sdk/stdio_like.h",
-                "#pragma clang assume_nonnull begin\n\
-                 typedef struct __sFILE { void *_cookie; int (* _Nullable _close)(void *); } FILE;\n\
-                 FILE *_Nullable fdopen_like(int, const char *_Nonnull) __asm(\"_\" \"fdopen\" \"$DARWIN_EXTSN\");\n\
-                 int clock_like(void) __attribute__((availability(macosx,introduced=10.15.4))) __attribute__((availability(ios,unavailable)));\n\
-                 #ifdef __BLOCKS__\nint atexit_b_like(void (^ _Nonnull)(void));\n#endif\n\
-                 #if __has_include(<argo_never_there.h>)\n#error has_include is wrong\n#endif\n\
-                 #pragma clang assume_nonnull end\n",
-            ),
-            (
-                "project/a.c",
-                "#include <stdio_like.h>\nint use(FILE *f) { return f->_close ? f->_close(f->_cookie) : clock_like(); }\n",
-            ),
-            (
-                "project/b.c",
-                "#include <stdio_like.h>\nint other(void) { return 2; }\n",
-            ),
-        ],
-    );
-    let opts = Options {
-        cc: "clang".into(),
-        flags: vec!["-fblocks".into(), format!("-isystem{}", sdk.display())],
-        ..Options::default()
-    };
-    let opened = project::open(&root, "apple", &opts, &|_| {}).unwrap();
-    assert!(
-        opened.units.iter().all(|u| u.skipped.is_none()),
-        "{:#?}",
-        opened.units
-    );
-    let modules = modules_and_functions(&opened.snapshot);
-    assert_eq!(
-        modules,
-        [
-            ("a.c".to_string(), vec!["use".to_string()]),
-            ("b.c".into(), vec!["other".into()]),
-        ]
-    );
-}
-
 #[test]
 fn when_nothing_opens_the_error_lists_each_file_and_its_reason() {
     if !have("cc") {

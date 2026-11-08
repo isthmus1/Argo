@@ -166,8 +166,10 @@ shorter. Focused checks: `cargo fmt -p Argo --check`, `cargo test --locked -p Ar
 cargo run --release -p Argo -- --protocol-json ~/src/project > target/project.json
 ```
 
-The parser reads plain C, so `argo/src/project/` runs the system preprocessor (`cc -E`, or
-`$CC`, in C23 mode like the parser) first: includes are pasted in and macros expanded.
+The parser reads plain C, so `argo/src/project/` runs gcc's preprocessor (`gcc -E`, in C23
+mode like the parser) first: includes are pasted in and macros expanded. It is always gcc,
+whatever `cc` or `$CC` is: the parser, [rucc](https://github.com/isthmus1/rucc) from our fork,
+reads gcc's dialect, and clang's output carries spellings it doesn't (macOS support comes later).
 Each `.c` file is its own translation unit, preprocessed, parsed and built on its own as a
 compiler would, then merged into one graph; line markers put every function back under its
 original file, and a shared header's items are kept once. Files that fail (missing headers,

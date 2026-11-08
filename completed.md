@@ -3,7 +3,7 @@
 ## Parsing (`argo`)
 - Parses C into an owned AST (`CNode`). Every node records its exact byte range (`span`) in the parsed source.
 - `parser::CSnippet` (`argo/src/parser/model.rs`) holds a node's exact C text and its byte range.
-- Whole projects (a folder or a git/GitHub link) are preprocessed with `cc -E` and parsed into one graph.
+- Whole projects (a folder or a git/GitHub link) are preprocessed with `gcc -E` and parsed into one graph.
 - Test `prints_the_ast_of_a_small_c_snippet` (`argo/tests/integration.rs`) prints the AST of a small C function.
 
 ## Database (`argo-server`, `argo-db`)

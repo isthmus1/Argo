@@ -60,6 +60,7 @@ pub fn run_with_c(c: &str, replacement: &Replacement) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let host = String::from_utf8_lossy(&host.stdout);
     let compiler = cc::Build::new()
+        .compiler(crate::project::cpp::GCC)
         .cargo_metadata(false)
         .target(host.trim())
         .host(host.trim())

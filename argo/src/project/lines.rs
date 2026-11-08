@@ -1,4 +1,4 @@
-//! `cc -E` line markers turned back into original locations.
+//! `gcc -E` line markers turned back into original locations.
 //!
 //! The preprocessor's output keeps `# <line> "<file>" <flags>` markers; they are removed from the
 //! text the parser reads and kept as a per-line map instead.
@@ -22,7 +22,7 @@ pub struct Origin<'a> {
 }
 
 impl Mapped {
-    /// Strip line markers and other directives (`#pragma`) from `cc -E` output.
+    /// Strip line markers and other directives (`#pragma`) from `gcc -E` output.
     pub fn new(raw: &[u8]) -> Mapped {
         let mut m = Mapped {
             text: Vec::with_capacity(raw.len()),
