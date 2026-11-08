@@ -4075,8 +4075,7 @@ dependencies = [
 [[package]]
 name = "rucc-abi"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e1468cc91cbb825eea65fc970a610408e2a0be96c758c982f6f3373c62e211c"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-base",
  "rucc-tuple",
@@ -4085,8 +4084,7 @@ dependencies = [
 [[package]]
 name = "rucc-ast"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1640ff5a0b28f45d879d2fffde7c19490b2c2464df9a96c97e9c12f9aced5387"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -4096,20 +4094,17 @@ dependencies = [
 [[package]]
 name = "rucc-base"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2d89292580cd502c22e7c39cbb307fca55c371cc4bb5481e3baa57761f9376"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 
 [[package]]
 name = "rucc-diag"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04fbeca6d09a6c07ed5480dc152f2dddeae49b5b8a1a038f86f18bad134ed894"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 
 [[package]]
 name = "rucc-lex"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2701251a915831c21438a87b2871400cfc2d4d4b3f3ef2d7bae17e142cc877a9"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -4121,8 +4116,7 @@ dependencies = [
 [[package]]
 name = "rucc-parse"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a51454e91143f757d79f4143199e5de4b78f683f00826f553a99aaab2d62e84"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-ast",
  "rucc-base",
@@ -4134,8 +4128,7 @@ dependencies = [
 [[package]]
 name = "rucc-session"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b10bda78bc4a5958b69a8a66a77342e9ef40be1961f65cf0bcccafc1bd2ed00"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-base",
  "rucc-diag",
@@ -4146,8 +4139,7 @@ dependencies = [
 [[package]]
 name = "rucc-target"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c5b1020c1a694e68f4db704c37f4c6ce6f34d024cf26d69a50d9e774a15b0b0"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-abi",
  "rucc-base",
@@ -4157,14 +4149,12 @@ dependencies = [
 [[package]]
 name = "rucc-tuple"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08b16f38c3777ea5691d9f5b9d86f5fe7af909d5ef48c32070b52488bddb8348"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 
 [[package]]
 name = "rucc-types"
 version = "0.30.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e563a2fbce9ae3a39d02561f407d9eb939e2d8d5dcb1befd9d7c7f98520c8e82"
+source = "git+https://github.com/isthmus1/rucc?rev=5e9d34c99c870dff1753a6b3758decf20b7bbd3f#5e9d34c99c870dff1753a6b3758decf20b7bbd3f"
 dependencies = [
  "rucc-base",
  "rucc-target",

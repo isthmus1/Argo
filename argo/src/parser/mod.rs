@@ -50,6 +50,8 @@ impl Parser {
         let lexed = self.lexer.lex(source);
         let mut context = Context::new(&lexed.interner, self.lexer.standard);
         context.gnu = self.lexer.gnu;
+        let type_names = self.lexer.type_names(&lexed.interner);
+        context.type_names = &type_names;
         let parsed = parse(&lexed.tokens, context);
         let mut diagnostics = lexed.diagnostics;
         diagnostics.extend(parsed.diagnostics);
