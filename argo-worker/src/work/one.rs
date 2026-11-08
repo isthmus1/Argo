@@ -66,7 +66,10 @@ impl<M: Model, V: Validator> Worker<M, V> {
                 program,
                 piece: piece.as_ref(),
             };
-            translate(&self.model, &self.validator, &self.budget, &task).await
+            let agent = translate(&self.model, &self.validator, &self.budget, &task);
+            crate::model::CLAIM
+                .scope((id, claim.generation), agent)
+                .await
         };
         let outcome = tokio::select! {
             outcome = translated => outcome,

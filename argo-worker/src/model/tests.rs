@@ -117,3 +117,48 @@ fn rejected_requests_count_and_endpoint_failures_wait() {
         ModelError::Unavailable(_)
     ));
 }
+
+/// A proxy that answers everything and hands over each completion request it got.
+async fn capturing_proxy() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            let body = if request.starts_with("POST /attach ") {
+                r#"{"key":"k","worker":"w1","model":"nvidia/m"}"#
+            } else {
+                tx.send(request).unwrap();
+                r#"{"choices":[{"message":{"content":"ok"}}]}"#
+            };
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    (url, rx)
+}
+
+#[tokio::test]
+async fn proxied_requests_name_the_claim_they_are_for() {
+    let (url, mut seen) = capturing_proxy().await;
+    let proxy = Proxy::attach(&url, 0, "c200ab").await.unwrap();
+    let model = Nemotron::new(Duration::from_secs(10), Access::Proxy(proxy));
+    let ask = [Message::User("prompt".into())];
+    model.chat("m", &ask, &[]).await.unwrap();
+    let unclaimed = seen.recv().await.unwrap();
+    assert!(!unclaimed.contains("x-argo-chunk"), "{unclaimed}");
+    super::CLAIM
+        .scope((42, 7), model.chat("m", &ask, &[]))
+        .await
+        .unwrap();
+    let claimed = seen.recv().await.unwrap();
+    assert!(
+        claimed.contains("x-argo-chunk: 42\r\n") && claimed.contains("x-argo-generation: 7\r\n"),
+        "{claimed}"
+    );
+}

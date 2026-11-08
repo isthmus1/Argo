@@ -182,3 +182,61 @@ async fn an_unreachable_provider_is_a_gateway_error() {
     let (status, _) = post(&completions, Some(key), json!(["not", "a", "request"])).await;
     assert_eq!(status, 400);
 }
+
+/// Each forwarded request comes out of `record` with its claim, cost and reply; the second turn
+/// of a conversation carries only its new message.
+#[tokio::test]
+async fn exchanges_are_handed_over_for_recording() {
+    let dir = crate::scratch::dir("proxy-record");
+    let base = format!("http://{}/", provider().await);
+    let upstream = Upstream::new(&base, REAL_KEY, MODEL, Some("fireworks")).unwrap();
+    let proxy = Proxy::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        upstream,
+        &dir.join("usage.log"),
+    )
+    .unwrap();
+    let mut exchanges = proxy.record();
+    let url = format!("http://{}", proxy.addr());
+    tokio::spawn(proxy.serve());
+    let (_, attached) = post(&format!("{url}/attach"), None, json!({})).await;
+    let key = attached["key"].as_str().unwrap().to_string();
+
+    let send = |body: Value| {
+        let req = reqwest::Client::new()
+            .post(format!("{url}/v1/chat/completions"))
+            .bearer_auth(&key)
+            .header("x-argo-chunk", "12")
+            .header("x-argo-generation", "3")
+            .body(body.to_string());
+        async move { assert_eq!(req.send().await.unwrap().status().as_u16(), 200) }
+    };
+    send(completion()).await;
+    let mut turn = completion();
+    turn["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"role": "tool", "content": "no"}));
+    send(turn).await;
+
+    let first = exchanges.recv().await.unwrap();
+    assert_eq!(
+        (first.worker.as_str(), first.status, first.prefix),
+        ("w1", 200, 0)
+    );
+    assert_eq!(
+        (first.claim.chunk, first.claim.generation),
+        (Some(12), Some(3))
+    );
+    assert_eq!(first.tokens.unwrap().cost, 0.0001);
+    let sent: Value = serde_json::from_str(&first.request).unwrap();
+    assert_eq!(sent["model"], MODEL, "recorded as sent upstream");
+    assert!(first.response.contains("fn f() {}") && first.answered_at >= first.sent_at);
+    let second = exchanges.recv().await.unwrap();
+    let delta: Value = serde_json::from_str(&second.request).unwrap();
+    assert_eq!(second.prefix, 1);
+    assert_eq!(
+        delta["messages"],
+        json!([{"role": "tool", "content": "no"}])
+    );
+}

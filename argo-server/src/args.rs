@@ -19,7 +19,17 @@ const MODULE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../argo-db");
 #[command(version)]
 pub struct Args {
     /// A local directory, or a git URL or path optionally followed by `#ref`.
-    pub repo: String,
+    #[arg(required_unless_present = "replay")]
+    pub repo: Option<String>,
+    /// Replay the run recorded in database `FROM` on the same host into `--module` instead of
+    /// ingesting a repository: its program, then every claim, result and model exchange
+    /// (`model_exchange`) at `--speed`. `--module` is dropped and republished first.
+    #[arg(long, value_name = "FROM", conflicts_with_all = ["repo", "fresh", "allow_dirty", "proxy_port", "delete_data"])]
+    pub replay: Option<String>,
+    /// How many times faster than recorded a `--replay` plays [default: 100]. It conflicts with a
+    /// repository too: clap drops `requires` when the required flag conflicts with one present.
+    #[arg(long, requires = "replay", conflicts_with = "repo", value_parser = speed)]
+    pub speed: Option<f64>,
     /// Use an already-running SpacetimeDB instead of starting one: `http://host:port`,
     /// `https://host`, or `maincloud` (SpacetimeDB's cloud; `spacetime login` first). The module
     /// is published there and the repository ingested, then `argo-server` exits; the database
@@ -103,12 +113,30 @@ fn model_name(name: &str) -> Result<String, String> {
     }
 }
 
+/// A replay speed: a finite factor above zero.
+fn speed(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(s) if s.is_finite() && s > 0.0 => Ok(s),
+        _ => Err(format!("a speed is a number above 0, not {text:?}")),
+    }
+}
+
 impl Args {
+    /// `--speed`, or the replay default.
+    pub fn speed(&self) -> f64 {
+        self.speed.unwrap_or(100.0)
+    }
+
+    /// The repository to ingest; only `--replay` runs have none, and they never ask.
     pub fn repo(&self) -> Repo {
-        if Path::new(&self.repo).is_dir() {
-            Repo::Dir(PathBuf::from(&self.repo))
+        let repo = self
+            .repo
+            .as_deref()
+            .expect("clap requires a repository without --replay");
+        if Path::new(repo).is_dir() {
+            Repo::Dir(PathBuf::from(repo))
         } else {
-            Repo::Git(GitRef::parse(&self.repo))
+            Repo::Git(GitRef::parse(repo))
         }
     }
 
@@ -142,6 +170,9 @@ impl Args {
     /// Refuse a data dir inside a directory repository: the host's files would make the tree look
     /// dirty, and a tree read in place would include the checkout's copy of itself.
     pub fn check_data_dir(&self) -> Result<(), String> {
+        if self.replay.is_some() {
+            return Ok(());
+        }
         let Repo::Dir(repo) = self.repo() else {
             return Ok(());
         };
@@ -310,6 +341,26 @@ mod tests {
             "0.0.0.0",
         ];
         assert!(Args::try_parse_from(both).is_err());
+    }
+
+    #[test]
+    fn a_replay_needs_no_repository_and_takes_a_speed() {
+        let a = parse(&["--replay", "argo", "--module", "argo-replay"]);
+        assert_eq!(
+            (a.replay.as_deref(), a.speed(), a.repo.as_deref()),
+            (Some("argo"), 100.0, None)
+        );
+        assert!(a.check_data_dir().is_ok());
+        assert_eq!(parse(&["--replay", "argo", "--speed", "2.5"]).speed(), 2.5);
+        let no = |extra: &[&str]| {
+            let args = ["argo-server"].iter().chain(extra);
+            Args::try_parse_from(args).is_err()
+        };
+        assert!(no(&[]), "a repository or a replay");
+        assert!(no(&["r", "--replay", "argo"]), "not both");
+        assert!(no(&["r", "--speed", "2"]), "a speed only for a replay");
+        assert!(no(&["--replay", "argo", "--speed", "0"]));
+        assert!(no(&["--replay", "argo", "--speed", "nan"]));
     }
 
     #[test]
