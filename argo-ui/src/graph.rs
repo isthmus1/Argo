@@ -124,12 +124,14 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
 /// An expanded node group: a frame around its members. The title's button (or a double-click
 /// anywhere on the frame) collapses it into a single node in place.
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
-    let collapse = group_button(p.frame_text.alpha(0.75), p.frame_text.alpha(0.12), false)
+    let collapse = group_button(p.frame_text.alpha(0.9), p.frame_text.alpha(0.16), false, look.badge_scale)
         .key(format!("collapse-group-{gi}"))
         .on_press(move |s: &mut State| s.collapse_group(gi))
         .help("Collapse to node");
-    // Trailing controls sit in the frame's corner: equal top and right insets, concentric radii.
-    let title = row().h(FRAME_TITLE_H).w(w).pl(14.0).pr(FRAME_CHIP_INSET).gap(8.0).items_center()
+    // Trailing controls sit in the frame's corner: equal top and right insets, concentric radii;
+    // an evidence badge on that corner pushes the button clear of it.
+    let pr = FRAME_CHIP_INSET + if f.evidence == Evidence::None { 0.0 } else { BADGE_CLEAR };
+    let title = row().h(FRAME_TITLE_H).w(w).pl(14.0).pr(pr).gap(8.0).items_center()
         .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
         .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0))
         .child(lang_chip(p, f.lang).radius(concentric(FRAME_RADIUS, FRAME_CHIP_INSET, CHIP_H)))
@@ -145,33 +147,79 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
     decorate(p, fr, [w, h], FRAME_RADIUS, f.evidence, f.claim, look)
 }
 
+/// The collapse/expand button's hit target is at least this many screen points across.
+const GROUP_HIT: f32 = 22.0;
+/// Extra right inset that keeps a corner button clear of the evidence badge on that corner.
+const BADGE_CLEAR: f32 = 6.0;
+
 /// The collapse (frame -> node) or expand (node -> frame) button: diagonal arrows drawn as
 /// strokes, pointing in to collapse and out to expand, as for leaving and entering full screen.
-fn group_button(fg: Color, hover: Color, expand: bool) -> El {
+/// It takes the `model::GROUP_BUTTON` slot in layout but draws, highlights and hit-tests as a
+/// `GROUP_HIT` square (times `badge_scale`, so it stays that big on screen when zoomed out); the
+/// glyph inside keeps the slot's size.
+fn group_button(fg: Color, hover: Color, expand: bool, badge_scale: f32) -> El {
     let d = model::GROUP_BUTTON;
-    let (c, m) = (d / 2.0, d * 0.22);
+    // Drawn in the slot, then scaled up by `grow`: draw the glyph `1 / grow` as large.
+    let grow = GROUP_HIT / d;
+    let u = 1.0 / grow;
+    let c = d / 2.0;
+    let (reach, stroke, head, gap) = (d * 0.28 * u, 1.5 * u, 4.0 * u, 1.5 * u);
     let mut sh = Shape::new();
     // One arrow per diagonal quadrant: a shaft from the corner to near the centre, and an
     // L-shaped head at its corner end (expand) or centre end (collapse).
     for (sx, sy) in [(1.0, -1.0), (-1.0, 1.0)] {
-        let outer = [c + sx * (c - m), c + sy * (c - m)];
-        let inner = [c + sx * 1.5, c + sy * 1.5];
+        let outer = [c + sx * reach, c + sy * reach];
+        let inner = [c + sx * gap, c + sy * gap];
         let tip = if expand { outer } else { inner };
-        let k = 4.0;
-        let (hx, hy) = if expand { (-sx * k, -sy * k) } else { (sx * k, sy * k) };
-        sh = sh.line(outer, inner, 1.5, LineCap::Round, fg).stroke_path(
+        let (hx, hy) = if expand { (-sx * head, -sy * head) } else { (sx * head, sy * head) };
+        sh = sh.line(outer, inner, stroke, LineCap::Round, fg).stroke_path(
             &Path::new().move_to([tip[0] + hx, tip[1]]).line_to(tip).line_to([tip[0], tip[1] + hy]),
-            1.5,
+            stroke,
             LineCap::Round,
             fg,
         );
     }
-    el().size(d, d).radius(5.0).hover(hover).cursor(Cursor::Pointer).child(canvas(sh).size(d, d))
+    el().size(d, d).radius(5.0).hover(hover).cursor(Cursor::Pointer).scale(grow * badge_scale).child(canvas(sh).size(d, d))
 }
 
 fn socket_world(g: &Graph, pl: &crate::layout::Placed, i: usize, output: bool, idx: usize) -> [f32; 2] {
     let [x, y] = model::socket_local(&g.nodes[i], pl.size[i][0], output, idx);
     [pl.pos[i][0] + x, pl.pos[i][1] + y]
+}
+
+/// A wire's shape, decided before anything is drawn so wires can make room for each other.
+#[derive(Clone, Copy)]
+enum Curve {
+    /// A forward S-curve: `[from, handle, handle, to]`.
+    Cubic([[f32; 2]; 4]),
+    /// Out of `a`, down to `below`, back along it and up into `b` (a loop backedge or a wire
+    /// into a wrapped row), its legs swinging `reach` beside the sockets.
+    Routed { a: [f32; 2], b: [f32; 2], below: f32, reach: f32 },
+}
+
+impl Curve {
+    fn path(self) -> Path {
+        match self {
+            Curve::Cubic([a, c1, c2, b]) => Path::new().move_to(a).cubic_to(c1, c2, b),
+            Curve::Routed { a, b, below, reach } => Path::new()
+                .move_to(a)
+                .cubic_to([a[0] + reach, a[1]], [a[0] + reach, below], [a[0], below])
+                .line_to([b[0], below])
+                .cubic_to([b[0] - reach, below], [b[0] - reach, b[1]], b),
+        }
+    }
+
+    /// The same curve as a polyline, so it can be dashed and measured.
+    fn points(self) -> Vec<[f32; 2]> {
+        match self {
+            Curve::Cubic([a, c1, c2, b]) => {
+                let mut pts = vec![];
+                cubic_points(a, c1, c2, b, &mut pts);
+                pts
+            }
+            Curve::Routed { a, b, below, reach } => back_points(a, b, below, reach),
+        }
+    }
 }
 
 fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
@@ -181,97 +229,83 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         Some(Item::Group(gi)) => g.nodes[w.from.0].group == Some(gi) || g.nodes[w.to.0].group == Some(gi),
         None => true,
     };
-    // Faded wires first, then data, exec on top.
-    let mut gap_lanes = std::collections::HashMap::<usize, usize>::new();
-    let mut order: Vec<_> = g.wires.iter().collect();
-    order.sort_by_key(|w| (touches(w), g.wire_ty(w) == Ty::Exec));
-    for w in order {
+    let ends: Vec<([f32; 2], [f32; 2])> = g.wires.iter().map(|w| {
         let a = socket_world(g, pl, w.from.0, true, w.from.1);
         let b = socket_world(g, pl, w.to.0, false, w.to.1);
-        let (a, b) = ([a[0] + o[0], a[1] + o[1]], [b[0] + o[0], b[1] + o[1]]);
+        ([a[0] + o[0], a[1] + o[1]], [b[0] + o[0], b[1] + o[1]])
+    }).collect();
+
+    // Route every wire first, in a fixed order, so lanes don't jump as the focus changes.
+    let backs = back_lanes(&g.wires.iter().zip(&ends).filter(|(w, _)| w.back).map(|(w, &(a, b))| BackRun {
+        socket_y: a[1],
+        lo: a[0].min(b[0]) - BACK_REACH,
+        hi: a[0].max(b[0]) + BACK_REACH,
+        below: back_below(pl, o, w, a, b),
+    }).collect::<Vec<_>>());
+    let mut backs = backs.into_iter();
+    let mut gap_lanes = std::collections::HashMap::<usize, usize>::new();
+    let curves: Vec<Curve> = g.wires.iter().zip(&ends).map(|(w, &(a, b))| {
+        if w.back {
+            let (below, reach) = backs.next().expect("one lane per backedge");
+            return Curve::Routed { a, b, below, reach };
+        }
         // Wrapped rows: a wire into a later row runs back through the gap between the rows.
-        let wrap_gap = (b[0] < a[0] && !w.back)
+        let wrap_gap = (b[0] < a[0])
             .then(|| pl.row_gaps.iter().position(|&g| g + o[1] > a[1] && g + o[1] < b[1]))
-            .flatten()
-            .map(|gi| {
-                // Each wire in a gap gets its own lane, so parallel runs don't merge into one line.
-                let lane = gap_lanes.entry(gi).or_insert(0usize);
-                let y = pl.row_gaps[gi] + o[1] + (*lane as f32 - 1.0) * 12.0;
-                *lane += 1;
-                y
-            });
-        let mut route = None;
-        // Where the direction arrow sits: the middle of the route, along its tangent.
-        let mid;
-        let path = if w.back || wrap_gap.is_some() {
-            // A loop backedge runs out of its source, under both nodes, and back into the target.
-            let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
-            let below = wrap_gap.unwrap_or_else(|| {
-                // Drop under every node the run would cross, but stay above the next row.
-                let (lo, hi) = (a[0].min(b[0]) - 40.0, a[0].max(b[0]) + 40.0);
-                let limit = pl.row_gaps.iter().map(|g| g + o[1]).find(|&g| g > a[1]).unwrap_or(f32::MAX);
-                let mut below = bottom(w.from.0).max(bottom(w.to.0)) + 22.0;
-                loop {
-                    let deeper = (0..pl.pos.len())
-                        .filter(|&i| {
-                            let (x, y) = (pl.pos[i][0] + o[0], pl.pos[i][1] + o[1]);
-                            x < hi && x + pl.size[i][0] > lo && y < below && bottom(i) + 22.0 > below
-                        })
-                        .map(|i| bottom(i) + 22.0)
-                        .fold(below, f32::max);
-                    if deeper <= below || deeper >= limit {
-                        break below;
-                    }
-                    below = deeper;
-                }
-            });
-            let pts = back_points(a, b, below);
-            mid = polyline_mid(&pts);
-            route = Some(pts);
-            Path::new()
-                .move_to(a)
-                .cubic_to([a[0] + BACK_REACH, a[1]], [a[0] + BACK_REACH, below], [a[0], below])
-                .line_to([b[0], below])
-                .cubic_to([b[0] - BACK_REACH, below], [b[0] - BACK_REACH, b[1]], b)
-        } else {
-            let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
-            let (c1, c2) = ([a[0] + dx, a[1]], [b[0] - dx, b[1]]);
-            mid = cubic_mid(a, c1, c2, b);
-            Path::new().move_to(a).cubic_to(c1, c2, b)
-        };
+            .flatten();
+        if let Some(gi) = wrap_gap {
+            // Each wire in a gap gets its own lane, so parallel runs don't merge into one line.
+            let lane = gap_lanes.entry(gi).or_insert(0usize);
+            let below = pl.row_gaps[gi] + o[1] + (*lane as f32 - 1.0) * 12.0;
+            *lane += 1;
+            return Curve::Routed { a, b, below, reach: BACK_REACH };
+        }
+        let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
+        Curve::Cubic([a, [a[0] + dx, a[1]], [b[0] - dx, b[1]], b])
+    }).collect();
+    let routes: Vec<Vec<[f32; 2]>> = curves.iter().map(|c| c.points()).collect();
+    let boxes: Vec<[f32; 4]> = routes.iter().map(|r| bbox(r)).collect();
+
+    // Faded wires first, then data, exec on top.
+    let mut order: Vec<usize> = (0..g.wires.len()).collect();
+    order.sort_by_key(|&i| (touches(&g.wires[i]), g.wire_ty(&g.wires[i]) == Ty::Exec));
+    for i in order {
+        let w = &g.wires[i];
         let ty = g.wire_ty(w);
         let exec = ty == Ty::Exec;
         let lit = touches(w);
         let emphasised = focus.is_some() && lit;
         let width = if exec { 2.8 } else { 1.8 } + if emphasised { 0.8 } else { 0.0 };
-        // Fade by mixing toward the canvas (opaque), never by alpha: translucent polylines
-        // double-blend at their joints and read as dotted.
-        let fade = |c: Color| if lit { c } else { c.mix(p.canvas, 0.6) };
-        let core = fade(p.ty(ty));
+        let core = if lit { p.ty(ty) } else { p.dim_wire(p.ty(ty)) };
         // The outline under the core, if any: exec wires' casing; lit data wires' dark halo.
+        // Mixed toward the canvas (opaque), never by alpha: translucent polylines double-blend
+        // at their joints and read as dotted.
         let under = if exec {
-            Some((1.0, fade(p.exec_casing)))
+            Some((1.0, if lit { p.exec_casing } else { p.exec_casing.mix(p.canvas, 0.6) }))
         } else if p.dark && lit && !w.back {
             Some((0.8, p.canvas.mix(Color::BLACK, 0.4)))
         } else {
             None
         };
-        if let Some(pts) = route.as_deref().filter(|_| w.back) {
+        if w.back {
             // A loop's way back is dashed, so it never reads as forward flow.
-            for dash in dashes(pts, 9.0, 6.0) {
+            for dash in dashes(&routes[i], 9.0, 6.0) {
                 if let Some((out, c)) = under {
                     s = s.stroke(dash.clone(), width + 2.0 * out, c);
                 }
                 s = s.stroke(dash, width, core);
             }
         } else {
+            let path = curves[i].path();
             if let Some((out, c)) = under {
                 s = s.stroke_path(&path, width + 2.0 * out, LineCap::Round, c);
             }
             s = s.stroke_path(&path, width, LineCap::Round, core);
         }
-        // One direction arrow mid-wire, along the route: its outline, then its core.
-        let tri = arrow(mid, width, exec);
+        // One direction arrow along the route, clear of other wires: its outline, then its core.
+        // Wires sharing a socket run together there, so they don't push each other's arrows.
+        let bundled = |j: usize| g.wires[j].from == w.from || g.wires[j].to == w.to;
+        let tri = arrow(arrow_spot(i, &routes, &boxes, bundled), width, exec);
         if let Some((out, c)) = under {
             s = s.fill(grow_triangle(tri, out).to_vec(), c);
         }
@@ -282,20 +316,116 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
 
 /// How far a routed (backedge or wrapped-row) wire swings out of and into its sockets.
 const BACK_REACH: f32 = 26.0 * 1.4;
+/// Spacing between the runs of nested loop backedges.
+const BACK_LANE: f32 = 12.0;
+/// How much wider each outer backedge's legs swing: a leg's widest point is ¾ of its reach out,
+/// so this keeps nested legs `BACK_LANE` apart there too.
+const BACK_LEG: f32 = BACK_LANE / 0.75;
+/// A direction arrow (its tip, centre and base) keeps this far from every other wire, so it
+/// never sits on a crossing.
+const ARROW_CLEAR: f32 = 8.0;
+/// How far an arrow's tip and base reach either side of its centre, about (see [`arrow`]).
+const ARROW_TIP: f32 = 6.0;
+const ARROW_BASE: f32 = 3.0;
 
-/// Point and unit tangent at the middle (t = 0.5) of a cubic Bézier.
-fn cubic_mid(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2]) -> ([f32; 2], [f32; 2]) {
-    let at = |i: usize| (p0[i] + 3.0 * (p1[i] + p2[i]) + p3[i]) / 8.0;
-    // B'(½) = ¾ (p3 + p2 − p1 − p0).
-    let d = |i: usize| 0.75 * (p3[i] + p2[i] - p1[i] - p0[i]);
-    ([at(0), at(1)], unit([d(0), d(1)], [p3[0] - p0[0], p3[1] - p0[1]]))
+/// Where a loop backedge's run would go on its own: under both its nodes and every node it
+/// would cross, but above the next wrapped row.
+fn back_below(pl: &crate::layout::Placed, o: [f32; 2], w: &model::Wire, a: [f32; 2], b: [f32; 2]) -> f32 {
+    let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
+    let (lo, hi) = (a[0].min(b[0]) - 40.0, a[0].max(b[0]) + 40.0);
+    let limit = pl.row_gaps.iter().map(|g| g + o[1]).find(|&g| g > a[1]).unwrap_or(f32::MAX);
+    let mut below = bottom(w.from.0).max(bottom(w.to.0)) + 22.0;
+    loop {
+        let deeper = (0..pl.pos.len())
+            .filter(|&i| {
+                let (x, y) = (pl.pos[i][0] + o[0], pl.pos[i][1] + o[1]);
+                x < hi && x + pl.size[i][0] > lo && y < below && bottom(i) + 22.0 > below
+            })
+            .map(|i| bottom(i) + 22.0)
+            .fold(below, f32::max);
+        if deeper <= below || deeper >= limit {
+            break below;
+        }
+        below = deeper;
+    }
 }
 
-/// Point and unit tangent halfway along a polyline, by arc length.
-fn polyline_mid(pts: &[[f32; 2]]) -> ([f32; 2], [f32; 2]) {
+/// A loop backedge before lane assignment.
+struct BackRun {
+    /// Its source socket's height: the lower socket takes the inner lane, so nested runs
+    /// never cross where they leave their sockets.
+    socket_y: f32,
+    /// Horizontal extent of the route, legs included.
+    lo: f32,
+    hi: f32,
+    /// Where its run would go on its own.
+    below: f32,
+}
+
+/// Gives loop backedges whose runs overlap separate lanes: each run sits at least `BACK_LANE`
+/// from every overlapping run, and each outer one's legs swing `BACK_LEG` wider than the inner
+/// ones', so a loop's exec and data ways back stay apart end to end. Returns `(below, reach)`
+/// per run, in input order.
+fn back_lanes(runs: &[BackRun]) -> Vec<(f32, f32)> {
+    let mut order: Vec<usize> = (0..runs.len()).collect();
+    order.sort_by(|&i, &j| runs[j].socket_y.total_cmp(&runs[i].socket_y).then(i.cmp(&j)));
+    let mut out = vec![(0.0, BACK_REACH); runs.len()];
+    let mut placed: Vec<usize> = vec![];
+    for i in order {
+        let r = &runs[i];
+        let near: Vec<usize> = placed.iter().copied().filter(|&j| runs[j].lo < r.hi && r.lo < runs[j].hi).collect();
+        let mut below = r.below;
+        // Deeper until clear of every overlapping run; pushes only go down, so this ends.
+        while let Some(&j) = near.iter().find(|&&j| (out[j].0 - below).abs() < BACK_LANE) {
+            below = out[j].0 + BACK_LANE;
+        }
+        let reach = near.iter().filter(|&&j| out[j].0 < below).map(|&j| out[j].1 + BACK_LEG).fold(BACK_REACH, f32::max);
+        out[i] = (below, reach);
+        placed.push(i);
+    }
+    out
+}
+
+/// Point and unit tangent for wire `own`'s direction arrow: halfway along its route, unless
+/// another (non-`bundled`) wire passes within `ARROW_CLEAR` of the arrow there, as at a
+/// crossing; then the nearest clear spot among 40, 60, 30 and 70 % of the way.
+fn arrow_spot(own: usize, routes: &[Vec<[f32; 2]>], boxes: &[[f32; 4]], bundled: impl Fn(usize) -> bool) -> ([f32; 2], [f32; 2]) {
+    let clear = |(c, d): ([f32; 2], [f32; 2])| {
+        let m = ARROW_CLEAR;
+        let along = |k: f32| [c[0] + d[0] * k, c[1] + d[1] * k];
+        let probes = [along(ARROW_TIP), c, along(-ARROW_BASE)];
+        let reach = m + ARROW_TIP;
+        (0..routes.len())
+            .filter(|&j| j != own && !bundled(j))
+            // Most wires are nowhere near: skip them on their bounding box.
+            .filter(|&j| {
+                let b = boxes[j];
+                c[0] > b[0] - reach && c[0] < b[2] + reach && c[1] > b[1] - reach && c[1] < b[3] + reach
+            })
+            .all(|j| routes[j].windows(2).all(|s| probes.iter().all(|&p| seg_dist(p, s[0], s[1]) >= m)))
+    };
+    let spot = |f: f32| polyline_at(&routes[own], f);
+    [0.5, 0.4, 0.6, 0.3, 0.7].into_iter().map(spot).find(|&s| clear(s)).unwrap_or_else(|| spot(0.5))
+}
+
+/// `[min x, min y, max x, max y]` of a polyline.
+fn bbox(pts: &[[f32; 2]]) -> [f32; 4] {
+    pts.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])])
+}
+
+/// Distance from `p` to the segment `a`–`b`.
+fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (d, v) = ([b[0] - a[0], b[1] - a[1]], [p[0] - a[0], p[1] - a[1]]);
+    let l2 = d[0] * d[0] + d[1] * d[1];
+    let t = if l2 > 0.0 { ((v[0] * d[0] + v[1] * d[1]) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    (v[0] - d[0] * t).hypot(v[1] - d[1] * t)
+}
+
+/// Point and unit tangent `frac` of the way along a polyline, by arc length.
+fn polyline_at(pts: &[[f32; 2]], frac: f32) -> ([f32; 2], [f32; 2]) {
     let len = |s: &[[f32; 2]]| ((s[1][0] - s[0][0]).powi(2) + (s[1][1] - s[0][1]).powi(2)).sqrt();
     let total: f32 = pts.windows(2).map(len).sum();
-    let mut left = total / 2.0;
+    let mut left = total * frac;
     for seg in pts.windows(2) {
         let l = len(seg);
         if l > 0.0 && left <= l {
@@ -320,10 +450,12 @@ fn unit(v: [f32; 2], fallback: [f32; 2]) -> [f32; 2] {
     }
 }
 
-/// A direction arrow centred on `mid`, pointing along its unit tangent, sized to the stroke
-/// (exec a little larger): `[tip, left base, right base]`.
+/// A direction arrow centred on `mid`, pointing along its unit tangent, growing with the stroke:
+/// `[tip, left base, right base]`. An exec arrow's core is barely larger than a data one's; its
+/// casing makes the drawn exec arrow about 1.5 times a data arrow's area, so neither swamps the
+/// wires around it.
 fn arrow((c, d): ([f32; 2], [f32; 2]), width: f32, exec: bool) -> [[f32; 2]; 3] {
-    let len = width * 2.6 + if exec { 3.0 } else { 2.5 };
+    let len = width * 1.5 + if exec { 3.9 } else { 6.3 };
     let half = len * 0.62;
     let n = [-d[1], d[0]];
     // Centre the triangle's centroid on the route, so it sits balanced on the curve.
@@ -348,25 +480,23 @@ fn grow_triangle(t: [[f32; 2]; 3], by: f32) -> [[f32; 2]; 3] {
     t.map(|p| [ic[0] + (p[0] - ic[0]) * k, ic[1] + (p[1] - ic[1]) * k])
 }
 
+/// A cubic Bézier sampled at 17 evenly spaced `t`, appended to `out`.
+fn cubic_points(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], out: &mut Vec<[f32; 2]>) {
+    for k in 0..=16 {
+        let t = k as f32 / 16.0;
+        let u = 1.0 - t;
+        let (c0, c1, c2, c3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        out.push([c0 * p0[0] + c1 * p1[0] + c2 * p2[0] + c3 * p3[0], c0 * p0[1] + c1 * p1[1] + c2 * p2[1] + c3 * p3[1]]);
+    }
+}
+
 /// The routed (backedge or wrapped-row) path as a polyline: out of `a`, down to `below`,
-/// across, and up into `b` (the same curve as the solid route, sampled so it can be dashed and
-/// measured). The straight run is the segment between the two sampled curves.
-fn back_points(a: [f32; 2], b: [f32; 2], below: f32) -> Vec<[f32; 2]> {
-    let r = BACK_REACH;
-    let cubic = |p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], out: &mut Vec<[f32; 2]>| {
-        for k in 0..=16 {
-            let t = k as f32 / 16.0;
-            let u = 1.0 - t;
-            let (c0, c1, c2, c3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-            out.push([
-                c0 * p0[0] + c1 * p1[0] + c2 * p2[0] + c3 * p3[0],
-                c0 * p0[1] + c1 * p1[1] + c2 * p2[1] + c3 * p3[1],
-            ]);
-        }
-    };
+/// across, and up into `b`, its legs swinging `reach` beside the sockets (the same curve as
+/// [`Curve::path`]). The straight run is the segment between the two sampled curves.
+fn back_points(a: [f32; 2], b: [f32; 2], below: f32, reach: f32) -> Vec<[f32; 2]> {
     let mut pts = vec![];
-    cubic(a, [a[0] + r, a[1]], [a[0] + r, below], [a[0], below], &mut pts);
-    cubic([b[0], below], [b[0] - r, below], [b[0] - r, b[1]], b, &mut pts);
+    cubic_points(a, [a[0] + reach, a[1]], [a[0] + reach, below], [a[0], below], &mut pts);
+    cubic_points([b[0], below], [b[0] - reach, below], [b[0] - reach, b[1]], b, &mut pts);
     pts
 }
 
@@ -497,7 +627,15 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     // node's corner, as far from the right edge as from the top, with a concentric radius.
     let chips = n.kind == Kind::Group || n.lang != Lang::None;
     let chip_r = concentric(RADIUS, NODE_CHIP_INSET, CHIP_H);
-    let mut header = row().h(model::HEADER).pl(10.0).pr(if chips { NODE_CHIP_INSET } else { 10.0 }).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
+    // A node without pins (a field-less type) is its header alone, rounded all round.
+    let pinless = n.ins.is_empty() && n.outs.is_empty();
+    let pr = match (chips, expandable && n.evidence != Evidence::None) {
+        (_, true) => NODE_CHIP_INSET + BADGE_CLEAR,
+        (true, false) => NODE_CHIP_INSET,
+        (false, false) => 10.0,
+    };
+    let bottom = if pinless { RADIUS } else { 0.0 };
+    let mut header = row().h(model::HEADER).pl(10.0).pr(pr).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, bottom, bottom])
         .child(el().w(16.0).center()
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)).single_line()))
         .child(text(n.title.clone()).font(header_font(n.kind)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
@@ -509,7 +647,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         header = header.child(lang_chip(p, n.lang).radius(chip_r));
     }
     if expandable {
-        header = header.child(group_button(Color::WHITE.alpha(0.85), Color::BLACK.alpha(0.2), true)
+        header = header.child(group_button(Color::WHITE.alpha(0.95), Color::BLACK.alpha(0.25), true, look.badge_scale)
             .key(format!("expand-group-{i}"))
             .on_press(move |s: &mut State| s.expand_node(i))
             .help("Expand group"));
@@ -526,8 +664,11 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         });
     }
 
-    let mut card = col().w(w).fill(p.node_body).radius(RADIUS).border(1.0, p.node_border)
-        .child(header).child(body)
+    let mut card = col().w(w).fill(p.node_body).radius(RADIUS).border(1.0, p.node_border).child(header);
+    if !pinless {
+        card = card.child(body);
+    }
+    card = card
         .shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
     if n.kind == Kind::Group {
         // A collapsed group reads as a stack of cards.
@@ -621,32 +762,77 @@ mod tests {
     }
 
     #[test]
-    fn cubic_mid_is_the_curve_at_half_with_its_tangent() {
-        // An S-curve from (0,0) to (100,40) with horizontal handles: its middle is the midpoint,
-        // and its tangent there is B'(½) = ¾ (p3 + p2 − p1 − p0), steeper than the chord.
-        let (p, d) = cubic_mid([0.0, 0.0], [50.0, 0.0], [50.0, 40.0], [100.0, 40.0]);
-        assert!(close(p, [50.0, 20.0]));
-        assert!(close(d, unit([75.0, 60.0], [1.0, 0.0])));
+    fn a_wire_arrow_sits_mid_curve_along_its_tangent() {
+        // An S-curve from (0,0) to (100,40) with horizontal handles is symmetric about its
+        // middle, so halfway by length is the midpoint, heading steeper than the chord.
+        let pts = Curve::Cubic([[0.0, 0.0], [50.0, 0.0], [50.0, 40.0], [100.0, 40.0]]).points();
+        let (p, d) = polyline_at(&pts, 0.5);
+        assert!((p[0] - 50.0).abs() < 1e-2 && (p[1] - 20.0).abs() < 1e-2, "{p:?}");
+        assert!(d[1] / d[0] > 0.4, "{d:?}");
         // A straight wire points along itself.
-        let (_, d) = cubic_mid([0.0, 0.0], [28.0, 0.0], [72.0, 0.0], [100.0, 0.0]);
+        let (_, d) = polyline_at(&Curve::Cubic([[0.0, 0.0], [28.0, 0.0], [72.0, 0.0], [100.0, 0.0]]).points(), 0.5);
         assert!(close(d, [1.0, 0.0]));
     }
 
     #[test]
-    fn polyline_mid_is_halfway_by_length() {
+    fn polyline_at_measures_by_length() {
         // 30 down, then 100 back left: halfway (65) is 35 along the run, heading left.
-        let (p, d) = polyline_mid(&[[0.0, 0.0], [0.0, 30.0], [-100.0, 30.0]]);
+        let pts = [[0.0, 0.0], [0.0, 30.0], [-100.0, 30.0]];
+        let (p, d) = polyline_at(&pts, 0.5);
         assert!(close(p, [-35.0, 30.0]));
         assert!(close(d, [-1.0, 0.0]));
+        let (p, d) = polyline_at(&pts, 0.1);
+        assert!(close(p, [0.0, 13.0]));
+        assert!(close(d, [0.0, 1.0]));
     }
 
     #[test]
     fn a_backedge_arrow_sits_on_its_straight_run_heading_back() {
         // Out of a source on the right, under both nodes, back into a target on the left.
         let (a, b, below) = ([400.0, 100.0], [100.0, 120.0], 300.0);
-        let (p, d) = polyline_mid(&back_points(a, b, below));
+        let (p, d) = polyline_at(&back_points(a, b, below, BACK_REACH), 0.5);
         assert!((p[1] - below).abs() < 1e-3 && p[0] > b[0] && p[0] < a[0], "{p:?}");
         assert!(close(d, [-1.0, 0.0]));
+    }
+
+    #[test]
+    fn overlapping_backedges_get_separate_lanes() {
+        // A loop's exec and data ways back: same span, same natural depth; the data socket sits
+        // lower at the source.
+        let run = |socket_y: f32, lo: f32, hi: f32| BackRun { socket_y, lo, hi, below: 685.0 };
+        let lanes = back_lanes(&[run(340.0, 500.0, 1100.0), run(365.0, 500.0, 1100.0)]);
+        let ((exec_below, exec_reach), (data_below, data_reach)) = (lanes[0], lanes[1]);
+        // The lower socket keeps the inner lane; the other runs deeper and swings wider.
+        assert_eq!((data_below, data_reach), (685.0, BACK_REACH));
+        assert!(exec_below - data_below >= 8.0, "runs {exec_below} / {data_below}");
+        // Their legs, at their widest, and their arrows, halfway along each, are as far apart.
+        let (a, b) = ([1100.0, 340.0], [530.0, 575.0]);
+        let exec = back_points(a, b, exec_below, exec_reach);
+        let data = back_points([a[0], 365.0], [b[0], 645.0], data_below, data_reach);
+        let widest = |pts: &[[f32; 2]]| pts.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
+        assert!(widest(&exec) - widest(&data) >= 8.0, "legs {} / {}", widest(&exec), widest(&data));
+        let (ea, da) = (polyline_at(&exec, 0.5).0, polyline_at(&data, 0.5).0);
+        assert!((ea[1] - da[1]).abs() >= 8.0, "{ea:?} {da:?}");
+
+        // A third run nested under both stacks again; a run elsewhere keeps its own depth.
+        let lanes = back_lanes(&[run(340.0, 500.0, 1100.0), run(365.0, 500.0, 1100.0), run(300.0, 600.0, 900.0), run(340.0, 1200.0, 1500.0)]);
+        assert!(lanes[2].0 - lanes[0].0 >= BACK_LANE && lanes[2].1 > lanes[0].1, "{lanes:?}");
+        assert_eq!(lanes[3], (685.0, BACK_REACH));
+    }
+
+    #[test]
+    fn an_arrow_slides_off_a_crossing() {
+        // A horizontal wire crossed just past its middle by a vertical one: its arrow (tip
+        // included) moves back to 40 %.
+        let routes = vec![vec![[0.0, 0.0], [100.0, 0.0]], vec![[55.0, -50.0], [55.0, 50.0]]];
+        let boxes: Vec<_> = routes.iter().map(|r| bbox(r)).collect();
+        let (p, d) = arrow_spot(0, &routes, &boxes, |_| false);
+        assert!(close(p, [40.0, 0.0]) && close(d, [1.0, 0.0]), "{p:?}");
+        // Unless the two are bundled (sharing a socket), or nothing is near.
+        assert!(close(arrow_spot(0, &routes, &boxes, |_| true).0, [50.0, 0.0]));
+        let far = vec![routes[0].clone(), vec![[55.0, 20.0], [55.0, 50.0]]];
+        let boxes: Vec<_> = far.iter().map(|r| bbox(r)).collect();
+        assert!(close(arrow_spot(0, &far, &boxes, |_| false).0, [50.0, 0.0]));
     }
 
     #[test]
@@ -657,13 +843,20 @@ mod tests {
         assert!(close(centroid, [10.0, 10.0]));
         let base = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
         assert!(close(unit([tip[0] - base[0], tip[1] - base[1]], [0.0, 0.0]), d));
-        // Exec arrows are larger than data ones; both grow with the stroke.
+        // Both grow with the stroke.
         let size = |w: f32, exec: bool| {
             let [t, l, _] = arrow(([0.0, 0.0], [1.0, 0.0]), w, exec);
             t[0] - l[0]
         };
-        assert!(size(2.8, true) > size(1.8, false));
         assert!(size(2.6, false) > size(1.8, false));
+        // Drawn, an exec arrow (core plus its 1 pt casing) is about 1.5 times a data arrow's
+        // area, at rest and emphasised: larger, not a blot over the wires around it.
+        let area = |t: [[f32; 2]; 3]| ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs() / 2.0;
+        for extra in [0.0, 0.8] {
+            let exec = area(grow_triangle(arrow(([0.0, 0.0], [1.0, 0.0]), 2.8 + extra, true), 1.0));
+            let data = area(arrow(([0.0, 0.0], [1.0, 0.0]), 1.8 + extra, false));
+            assert!((1.3..=1.7).contains(&(exec / data)), "exec:data {}", exec / data);
+        }
     }
 
     #[test]

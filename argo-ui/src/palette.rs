@@ -18,13 +18,18 @@ pub struct Pal {
     pub panel_border: Color,
     pub text: Color,
     pub muted: Color,
+    /// The quietest text; still 4.5:1 on panels and the canvas.
     pub faint: Color,
+    /// Selection and primary-button fill; white text on it stays 4.5:1.
     pub accent: Color,
     pub code_bg: Color,
     pub shadow: Color,
     pub exec: Color,
     /// Outline around exec wires and diamonds.
     pub exec_casing: Color,
+    /// What wires away from the hovered or selected item fade toward. Dark mode fades into the
+    /// canvas; light mode into a grey that keeps them traceable (3:1 on the canvas).
+    pub wire_dim: Color,
     pub u32_: Color,
     pub bool_: Color,
     pub ptr: Color,
@@ -80,12 +85,20 @@ impl Pal {
     }
 
     /// Language chip (fill, text): neutral for C, rust orange for Rust, independent of header hue.
+    /// The rust fill is dark enough for its small white label (4.5:1).
     pub fn chip(&self, lang: Lang) -> (Color, Color) {
         match (lang, self.dark) {
-            (Lang::Rust, _) => (h("#e8703a"), Color::WHITE),
+            (Lang::Rust, _) => (h("#c4521f"), Color::WHITE),
             (_, true) => (h("#3a3f47"), h("#c9d1d9")),
             (_, false) => (h("#e8eaed"), h("#3c4043")),
         }
+    }
+
+    /// A wire colour faded for wires away from the hovered or selected item. Mixed toward an
+    /// opaque colour, never by alpha: translucent polylines double-blend at their joints. Light
+    /// mode goes most of the way to its grey, so dense graphs stay calm but every wire traceable.
+    pub fn dim_wire(&self, c: Color) -> Color {
+        c.mix(self.wire_dim, if self.dark { 0.6 } else { 0.75 })
     }
 
     /// Small type-name text: darker than the pin colour in light mode for contrast.
@@ -118,11 +131,12 @@ fn dark_pal() -> Pal {
         text: h("#e4e4e7"),
         muted: h("#aeb4be"),
         faint: h("#7a7f88"),
-        accent: h("#5b8def"),
+        accent: h("#3b6fd9"),
         code_bg: h("#1c1c1f"),
         shadow: Color::BLACK.alpha(0.5),
         exec: h("#e8e8e8"),
         exec_casing: h("#0d0d0f"),
+        wire_dim: h("#18181a"),
         u32_: h("#3fb6a2"),
         bool_: h("#d6588a"),
         ptr: h("#6b8fd6"),
@@ -146,16 +160,58 @@ fn light_pal() -> Pal {
         panel_border: h("#dadae0"),
         text: h("#1f1f23"),
         muted: h("#59616c"),
-        faint: h("#8a8f98"),
+        faint: h("#686d76"),
         accent: h("#3d6fc2"),
         code_bg: h("#f3f3f6"),
         shadow: Color::BLACK.alpha(0.12),
         exec: h("#3b404c"),
         exec_casing: h("#ffffff"),
+        wire_dim: h("#86868c"),
         u32_: h("#118a78"),
         bool_: h("#b8406e"),
         ptr: h("#3f63b0"),
         ok: h("#067647"),
         bad: h("#b42318"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG 2 contrast ratio. `Color` holds linear components, so its luminance is relative
+    /// luminance directly.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let (la, lb) = (a.luminance(), b.luminance());
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn small_text_meets_wcag_aa() {
+        let (light, dark) = (Pal::new(false), Pal::new(true));
+        for p in [light, dark] {
+            // The RS chip's white label.
+            let (fill, fg) = p.chip(Lang::Rust);
+            assert!(contrast(fg, fill) >= 4.5, "RS chip {}", contrast(fg, fill));
+            // White primary-button labels on the accent.
+            assert!(contrast(Color::WHITE, p.accent) >= 4.5, "white/accent {}", contrast(Color::WHITE, p.accent));
+        }
+        // Light-mode faint text on panels and on the canvas.
+        assert!(contrast(light.faint, light.panel) >= 4.5, "faint/panel {}", contrast(light.faint, light.panel));
+        assert!(contrast(light.faint, light.canvas) >= 4.5, "faint/canvas {}", contrast(light.faint, light.canvas));
+        // The darker dark-mode accent still marks a selection on the canvas (3:1, non-text).
+        assert!(contrast(dark.accent, dark.canvas) >= 3.0, "accent/canvas {}", contrast(dark.accent, dark.canvas));
+    }
+
+    #[test]
+    fn faded_wires_stay_traceable_in_light_mode_but_weaker() {
+        let p = Pal::new(false);
+        let dist = |a: Color, b: Color| (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
+        for ty in [Ty::Exec, Ty::U32, Ty::Bool, Ty::Ptr] {
+            let (full, dim) = (p.ty(ty), p.dim_wire(p.ty(ty)));
+            assert!(contrast(dim, p.canvas) >= 3.0, "{ty:?} faded {}", contrast(dim, p.canvas));
+            // Weaker: most of the way to the neutral dimming grey.
+            assert!(dist(dim, p.wire_dim) < dist(full, p.wire_dim) * 0.5, "{ty:?}");
+        }
     }
 }

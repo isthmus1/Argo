@@ -54,9 +54,16 @@ struct Edge {
     weight: f32,
 }
 
+/// A node's size as drawn: `model::size`, except that a node without pins (a field-less type)
+/// is its header alone (see `graph::node`).
+fn drawn_size(n: &Node) -> [f32; 2] {
+    let [w, h] = model::size(n);
+    if n.ins.is_empty() && n.outs.is_empty() { [w, model::HEADER] } else { [w, h] }
+}
+
 pub fn layout(g: &Graph) -> Placed {
     let n = g.nodes.len();
-    let size: Vec<[f32; 2]> = g.nodes.iter().map(model::size).collect();
+    let size: Vec<[f32; 2]> = g.nodes.iter().map(drawn_size).collect();
     let mut pos = vec![[0.0, 0.0]; n];
     let mut frames = Vec::new();
 
@@ -672,4 +679,39 @@ pub fn with_getters(mut g: Graph) -> Graph {
         }
     }
     g
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::State;
+
+    #[test]
+    fn frames_inset_their_members_evenly() {
+        let scenes = [State::protocol_module(true), State::protocol_fixture(), State::load("fixture"), State::load("interp")];
+        let mut checked = 0;
+        for s in &scenes {
+            let (g, pl) = (&s.view, &s.placed);
+            for (gi, f) in pl.frames.iter().enumerate() {
+                let m: Vec<usize> = (0..g.nodes.len()).filter(|&i| g.nodes[i].group == Some(gi)).collect();
+                if m.is_empty() {
+                    continue;
+                }
+                let min = |k: usize| m.iter().map(|&i| pl.pos[i][k]).fold(f32::MAX, f32::min);
+                let max = |k: usize| m.iter().map(|&i| pl.pos[i][k] + pl.size[i][k]).fold(f32::MIN, f32::max);
+                let insets = [min(0) - f[0], f[0] + f[2] - max(0), f[1] + f[3] - max(1), min(1) - f[1]];
+                let want = [FRAME_PAD, FRAME_PAD, FRAME_PAD, FRAME_TITLE];
+                assert!(insets.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3), "{}: group {gi} insets {insets:?}", s.scene);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2, "only {checked} frames");
+    }
+
+    #[test]
+    fn a_node_without_pins_is_only_its_header() {
+        let s = State::protocol_module(false);
+        let ty = s.view.nodes.iter().position(|n| n.ins.is_empty() && n.outs.is_empty()).expect("a field-less type");
+        assert_eq!(s.placed.size[ty][1], model::HEADER);
+    }
 }
