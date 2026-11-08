@@ -12,9 +12,10 @@
 //! - Loop backedges (`exec.next`, `next.*`) are drawn but don't rank layout columns.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use argo_protocol::{
-    Candidate, ClaimPhase, Failure, Family, GraphIndex, Language, NodeId, NodeKind as P,
+    AttemptId, Candidate, ClaimPhase, Failure, Family, GraphIndex, Language, NodeId, NodeKind as P,
     NodeStatus, Outcome, PinKind, Relation, Snapshot, ValueType, Verdict, view,
 };
 
@@ -164,9 +165,14 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> Shown {
     let shown = shown(snap, ix, id);
     // An empty effect list means "not analysed yet", not pure: the card infers from shape.
     let effects = ix.node(shown).filter(|n| !n.effects.is_empty()).map(|n| n.effects.iter().map(effect).collect());
-    let Some(s) = snap.status(shown) else {
-        return Shown { lang: Lang::None, evidence: Evidence::None, claim: None, rejection: None, effects };
-    };
+    let (lang, evidence, claim) = own_status(snap, shown);
+    let rejection = snap.status(shown).and_then(|s| rejection(snap, s));
+    Shown { lang, evidence, claim, rejection, effects }
+}
+
+/// Language, evidence and claim of the node itself (a function, as the explorer lists it).
+pub fn own_status(snap: &Snapshot, id: NodeId) -> (Lang, Evidence, Option<Claim>) {
+    let Some(s) = snap.status(id) else { return (Lang::None, Evidence::None, None) };
     let lang = match s.accepted {
         Language::None => Lang::None,
         Language::C => Lang::C,
@@ -176,14 +182,16 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> Shown {
         Evidence::Rejected
     } else if s.is_accepted_rust() {
         Evidence::Accepted
+    } else if s.candidate.as_ref().is_some_and(|c| c.language == Language::Rust && c.verdict == Verdict::Unvalidated) {
+        Evidence::Unvalidated
     } else {
         Evidence::None
     };
     let claim = s.claim.as_ref().map(|c| Claim {
         worker: u8::try_from(c.worker.0).unwrap_or(u8::MAX),
-        active: c.phase == ClaimPhase::Running,
+        active: c.phase == ClaimPhase::Running && !lease_expired(snap, c.attempt),
     });
-    Shown { lang, evidence, claim, rejection: rejection(snap, s), effects }
+    (lang, evidence, claim)
 }
 
 /// Whether opening this container draws a frame: a function, module or program, or a container
@@ -191,6 +199,14 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> Shown {
 fn node_group(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> bool {
     let group = ix.node(id).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program));
     group || snap.status(id).is_some_and(|s| s.collapsed)
+}
+
+/// Whether a claim's attempt outlived its lease: its worker stopped renewing it (it died or lost
+/// its connection), so nothing is being translated until another worker reclaims the node. A zero
+/// lease is unknown (the fixture and snapshot files record none).
+pub fn lease_expired(snap: &Snapshot, attempt: AttemptId) -> bool {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    snap.attempts.iter().find(|a| a.id == attempt).is_some_and(|a| a.lease_expires_ms != 0 && u128::from(a.lease_expires_ms) <= now)
 }
 
 fn is_backedge(ix: &GraphIndex, to: &argo_protocol::PinRef) -> bool {
@@ -343,6 +359,19 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         origin,
         frames,
     }
+}
+
+/// The Rust source a node shows (its callee's for a call site): the accepted implementation, else
+/// the latest candidate's, when its preview was recorded.
+pub fn rust_source(snap: &Snapshot, id: NodeId) -> Option<&str> {
+    let ix = GraphIndex::new(&snap.graph);
+    let s = snap.status(shown(snap, &ix, id))?;
+    let implementation = s.implementation.or(s.candidate.as_ref().map(|c| c.implementation))?;
+    snap.implementations
+        .iter()
+        .find(|i| i.id == implementation && i.language == Language::Rust)?
+        .preview
+        .as_deref()
 }
 
 /// Whether a protocol node can be opened in place.

@@ -5,6 +5,9 @@
 //! Controls inside a floating card sit `INSET` from every edge with a radius concentric with
 //! the card's corner (`CONTROL_R = RADIUS - INSET`).
 
+use std::collections::HashSet;
+
+
 use crate::app::{Item, MARGIN, State};
 use crate::describe;
 use crate::graph::{self, RADIUS};
@@ -128,7 +131,7 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         .on_layout(|s: &mut State, r| s.resized([r[2], r[3]]))
         .child(graph::view(p, s, w, h).absolute(0.0, 0.0))
         .child(breadcrumb(p, s).absolute(left, M))
-        .child(row().gap(8.0).child(crate::dialogs::toolbar(p, s)).child(status(p, s)).pin(None, Some(M), Some(M), None));
+        .child(chrome(p, s).pin(None, Some(M), Some(M), None));
     if s.project.is_some() {
         root = root.child(crate::dialogs::explorer(p, s).absolute(M, TOP));
     }
@@ -154,6 +157,14 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
     }
     root
+}
+
+/// Top-right controls. Watching SpacetimeDB offers no Open: what is shown and what is
+/// translated are the database's and the workers' business.
+fn chrome(p: &Pal, s: &State) -> El {
+    let r = row().gap(8.0);
+    let r = if s.db.is_some() { r } else { r.child(crate::dialogs::toolbar(p, s)) };
+    r.child(status(p, s))
 }
 
 /// A hover card's accent: its border's colour, the item's header family.
@@ -273,7 +284,7 @@ fn sized_icon_button(p: &Pal, content: El, help: &str, d: f32, r: f32) -> El {
     el().size(d, d).min_w(d).radius(r).center().hover(p.code_bg).cursor(Cursor::Pointer).help(help).child(content)
 }
 
-/// Where the graph on screen comes from. Nothing here is a live backend connection.
+/// Where the graph on screen comes from. Only a watched database is a live backend connection.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Source {
     /// A seeded mock scene with simulated agent activity.
@@ -284,9 +295,14 @@ pub(crate) enum Source {
     Snapshot(String),
     /// A C project opened from a git URL or directory.
     Project(String),
+    /// A SpacetimeDB module being watched live, and whether its subscription is connected.
+    Db { module: String, online: bool },
 }
 
 pub(crate) fn source(s: &State) -> Source {
+    if let Some(link) = &s.db {
+        return Source::Db { module: link.module.clone(), online: s.online };
+    }
     if let Some(proj) = &s.project {
         return Source::Project(proj.source.clone());
     }
@@ -305,6 +321,8 @@ impl Source {
             Source::Fixture { left } => format!("Protocol fixture · replaying, {left} updates left"),
             Source::Snapshot(path) => format!("Snapshot file · {path}"),
             Source::Project(src) => format!("C project · {src}"),
+            Source::Db { module, online: true } => format!("SpacetimeDB module “{module}” · connected, updating live"),
+            Source::Db { module, online: false } => format!("SpacetimeDB module “{module}” · offline, reconnecting; showing the last rows"),
         }
     }
 
@@ -326,6 +344,8 @@ impl Source {
             }
             Source::Snapshot(_) => "snapshot".into(),
             Source::Project(_) => "project".into(),
+            Source::Db { online: true, .. } => "live".into(),
+            Source::Db { online: false, .. } => "offline".into(),
         }
     }
 }
@@ -357,21 +377,43 @@ fn source_glyph(p: &Pal, src: &Source) -> Shape {
             let outline = Path::new().move_to([0.8, 2.0]).line_to([3.8, 2.0]).line_to([5.0, 3.2]).line_to([9.2, 3.2]).line_to([9.2, 8.6]).line_to([0.8, 8.6]).close();
             Shape::new().stroke_path(&outline, w, LineCap::Round, c)
         }
+        // A dot: filled and green while connected, a hollow ring while offline.
+        Source::Db { online: true, .. } => Shape::new().fill(ring([5.0, 5.0], 3.5, 20), p.ok),
+        Source::Db { online: false, .. } => {
+            let pts = ring([5.0, 5.0], 3.0, 20);
+            let outline = pts[1..].iter().fold(Path::new().move_to(pts[0]), |path, &q| path.line_to(q)).close();
+            Shape::new().stroke_path(&outline, w, LineCap::Round, p.faint)
+        }
     }
 }
 
-/// Every claimed item on screen: worker, whether it is translating, title, and the item.
-pub(crate) fn workers(s: &State) -> Vec<(u8, bool, String, Item)> {
+/// Every claim shown: worker, whether it is translating, title, and the item on screen that
+/// shows it (none for a claim on a function the canvas doesn't show, watching a database).
+pub(crate) fn workers(s: &State) -> Vec<(u8, bool, String, Option<Item>)> {
     let mut out = vec![];
     for (i, n) in s.view.nodes.iter().enumerate() {
         if let Some(c) = n.claim {
-            out.push((c.worker, c.active, n.title.clone(), Item::Node(i)));
+            out.push((c.worker, c.active, n.title.clone(), Some(Item::Node(i))));
         }
     }
     for (g, grp) in s.view.groups.iter().enumerate() {
         let drawn = !s.collapsed.get(g).copied().unwrap_or(false) && s.placed.frames.get(g).is_some_and(|f| f[2] > 0.0);
         if let Some(c) = grp.claim.filter(|_| drawn) {
-            out.push((c.worker, c.active, grp.title.clone(), Item::Group(g)));
+            out.push((c.worker, c.active, grp.title.clone(), Some(Item::Group(g))));
+        }
+    }
+    // Watching a database, every claim counts, not only those on the shown function's canvas.
+    // Each goes to the node or frame showing it (a call site shows its callee's), if any.
+    if let Some(live) = s.live.as_ref().filter(|_| s.db.is_some()) {
+        let snap = &live.snap;
+        let claimed: HashSet<NodeId> = snap.status.iter().filter(|st| st.claim.is_some()).map(|st| st.node).collect();
+        let on_screen = std::mem::take(&mut out);
+        for n in snap.graph.nodes.iter().filter(|n| claimed.contains(&n.id)) {
+            let Some(c) = crate::bridge::own_status(snap, n.id).2 else { continue };
+            let item = live.origin.iter().position(|&o| o == n.id).map(Item::Node)
+                .or_else(|| live.frames.iter().position(|&f| f == n.id).map(Item::Group))
+                .or_else(|| on_screen.iter().find(|w| w.0 == c.worker).and_then(|w| w.3));
+            out.push((c.worker, c.active, n.name.clone(), item));
         }
     }
     out.sort_by_key(|w| (w.0, !w.1));
@@ -405,8 +447,11 @@ fn status(p: &Pal, s: &State) -> El {
             .child(hover_ring)
             .child(graph::avatar(p, worker, true, AVATAR).absolute(0.0, 0.0))
             .child(state_glyph(p, active).absolute(BADGE_AT, BADGE_AT));
-        r = r.child(icon_button(p, a, &worker_tip(worker, active, &title)).hover_group().key(format!("worker-{k}"))
-            .on_press(move |s: &mut State| reveal(s, item)));
+        let b = icon_button(p, a, &worker_tip(worker, active, &title, item.is_some(), idle(s))).hover_group().key(format!("worker-{k}"));
+        r = r.child(match item {
+            Some(item) => b.on_press(move |s: &mut State| reveal(s, item)),
+            None => b.cursor(Cursor::Default),
+        });
     }
     let dark = p.dark;
     if any_worker {
@@ -466,9 +511,11 @@ fn crescent(c0: [f32; 2], r0: f32, c1: [f32; 2], r1: f32) -> Vec<[f32; 2]> {
     pts
 }
 
-/// A worker avatar's tooltip: where a press goes, then what the worker is doing there.
-fn worker_tip(worker: u8, active: bool, title: &str) -> String {
-    format!("Go to {title}\nworker {worker} · {}", if active { "translating" } else { "queued" })
+/// A worker avatar's tooltip: where a press goes, then what the worker is doing there. `idle`
+/// is what an inactive claim means here (see [`idle`]).
+fn worker_tip(worker: u8, active: bool, title: &str, shown: bool, idle: &str) -> String {
+    let doing = if active { "translating" } else { idle };
+    if shown { format!("Go to {title}\nworker {worker} · {doing}") } else { format!("{title} (not on this canvas)\nworker {worker} · {doing}") }
 }
 
 /// The toolbar's worker avatar diameter.
@@ -543,7 +590,7 @@ fn hover_w(s: &State, item: Item) -> f32 {
     if c.badge() {
         title += 9.0 + 20.0;
     }
-    if n.evidence == Evidence::Accepted {
+    if matches!(n.evidence, Evidence::Accepted | Evidence::Unvalidated) {
         title += 9.0 + 20.0;
     }
     if n.lang != crate::model::Lang::None {
@@ -915,14 +962,26 @@ fn effect_key(tip: &str) -> String {
     format!("{tip}\n● effects · ○ pure · (?) unknown or inferred")
 }
 
-/// The header's mark for an accepted Rust implementation.
-fn accepted_glyph(p: &Pal) -> El {
-    el().size(20.0, 20.0).radius(10.0).fill(p.ok.alpha(0.18)).center().help("Rust implementation accepted")
-        .child(text("✓").font(TextStyle::new(11.0, 800.0)).color(p.ok))
+/// The header's mark for a Rust implementation: accepted, or submitted and not judged yet. A
+/// failed candidate is told by the "checks failed" line under the header instead.
+fn evidence_glyph(p: &Pal, e: Evidence) -> Option<El> {
+    let (g, c, tip) = match e {
+        Evidence::None | Evidence::Rejected => return None,
+        Evidence::Accepted => ("✓", p.ok, "Rust implementation accepted"),
+        Evidence::Unvalidated => ("?", p.pending, "Rust candidate submitted, not validated yet"),
+    };
+    Some(el().size(20.0, 20.0).radius(10.0).fill(c.alpha(0.18)).center().help(tip)
+        .child(text(g).font(TextStyle::new(11.0, 800.0)).color(c)))
+}
+
+/// What an inactive claim means: queued in the mock scenes; watching a database, where every
+/// claim starts running, a lease that ran out.
+fn idle(s: &State) -> &'static str {
+    if s.db.is_some() { "lease expired" } else { "queued" }
 }
 
 /// One compact line of agent activity, and one for a failed candidate. No prose banners.
-fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence) -> Option<El> {
+fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence, idle: &str) -> Option<El> {
     let mut c = col().gap(6.0);
     let mut any = false;
     if let Some(cl) = claim {
@@ -930,7 +989,7 @@ fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence) -> 
         c = c.child(row().h(22.0).gap(8.0).items_center()
             .child(graph::avatar(p, cl.worker, true, 18.0))
             .child(text(format!("worker {}", cl.worker)).font(UI_STRONG).color(p.text))
-            .child(label(if cl.active { "translating" } else { "queued" }, p.muted)));
+            .child(label(if cl.active { "translating" } else { idle }, p.muted)));
     }
     if evidence == Evidence::Rejected {
         any = true;
@@ -1159,7 +1218,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let width = if docked { detail_w() } else { hover_w(s, item) };
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, &kicker_text(n), tile)).child(head));
-            if let Some(a) = activity(p, n.claim, n.evidence) {
+            if let Some(a) = activity(p, n.claim, n.evidence, idle(s)) {
                 body = body.child(a);
             }
             if docked && let Some(r) = n.rejection.as_ref().filter(|_| n.evidence == Evidence::Rejected) {
@@ -1167,6 +1226,9 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             }
             if docked {
                 body = body.child(code_block(p, &c.signature, detail_w() - 2.0 * DOCK_PAD, 9.0));
+                if let Some(code) = rust_code(p, s, i) {
+                    body = body.child(code);
+                }
             }
             if !c.inputs.is_empty() || !c.outputs.is_empty() {
                 let cols = port_columns(c.inputs.iter().chain(&c.outputs));
@@ -1203,7 +1265,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let head = header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, badge.clone().filter(|_| !docked), Some(members.len()), docked, tools);
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, "node group", p.header(Category::Function))).child(head));
-            if let Some(a) = activity(p, grp.claim, grp.evidence) {
+            if let Some(a) = activity(p, grp.claim, grp.evidence, idle(s)) {
                 body = body.child(a);
             }
             if docked && let Some(r) = grp.rejection.as_ref().filter(|_| grp.evidence == Evidence::Rejected) {
@@ -1239,6 +1301,23 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
 /// node group whether it is drawn as a frame or as one node.
 fn kicker_text(n: &crate::model::Node) -> String {
     if n.kind == Kind::Group { "node group · collapsed".into() } else { n.kind.category().name().into() }
+}
+
+/// The Rust a worker wrote for a node (accepted, or the latest candidate), first lines only.
+fn rust_code(p: &Pal, s: &State, i: usize) -> Option<El> {
+    const LINES: usize = 24;
+    let live = s.live.as_ref()?;
+    let source = crate::bridge::rust_source(&live.snap, *live.origin.get(i)?)?;
+    let mut code = col().padding(10.0).radius(8.0).fill(p.code_bg)
+        .child(row().gap(6.0).items_center().child(graph::lang_chip(p, crate::model::Lang::Rust)));
+    for line in source.lines().take(LINES) {
+        code = code.child(mono(if line.is_empty() { " " } else { line }, p.text).single_line().truncate());
+    }
+    let more = source.lines().count().saturating_sub(LINES);
+    if more > 0 {
+        code = code.child(label(&format!("+{more} lines"), p.faint));
+    }
+    Some(code)
 }
 
 /// What kind of node this is, in words, above the title: the header colour's meaning.
@@ -1302,8 +1381,8 @@ fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, la
     }
     // Absent marks add nothing, not an empty slot plus its gap. A failed candidate is told by
     // the "checks failed" line under the header, so only an accepted one is marked here.
-    if evidence == Evidence::Accepted {
-        chips.push(accepted_glyph(p));
+    if let Some(g) = evidence_glyph(p, evidence) {
+        chips.push(g);
     }
     if lang != crate::model::Lang::None {
         chips.push(graph::lang_chip(p, lang));
@@ -1564,8 +1643,9 @@ mod tests {
 
     #[test]
     fn worker_tips_say_where_a_press_goes() {
-        assert_eq!(worker_tip(2, false, "alu"), "Go to alu\nworker 2 · queued");
-        assert!(worker_tip(1, true, "step").starts_with("Go to step\n"));
+        assert_eq!(worker_tip(2, false, "alu", true, "queued"), "Go to alu\nworker 2 · queued");
+        assert!(worker_tip(1, true, "step", true, "queued").starts_with("Go to step\n"));
+        assert!(worker_tip(3, false, "elsewhere", false, "lease expired").ends_with("worker 3 · lease expired"));
     }
 
     #[test]
@@ -1797,6 +1877,7 @@ mod chrome_tests {
         let ws = workers(&s);
         assert!(ws.len() >= 2, "the fixture has two workers");
         for (_, _, title, item) in ws {
+            let item = item.expect("a mock scene's claims are all on screen");
             s.cam.pan = [-900.0, 700.0];
             reveal(&mut s, item);
             assert_eq!(s.selected, Some(item), "{title}");

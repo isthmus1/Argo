@@ -136,6 +136,21 @@ fn files_combine_into_one_graph_with_a_module_per_original_file() {
         .find(|n| n.kind == NodeKind::Program)
         .unwrap();
     assert_eq!(program.name, "sample");
+
+    // Byte offsets index the combined text; places trace each function back to the original
+    // file and line it starts on.
+    for n in opened.snapshot.graph.nodes.iter() {
+        let (NodeKind::Function, Some(p)) = (&n.kind, &n.provenance) else {
+            continue;
+        };
+        let (file, line) = opened.places.at(p.range.lo).unwrap();
+        let original = std::fs::read_to_string(root.join(file)).unwrap();
+        let text = original.lines().nth(line as usize - 1).unwrap();
+        assert!(
+            text.contains(&format!("{}(", n.name)),
+            "{file}:{line}: {text}"
+        );
+    }
 }
 
 #[test]

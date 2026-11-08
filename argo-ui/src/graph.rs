@@ -1396,6 +1396,7 @@ fn decorate(p: &Pal, mut e: El, [w, h]: [f32; 2], radius: f32, evidence: Evidenc
     let badge = match evidence {
         Evidence::None => return e,
         Evidence::Accepted => ("✓", p.ok),
+        Evidence::Unvalidated => ("?", p.pending),
         Evidence::Rejected => ("!", p.bad),
     };
     let d = 18.0;

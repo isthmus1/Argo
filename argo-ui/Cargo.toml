@@ -8,6 +8,9 @@ description = "Argo control-plane client: node-graph canvas, inspectors and live
 
 [dependencies]
 argo-protocol = { path = "../argo-protocol" }
+# SpacetimeDB mode: generated bindings and rows -> snapshot, over the client SDK.
+argo-db-client = { path = "../argo-db-client" }
+spacetimedb-sdk.workspace = true
 # Browse… in the open dialog picks a folder with the system dialog (the XDG portal on Linux).
 rune-ui = { workspace = true, features = ["native-file-dialog"] }
 serde_json.workspace = true

@@ -72,6 +72,29 @@ The golden target is ambitious; an incomplete golden gate must be reported as in
 - **Nemotron:** the intended understanding/planning/implementation workflow, beyond a chatbot.
 - **Legacy modernization:** a natural fit for the 8090 challenge alongside SpacetimeDB and NVIDIA.
 
+## Run it
+
+Needs the `spacetime` CLI (2.0.x, matching `spacetimedb-sdk`), git, a C preprocessor, and the
+`wasm32-unknown-unknown` Rust target. Use one terminal per process:
+
+```sh
+# Server: starts SpacetimeDB on 127.0.0.1:3100, publishes argo-db, ingests the repository's C
+# chunks, and stops the database on Ctrl-C. `--fresh` replaces a different ingested commit.
+cargo run --release -p argo-server -- ~/src/project            # or a git URL[#ref]; -D/-I flags
+
+# Workers (any number): each clones the recorded commit, claims chunks and submits Rust.
+export OPENAI_BASE_URL=https://integrate.api.nvidia.com OPENAI_API_KEY=... OPENAI_MODEL=...
+cargo run --release -p argo-worker -- --db ws://127.0.0.1:3100 --module argo \
+  [--max-attempts 3] [--escalation-model M --escalate-after 2] [--once]
+
+# GUI: watches the rows live, read-only; it never clones or parses the repository.
+cargo run --release -p argo-ui -- --db ws://127.0.0.1:3100 --module argo
+# Headless capture: add `--snap out.png`; ARGO_FUNCTION=name picks the function shown.
+```
+
+`OPENAI_BASE_URL` is the host without `/v1`; the client appends `/v1/chat/completions`.
+Candidates are submitted as *unvalidated* until the compile/link/C-test `Validator` lands.
+
 ## Parser and graph prototype
 
 The parser lives in `argo/` (package `Argo`, library and binary `main`). Run

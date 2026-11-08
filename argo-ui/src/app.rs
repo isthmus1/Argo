@@ -7,6 +7,7 @@ use std::collections::{HashSet, VecDeque};
 use argo_protocol::{NodeId, NodeKind, Snapshot, Update, fixture};
 
 use crate::bridge;
+use crate::db;
 use crate::layout::{self, Placed};
 use crate::project;
 use crate::model::{Evidence, Graph, Kind, Lang, Origin};
@@ -131,6 +132,10 @@ pub struct State {
     pub forms: project::Forms,
     pub modal: Option<project::Modal>,
     pub loader: Option<project::Loader>,
+    /// SpacetimeDB mode: the subscription every graph and status shown comes from.
+    pub db: Option<db::Link>,
+    /// SpacetimeDB mode: whether the subscription is connected (always true otherwise).
+    pub online: bool,
     next_event: f64,
     step: usize,
     /// Whether the camera has been fitted to the real window size yet.
@@ -143,8 +148,26 @@ pub struct Live {
     pub container: Option<NodeId>,
     pub open: HashSet<NodeId>,
     pending: VecDeque<Update>,
-    origin: Vec<NodeId>,
-    frames: Vec<NodeId>,
+    /// View node index → protocol node (see [`bridge::Projection::origin`]).
+    pub(crate) origin: Vec<NodeId>,
+    pub(crate) frames: Vec<NodeId>,
+}
+
+fn open_all_requested() -> bool {
+    std::env::var("ARGO_OPEN").is_ok_and(|v| v == "all")
+}
+
+/// Every node inside `container`, at any depth.
+fn descendants(snap: &Snapshot, container: NodeId) -> HashSet<NodeId> {
+    let mut open = HashSet::new();
+    let mut stack = vec![container];
+    while let Some(c) = stack.pop() {
+        for n in snap.graph.nodes.iter().filter(|n| n.parent == Some(c)) {
+            open.insert(n.id);
+            stack.push(n.id);
+        }
+    }
+    open
 }
 
 impl Live {
@@ -228,28 +251,36 @@ fn contains(a: [f32; 4], r: [f32; 4], slack: f32) -> bool {
 }
 
 impl State {
+    /// A mock scene, fitted to the window.
     pub fn load(scene: &'static str) -> State {
-        let graph = layout::with_getters(scenes::scene(scene));
+        let mut s = State::with_graph(scene, layout::with_getters(scenes::scene(scene)));
+        s.fit();
+        s
+    }
+
+    /// Nothing on the canvas but its breadcrumb: where protocol-backed scenes start.
+    pub fn empty(scene: &'static str, crumbs: Vec<String>) -> State {
+        State::with_graph(scene, Graph { crumbs, nodes: vec![], wires: vec![], groups: vec![], selected_group: None, expanded: None })
+    }
+
+    fn with_graph(scene: &'static str, graph: Graph) -> State {
         let collapsed = vec![false; graph.groups.len()];
         let selected = graph.selected_group.map(Item::Group);
         let mut s = State {
             scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![], generation: 0 },
-            cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, live: None, next_event: 4.0, step: 0,
-            project: None, forms: project::Forms::default(), modal: None, loader: None,
+            cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None, next_event: 4.0, step: 0,
+            project: None, forms: project::Forms::default(), modal: None, loader: None, db: None,
             // A state built after the window's first layout already knows its size.
             sized: ui::viewport() != [ui::W, ui::H],
         };
         s.relayout();
-        s.fit();
         s
     }
 
     /// A protocol-backed scene: show `container`'s level with `open` drawn in place, then replay
     /// `transcript` as live deltas.
     pub fn from_snapshot(scene: &'static str, snap: Snapshot, container: Option<NodeId>, open: HashSet<NodeId>, transcript: Vec<Update>) -> State {
-        let mut s = State::load("fixture");
-        s.scene = scene;
-        s.selected = None;
+        let mut s = State::empty(scene, vec![]);
         s.live = Some(Live { snap, container, open, pending: transcript.into(), origin: vec![], frames: vec![] });
         s.reproject();
         s.relayout();
@@ -293,21 +324,18 @@ impl State {
             .filter(|n| n.parent == Some(f.id) && n.kind == NodeKind::Scope)
             .map(|n| n.id)
             .collect();
-        // `ARGO_OPEN=all` opens every construct inside the shown level.
-        let open = if std::env::var("ARGO_OPEN").is_ok_and(|v| v == "all") {
-            let mut open = HashSet::new();
-            let mut stack = vec![container];
-            while let Some(c) = stack.pop() {
-                for n in snap.graph.nodes.iter().filter(|n| n.parent == Some(c)) {
-                    open.insert(n.id);
-                    stack.push(n.id);
-                }
-            }
-            open
-        } else {
-            body.into_iter().collect()
-        };
+        let open = if open_all_requested() { descendants(&snap, container) } else { body.into_iter().collect() };
         Ok(State::from_snapshot("snapshot", snap, Some(container), open, vec![]))
+    }
+
+    /// Captures: `ARGO_OPEN=all` opens every construct inside the shown function.
+    pub fn open_all_if_requested(&mut self) {
+        let Some(live) = &mut self.live else { return };
+        let Some(container) = live.container.filter(|_| open_all_requested()) else { return };
+        live.open = descendants(&live.snap, container);
+        self.reproject();
+        self.relayout();
+        self.fit();
     }
 
     /// Apply up to `n` pending deltas at once (scripted captures).
@@ -337,7 +365,7 @@ impl State {
     }
 
     /// Rebuild the view graph only: claims and evidence changed, positions did not.
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         self.view = self.graph.collapse(&self.collapsed).0;
     }
 

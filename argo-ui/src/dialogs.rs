@@ -7,6 +7,7 @@ use rune_ui::{
 };
 
 use crate::app::State;
+use crate::model::Evidence;
 use crate::palette::Pal;
 use crate::project::{self, Modal};
 use crate::ui::{CONTROL_H, CONTROL_R, LABEL, M, MONO, TOP, UI, UI_STRONG, bar, card, explorer_w, label, viewport};
@@ -90,6 +91,35 @@ pub fn toolbar(p: &Pal, _: &State) -> El {
     bar(p, r).key("toolbar")
 }
 
+/// A function's translation state beside its name: the claiming worker, else its evidence badge.
+/// Calls fold into statements on the canvas, so this is where every function's state shows.
+fn work_mark(p: &Pal, s: &State, id: argo_protocol::NodeId) -> Option<El> {
+    let live = s.live.as_ref()?;
+    let (_, evidence, claim) = crate::bridge::own_status(&live.snap, id);
+    if let Some(c) = claim {
+        let tip = format!(
+            "worker {} · {}",
+            c.worker,
+            if c.active { "translating" } else { "queued" }
+        );
+        return Some(crate::graph::avatar(p, c.worker, c.active, 16.0).help(tip));
+    }
+    let (glyph, color, tip) = match evidence {
+        Evidence::None => return None,
+        Evidence::Accepted => ("✓", p.ok, "Rust accepted"),
+        Evidence::Unvalidated => ("?", p.pending, "Rust candidate, not validated"),
+        Evidence::Rejected => ("✕", p.bad, "translation failed"),
+    };
+    Some(
+        el().size(16.0, 16.0)
+            .radius(8.0)
+            .fill(color.alpha(0.18))
+            .center()
+            .help(tip)
+            .child(text(glyph).font(TextStyle::new(9.5, 800.0)).color(color)),
+    )
+}
+
 /// Files and their functions, filterable, docked on the left under the breadcrumb.
 pub fn explorer(p: &Pal, s: &State) -> El {
     let Some(proj) = &s.project else { return el() };
@@ -144,7 +174,7 @@ pub fn explorer(p: &Pal, s: &State) -> El {
     .truncate()
     .help(format!(
         "Checked out at {}\nPreprocessor flags: {}",
-        proj.root.display(),
+        proj.checkout,
         proj.flags.join(" ")
     ));
     let filter = field(
@@ -183,6 +213,9 @@ pub fn explorer(p: &Pal, s: &State) -> El {
                     .grow(1.0)
                     .min_w(0.0),
             );
+        if let Some(mark) = work_mark(p, s, id) {
+            r = r.child(mark);
+        }
         if let Some(m) = module {
             r = r.child(
                 text(m.to_string())
@@ -704,7 +737,7 @@ mod tests {
         project::Project {
             name: "settings".into(),
             source: "~/src/settings".into(),
-            root: "/tmp/settings".into(),
+            checkout: "/tmp/settings".into(),
             units: vec![argo_c::project::Unit {
                 path: "config.c".into(),
                 skipped: None,

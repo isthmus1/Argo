@@ -89,6 +89,8 @@ pub enum Lang {
 pub enum Evidence {
     None,
     Accepted,
+    /// A Rust candidate was submitted but nothing has judged it; the C implementation stays.
+    Unvalidated,
     /// The latest candidate was rejected by a counterexample.
     Rejected,
 }

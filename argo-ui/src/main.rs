@@ -14,9 +14,16 @@
 //!
 //! C projects: `argo-ui <git-url>[#rev] [-DNAME=v -Ipath]` (or a local directory) clones into a
 //! temporary folder, preprocesses and opens it; Ctrl+O opens the same from inside the app.
+//!
+//! SpacetimeDB: `argo-ui --db ws://127.0.0.1:3000 [--module argo]` (or `ARGO_DB`, `ARGO_MODULE`)
+//! watches the database `argo-server` ingested and workers translate, live. Everything shown comes
+//! from its rows; nothing is cloned or parsed. A lost connection keeps the last rows on screen,
+//! marked offline, and reconnects. The window is read-only there: Ctrl+O and the scene keys
+//! `1`–`6` do nothing. `--snap` waits for the rows, then captures.
 
 mod app;
 mod bridge;
+mod db;
 mod describe;
 mod dialogs;
 mod graph;
@@ -49,12 +56,14 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     tx.wake_after(Duration::from_millis(500));
-    let loaded = project::poll(s);
+    let loaded = project::poll(s) | db::poll(s);
     s.poll(now) || loaded
 }
 
 fn on_key(s: &mut State, k: &KeyEvent, _: &mut Tx) -> bool {
-    if k.is_command('o') {
+    // Watching a database, the canvas only ever shows its rows: no opening, no mock scenes.
+    let watching = s.db.is_some();
+    if k.is_command('o') && !watching {
         if s.modal != Some(project::Modal::Loading) {
             s.modal = Some(project::Modal::Open);
         }
@@ -65,8 +74,8 @@ fn on_key(s: &mut State, k: &KeyEvent, _: &mut Tx) -> bool {
     }
     match &k.key {
         Key::Text(t) if t == "f" => s.fit_all(),
-        Key::Text(t) if t == "6" => *s = State::protocol_fixture(),
-        Key::Text(t) if t.len() == 1 && ("1"..="5").contains(&t.as_str()) => {
+        Key::Text(t) if t == "6" && !watching => *s = State::protocol_fixture(),
+        Key::Text(t) if t.len() == 1 && ("1"..="5").contains(&t.as_str()) && !watching => {
             *s = State::load(SCENES[t.parse::<usize>().expect("digit") - 1]);
         }
         Key::Escape => s.selected = None,
@@ -87,20 +96,29 @@ fn hover(s: &mut State, title: &str) {
     }
 }
 
-/// Start-up state: a project named on the command line (cloned and opened in the background,
-/// or right away for headless captures), else `ARGO_SNAPSHOT`, else the mock fixture.
+/// Start-up state: a SpacetimeDB to watch (`--db`/`ARGO_DB`), else a project named on the command
+/// line (cloned and opened in the background, or right away for headless captures), else
+/// `ARGO_SNAPSHOT`, else the mock fixture.
 fn init() -> State {
     let mut spec = None;
     let (mut flags, mut rev) = (vec![], String::new());
+    let (mut uri, mut module) = (std::env::var("ARGO_DB").ok(), std::env::var("ARGO_MODULE").ok());
     let mut args = rune_ui::extra_args().iter();
     while let Some(a) = args.next() {
         if a == "--rev" {
             rev = args.next().cloned().unwrap_or_default();
+        } else if a == "--db" {
+            uri = args.next().cloned();
+        } else if a == "--module" {
+            module = args.next().cloned();
         } else if ["-D", "-U", "-I"].iter().any(|p| a.starts_with(p)) {
             flags.push(a.clone());
         } else if !a.starts_with('-') {
             spec = Some(a.clone());
         }
+    }
+    if let Some(uri) = uri {
+        return watch(&uri, module.as_deref().unwrap_or("argo"));
     }
     let Some(spec) = spec else {
         // Real protocol data by default, so the breadcrumb is a hierarchy to navigate; the
@@ -118,16 +136,37 @@ fn init() -> State {
             eprintln!("argo-ui: {e}");
             std::process::exit(2);
         }
-        if let Ok(f) = std::env::var("ARGO_FUNCTION") {
-            let id = s.project.as_ref().and_then(|p| p.modules.iter().flat_map(|m| &m.functions).find(|(_, n)| *n == f).map(|(id, _)| *id));
-            if let Some(id) = id {
-                project::open_function(&mut s, id);
-            }
-        }
+        open_env_function(&mut s);
     } else {
         project::start(&mut s);
     }
     s
+}
+
+/// Watch a database. A headless capture waits for its rows first (`ARGO_FUNCTION` picks the
+/// function shown, `ARGO_OPEN=all` opens everything in it); a window opens right away and fills
+/// in as they arrive.
+fn watch(uri: &str, module: &str) -> State {
+    let link = db::connect(uri, module);
+    if !std::env::args().any(|a| a == "--snap") {
+        return State::db_waiting(link, "connecting");
+    }
+    let mut s = db::first(link, Duration::from_secs(30)).unwrap_or_else(|e| {
+        eprintln!("argo-ui: {e}");
+        std::process::exit(2);
+    });
+    open_env_function(&mut s);
+    s.open_all_if_requested();
+    s
+}
+
+/// Show the function `ARGO_FUNCTION` names, if set and present (headless captures).
+fn open_env_function(s: &mut State) {
+    let Ok(f) = std::env::var("ARGO_FUNCTION") else { return };
+    let id = s.project.as_ref().and_then(|p| p.modules.iter().flat_map(|m| &m.functions).find(|(_, n)| *n == f).map(|(id, _)| *id));
+    if let Some(id) = id {
+        project::open_function(s, id);
+    }
 }
 
 /// The snapshot named by `ARGO_SNAPSHOT`, if set.

@@ -19,6 +19,7 @@ mod files;
 pub mod git;
 pub mod lines;
 pub mod make;
+mod places;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,6 +31,7 @@ use crate::{Parser, export, templates};
 use cpp::Input;
 use files::{relative, short};
 use lines::Mapped;
+pub use places::Places;
 
 /// The flags every file gets from `root`'s Makefile.
 pub fn makefile_flags(root: &Path) -> Vec<String> {
@@ -102,6 +104,8 @@ pub struct Opened {
     /// The preprocessor flags used, Makefile ones first.
     pub flags: Vec<String>,
     pub root: PathBuf,
+    /// Where each byte of the snapshot's (combined, preprocessed) source came from.
+    pub places: Places,
 }
 
 /// Clone `r` into a temporary directory and open it.
@@ -237,16 +241,13 @@ pub fn open(
             }
         }
         opts.cancelled()?;
+        let places = Places::new(mapped, &root);
         progress(Step::Building);
         let graph = parsed
             .ast
             .build_graph(&parsed.source, templates::all())
             .map_err(|e| e.to_string())?;
-        let module_of = |pos: u32| {
-            let o = mapped.origin(pos);
-            let path = lines::canonical(o.file)?;
-            path.starts_with(&root).then(|| relative(&root, &path))
-        };
+        let module_of = |pos: u32| places.at(pos).map(|(path, _)| path.to_string());
         let (mut g, source) = export::to_protocol_modules(
             &graph,
             &parsed.ast,
@@ -263,6 +264,7 @@ pub fn open(
             units,
             flags,
             root,
+            places,
         });
     }
 }
