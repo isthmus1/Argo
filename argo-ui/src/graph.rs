@@ -4,7 +4,7 @@
 use crate::app::{Item, MARGIN, State};
 use crate::model::{self, Claim, Evidence, Graph, Kind, Lang, Node, Pin, ROW, Ty};
 use crate::palette::Pal;
-use rune_ui::{Color, Cursor, El, LineCap, Path, Phase, Shape, TextStyle, canvas, col, el, row, text};
+use rune_ui::{Color, Cursor, Drag, El, LineCap, Path, Shape, TextStyle, Tx, canvas, col, el, row, text};
 
 const SOCKET: TextStyle = TextStyle::new(11.0, 450.0);
 /// Matches the floating panels' corner radius.
@@ -69,23 +69,35 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
     let (ex, ey) = (sx + ww * s.cam.zoom, sy + wh * s.cam.zoom);
     let fade = |more: bool| if more { 56.0 } else { 0.0 };
     el().key("canvas").size(w, h).fill(p.canvas).clip_fade(fade(sx < 0.0), fade(sy < 0.0), fade(ex > w), fade(ey > h)).cursor(Cursor::Grab)
-        .on_drag(|s: &mut State, d, _| {
-            match d.phase {
-                Phase::Down => s.cam.drag_from = s.cam.pan,
-                Phase::Move | Phase::Up => s.cam.pan = [s.cam.drag_from[0] + d.dx, s.cam.drag_from[1] + d.dy],
+        .on_drag(pan)
+        // Every camera change lands at once: the world (nodes and wires, under one scale) and
+        // the grid canvas beside it must show the same camera on every frame, and a layout
+        // spring on the world would trail the grid.
+        .on_wheel(|s: &mut State, e, tx| {
+            s.cam.zoom_about(e.x, e.y, (-e.dy * 0.0025).exp());
+            tx.instant();
+            true
+        })
+        .on_magnify(|s: &mut State, e, tx| {
+            s.cam.zoom_about(e.x, e.y, 1.0 + e.delta);
+            tx.instant();
+            true
+        })
+        .on_press(|s: &mut State| {
+            // The release of a pan is no click: keep the selection.
+            if !s.cam.take_panned() {
+                s.selected = None;
             }
         })
-        .on_wheel(|s: &mut State, e, _| {
-            s.cam.zoom_about(e.x, e.y, (-e.dy * 0.0025).exp());
-            true
-        })
-        .on_magnify(|s: &mut State, e, _| {
-            s.cam.zoom_about(e.x, e.y, 1.0 + e.delta);
-            true
-        })
-        .on_press(|s: &mut State| s.selected = None)
         .child(canvas(grid(p, s, w, h)).size(w, h).absolute(0.0, 0.0))
         .child(world)
+}
+
+/// A pan drag, from the canvas or anything on it (the graph is read-only, so dragging a node
+/// pans too). Every phase lands at once, its release included, so nothing springs after it.
+fn pan(s: &mut State, d: &mut Drag, tx: &mut Tx) {
+    s.cam.drag(d.phase, [d.dx, d.dy]);
+    tx.instant();
 }
 
 /// Grid lines that move with the camera; minor lines fade out when they get dense.
@@ -126,8 +138,9 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
     let fr = el().size(w, h).fill(p.frame_fill).radius(FRAME_RADIUS)
         .border(border.0, border.1)
         .child(title.absolute(0.0, 0.0))
-        .on_press(move |s: &mut State| s.select(Item::Group(gi)))
+        .on_press(move |s: &mut State| if !s.cam.take_panned() { s.select(Item::Group(gi)) })
         .on_double_press(move |s: &mut State| s.toggle_group(gi))
+        .on_drag(pan)
         .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Group(gi), on));
     decorate(p, fr, [w, h], FRAME_RADIUS, f.evidence, f.claim, look)
 }
@@ -187,7 +200,9 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
                 *lane += 1;
                 y
             });
-        let mut path_below = None;
+        let mut route = None;
+        // Where the direction arrow sits: the middle of the route, along its tangent.
+        let mid;
         let path = if w.back || wrap_gap.is_some() {
             // A loop backedge runs out of its source, under both nodes, and back into the target.
             let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
@@ -210,16 +225,19 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
                     below = deeper;
                 }
             });
-            path_below = Some(below);
-            let r = 26.0;
+            let pts = back_points(a, b, below);
+            mid = polyline_mid(&pts);
+            route = Some(pts);
             Path::new()
                 .move_to(a)
-                .cubic_to([a[0] + r * 1.4, a[1]], [a[0] + r * 1.4, below], [a[0], below])
+                .cubic_to([a[0] + BACK_REACH, a[1]], [a[0] + BACK_REACH, below], [a[0], below])
                 .line_to([b[0], below])
-                .cubic_to([b[0] - r * 1.4, below], [b[0] - r * 1.4, b[1]], b)
+                .cubic_to([b[0] - BACK_REACH, below], [b[0] - BACK_REACH, b[1]], b)
         } else {
             let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
-            Path::new().move_to(a).cubic_to([a[0] + dx, a[1]], [b[0] - dx, b[1]], b)
+            let (c1, c2) = ([a[0] + dx, a[1]], [b[0] - dx, b[1]]);
+            mid = cubic_mid(a, c1, c2, b);
+            Path::new().move_to(a).cubic_to(c1, c2, b)
         };
         let ty = g.wire_ty(w);
         let exec = ty == Ty::Exec;
@@ -230,33 +248,111 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         // double-blend at their joints and read as dotted.
         let fade = |c: Color| if lit { c } else { c.mix(p.canvas, 0.6) };
         let core = fade(p.ty(ty));
-        if w.back {
+        // The outline under the core, if any: exec wires' casing; lit data wires' dark halo.
+        let under = if exec {
+            Some((1.0, fade(p.exec_casing)))
+        } else if p.dark && lit && !w.back {
+            Some((0.8, p.canvas.mix(Color::BLACK, 0.4)))
+        } else {
+            None
+        };
+        if let Some(pts) = route.as_deref().filter(|_| w.back) {
             // A loop's way back is dashed, so it never reads as forward flow.
-            for dash in dashes(&back_points(a, b, path_below.unwrap_or_default()), 9.0, 6.0) {
-                if exec {
-                    s = s.stroke(dash.clone(), width + 2.0, fade(p.exec_casing));
+            for dash in dashes(pts, 9.0, 6.0) {
+                if let Some((out, c)) = under {
+                    s = s.stroke(dash.clone(), width + 2.0 * out, c);
                 }
                 s = s.stroke(dash, width, core);
             }
         } else {
-            if exec {
-                s = s.stroke_path(&path, width + 2.0, LineCap::Round, fade(p.exec_casing));
-            } else if p.dark && lit {
-                s = s.stroke_path(&path, width + 1.6, LineCap::Round, p.canvas.mix(Color::BLACK, 0.4));
+            if let Some((out, c)) = under {
+                s = s.stroke_path(&path, width + 2.0 * out, LineCap::Round, c);
             }
             s = s.stroke_path(&path, width, LineCap::Round, core);
         }
-        // Arrowhead just before the target socket: direction never depends on layout.
-        let (tip, back, half) = (b[0] - 7.0, b[0] - 15.0, if exec { 5.0 } else { 4.0 });
-        s = s.fill(vec![[back, b[1] - half], [tip, b[1]], [back, b[1] + half]], core);
+        // One direction arrow mid-wire, along the route: its outline, then its core.
+        let tri = arrow(mid, width, exec);
+        if let Some((out, c)) = under {
+            s = s.fill(grow_triangle(tri, out).to_vec(), c);
+        }
+        s = s.fill(tri.to_vec(), core);
     }
     s
 }
 
-/// The backedge route as a polyline: out of `a`, down to `below`, across, and up into `b`
-/// (the same curve as the solid route, sampled so it can be dashed).
+/// How far a routed (backedge or wrapped-row) wire swings out of and into its sockets.
+const BACK_REACH: f32 = 26.0 * 1.4;
+
+/// Point and unit tangent at the middle (t = 0.5) of a cubic Bézier.
+fn cubic_mid(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+    let at = |i: usize| (p0[i] + 3.0 * (p1[i] + p2[i]) + p3[i]) / 8.0;
+    // B'(½) = ¾ (p3 + p2 − p1 − p0).
+    let d = |i: usize| 0.75 * (p3[i] + p2[i] - p1[i] - p0[i]);
+    ([at(0), at(1)], unit([d(0), d(1)], [p3[0] - p0[0], p3[1] - p0[1]]))
+}
+
+/// Point and unit tangent halfway along a polyline, by arc length.
+fn polyline_mid(pts: &[[f32; 2]]) -> ([f32; 2], [f32; 2]) {
+    let len = |s: &[[f32; 2]]| ((s[1][0] - s[0][0]).powi(2) + (s[1][1] - s[0][1]).powi(2)).sqrt();
+    let total: f32 = pts.windows(2).map(len).sum();
+    let mut left = total / 2.0;
+    for seg in pts.windows(2) {
+        let l = len(seg);
+        if l > 0.0 && left <= l {
+            let t = left / l;
+            let d = [seg[1][0] - seg[0][0], seg[1][1] - seg[0][1]];
+            return ([seg[0][0] + d[0] * t, seg[0][1] + d[1] * t], unit(d, [1.0, 0.0]));
+        }
+        left -= l;
+    }
+    (pts.last().copied().unwrap_or_default(), [1.0, 0.0])
+}
+
+/// `v` normalised, or `fallback` normalised when `v` is degenerate.
+fn unit(v: [f32; 2], fallback: [f32; 2]) -> [f32; 2] {
+    let n = v[0].hypot(v[1]);
+    if n > 1e-4 {
+        [v[0] / n, v[1] / n]
+    } else if fallback[0].hypot(fallback[1]) > 1e-4 {
+        unit(fallback, [1.0, 0.0])
+    } else {
+        [1.0, 0.0]
+    }
+}
+
+/// A direction arrow centred on `mid`, pointing along its unit tangent, sized to the stroke
+/// (exec a little larger): `[tip, left base, right base]`.
+fn arrow((c, d): ([f32; 2], [f32; 2]), width: f32, exec: bool) -> [[f32; 2]; 3] {
+    let len = width * 2.6 + if exec { 3.0 } else { 2.5 };
+    let half = len * 0.62;
+    let n = [-d[1], d[0]];
+    // Centre the triangle's centroid on the route, so it sits balanced on the curve.
+    let tip = [c[0] + d[0] * len * 2.0 / 3.0, c[1] + d[1] * len * 2.0 / 3.0];
+    let base = [c[0] - d[0] * len / 3.0, c[1] - d[1] * len / 3.0];
+    [tip, [base[0] + n[0] * half, base[1] + n[1] * half], [base[0] - n[0] * half, base[1] - n[1] * half]]
+}
+
+/// `t` with every edge pushed `by` points outward (scaled about its incentre), so its outline
+/// matches a stroke's casing of the same thickness.
+fn grow_triangle(t: [[f32; 2]; 3], by: f32) -> [[f32; 2]; 3] {
+    let d = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).hypot(p[1] - q[1]);
+    // Side lengths opposite each vertex weight the incentre.
+    let (la, lb, lc) = (d(t[1], t[2]), d(t[0], t[2]), d(t[0], t[1]));
+    let per = la + lb + lc;
+    let area = ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs() / 2.0;
+    if per <= 0.0 || area <= 0.0 {
+        return t;
+    }
+    let ic = [(la * t[0][0] + lb * t[1][0] + lc * t[2][0]) / per, (la * t[0][1] + lb * t[1][1] + lc * t[2][1]) / per];
+    let k = (2.0 * area / per + by) / (2.0 * area / per);
+    t.map(|p| [ic[0] + (p[0] - ic[0]) * k, ic[1] + (p[1] - ic[1]) * k])
+}
+
+/// The routed (backedge or wrapped-row) path as a polyline: out of `a`, down to `below`,
+/// across, and up into `b` (the same curve as the solid route, sampled so it can be dashed and
+/// measured). The straight run is the segment between the two sampled curves.
 fn back_points(a: [f32; 2], b: [f32; 2], below: f32) -> Vec<[f32; 2]> {
-    let r = 26.0 * 1.4;
+    let r = BACK_REACH;
     let cubic = |p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], out: &mut Vec<[f32; 2]>| {
         for k in 0..=16 {
             let t = k as f32 / 16.0;
@@ -372,8 +468,9 @@ fn emphasis(p: &Pal, e: El, look: Look) -> El {
 fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: Look) -> El {
     let head = p.header(n.kind.category());
     let interact = move |e: El| {
-        e.on_press(move |s: &mut State| s.select(Item::Node(i)))
+        e.on_press(move |s: &mut State| if !s.cam.take_panned() { s.select(Item::Node(i)) })
             .on_double_press(move |s: &mut State| s.open_node(i))
+            .on_drag(pan)
             .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Node(i), on))
             .cursor(Cursor::Pointer)
     };
@@ -517,5 +614,68 @@ mod tests {
         assert_eq!(concentric(12.0, 4.0, 32.0), 8.0);
         assert_eq!(concentric(12.0, 16.0, 32.0), 0.0);
         assert_eq!(concentric(30.0, 2.0, 16.0), 8.0);
+    }
+
+    fn close(a: [f32; 2], b: [f32; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+    }
+
+    #[test]
+    fn cubic_mid_is_the_curve_at_half_with_its_tangent() {
+        // An S-curve from (0,0) to (100,40) with horizontal handles: its middle is the midpoint,
+        // and its tangent there is B'(½) = ¾ (p3 + p2 − p1 − p0), steeper than the chord.
+        let (p, d) = cubic_mid([0.0, 0.0], [50.0, 0.0], [50.0, 40.0], [100.0, 40.0]);
+        assert!(close(p, [50.0, 20.0]));
+        assert!(close(d, unit([75.0, 60.0], [1.0, 0.0])));
+        // A straight wire points along itself.
+        let (_, d) = cubic_mid([0.0, 0.0], [28.0, 0.0], [72.0, 0.0], [100.0, 0.0]);
+        assert!(close(d, [1.0, 0.0]));
+    }
+
+    #[test]
+    fn polyline_mid_is_halfway_by_length() {
+        // 30 down, then 100 back left: halfway (65) is 35 along the run, heading left.
+        let (p, d) = polyline_mid(&[[0.0, 0.0], [0.0, 30.0], [-100.0, 30.0]]);
+        assert!(close(p, [-35.0, 30.0]));
+        assert!(close(d, [-1.0, 0.0]));
+    }
+
+    #[test]
+    fn a_backedge_arrow_sits_on_its_straight_run_heading_back() {
+        // Out of a source on the right, under both nodes, back into a target on the left.
+        let (a, b, below) = ([400.0, 100.0], [100.0, 120.0], 300.0);
+        let (p, d) = polyline_mid(&back_points(a, b, below));
+        assert!((p[1] - below).abs() < 1e-3 && p[0] > b[0] && p[0] < a[0], "{p:?}");
+        assert!(close(d, [-1.0, 0.0]));
+    }
+
+    #[test]
+    fn arrow_points_along_the_tangent_centred_on_the_route() {
+        let d = unit([3.0, 4.0], [1.0, 0.0]);
+        let [tip, l, r] = arrow(([10.0, 10.0], d), 2.8, true);
+        let centroid = [(tip[0] + l[0] + r[0]) / 3.0, (tip[1] + l[1] + r[1]) / 3.0];
+        assert!(close(centroid, [10.0, 10.0]));
+        let base = [(l[0] + r[0]) / 2.0, (l[1] + r[1]) / 2.0];
+        assert!(close(unit([tip[0] - base[0], tip[1] - base[1]], [0.0, 0.0]), d));
+        // Exec arrows are larger than data ones; both grow with the stroke.
+        let size = |w: f32, exec: bool| {
+            let [t, l, _] = arrow(([0.0, 0.0], [1.0, 0.0]), w, exec);
+            t[0] - l[0]
+        };
+        assert!(size(2.8, true) > size(1.8, false));
+        assert!(size(2.6, false) > size(1.8, false));
+    }
+
+    #[test]
+    fn grown_triangle_moves_every_edge_out_by_the_casing() {
+        let t = arrow(([0.0, 0.0], [1.0, 0.0]), 2.8, true);
+        let g = grow_triangle(t, 1.0);
+        // Each grown edge runs parallel to its original, one casing width away.
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let n = unit([b[1] - a[1], a[0] - b[0]], [1.0, 0.0]);
+            let off = (g[k][0] - a[0]) * n[0] + (g[k][1] - a[1]) * n[1];
+            assert!((off.abs() - 1.0).abs() < 1e-3, "edge {k}: {off}");
+        }
     }
 }
