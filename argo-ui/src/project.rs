@@ -171,6 +171,7 @@ pub fn start(s: &mut State) {
             wake();
         };
         let result = run(&spec, &rev, &flags, &progress);
+        log_outcome(&source, result.as_ref().map_err(String::as_str));
         let _ = tx.send(Msg::Done(Box::new(result), source));
         wake();
     });
@@ -229,8 +230,79 @@ pub fn poll(s: &mut State) -> bool {
 /// Open synchronously (command line and headless captures).
 pub fn open_now(s: &mut State, spec: &str, rev: &str, flags: &str) -> Result<(), String> {
     let opened = run(spec, rev, flags, &|_| {})?;
+    // An error goes back to the caller, which prints it.
+    log_outcome(spec.trim(), Ok(&opened));
     install(s, opened, spec.trim().to_string());
     Ok(())
+}
+
+/// Print what happened to stderr: the error in full (every file and its reason when nothing
+/// could be read), or the files left out of a successful load and the ones read with flags of
+/// their own.
+fn log_outcome(source: &str, result: Result<&Opened, &str>) {
+    eprint!("{}", outcome_text(source, result));
+}
+
+fn outcome_text(source: &str, result: Result<&Opened, &str>) -> String {
+    let opened = match result {
+        Err(e) => return format!("argo-ui: could not open {source}\n{}\n", indent(e)),
+        Ok(o) => o,
+    };
+    let skipped: Vec<&Unit> = opened
+        .units
+        .iter()
+        .filter(|u| u.skipped.is_some())
+        .collect();
+    let mut out = format!(
+        "argo-ui: opened {source}: {} of {} .c files\n",
+        opened.units.len() - skipped.len(),
+        opened.units.len()
+    );
+    if !skipped.is_empty() {
+        out.push_str(&format!("  left out ({}):\n", skipped.len()));
+        for u in skipped {
+            let why = u.skipped.as_deref().unwrap_or_default();
+            out.push_str(&format!("    {}: {why}\n", u.path));
+        }
+    }
+    for u in opened
+        .units
+        .iter()
+        .filter(|u| u.skipped.is_none() && !u.flags.is_empty())
+    {
+        out.push_str(&format!("  read with {}: {}\n", u.flags.join(" "), u.path));
+    }
+    out
+}
+
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the opener reports when nothing can be read (its real output on a nine-file fixture), for
+/// the `project-open-error` review scene.
+pub const SAMPLE_ERROR: &str = "None of the 9 .c files could be preprocessed and parsed.
+fs_wget.c: openssl/argo_absent_aes.h: No such file or directory (fs_wget.c:1)
+jsemu.c: emscripten.h: No such file or directory (jsemu.c:1)
+machine.c: expected a name, found `^` (machine.c:1)
+riscv_cpu.c: #error MAX_XLEN must be defined (riscv_cpu.c:2)
+sdl.c: SDL/SDL.h: No such file or directory (sdl.c:1)
+slirp/slirp.c: argo_absent/slirp_config.h: No such file or directory (slirp/slirp.c:1)
+temu.c: expected `;`, found `CONFIG_VERSION` (temu.c:1)
+virtio.c: expected `)`, found `{` (virtio.c:1)
+x86_cpu.c: #error not a native build (x86_cpu.c:1)";
+
+/// A load error split for the dialog: its headline, at most `cap` of the lines after it (one per
+/// file when nothing could be read), and how many more there are.
+pub fn error_parts(error: &str, cap: usize) -> (&str, Vec<&str>, usize) {
+    let mut lines = error.lines().filter(|l| !l.trim().is_empty());
+    let head = lines.next().unwrap_or("");
+    let rest: Vec<&str> = lines.collect();
+    let more = rest.len().saturating_sub(cap);
+    (head, rest.into_iter().take(cap).collect(), more)
 }
 
 /// Show an opened project: index its files and functions and open its entry point.
@@ -405,6 +477,32 @@ mod tests {
             s.forms.url.text,
             dir.display().to_string(),
             "the dialog keeps what was typed"
+        );
+    }
+
+    #[test]
+    fn errors_split_into_a_headline_and_a_capped_file_list() {
+        let e = "None of the 4 .c files could be preprocessed and parsed.\na.c: x (a.c:1)\nb.c: y (b.c:2)\nc.c: z\nd.c: w";
+        assert_eq!(
+            error_parts(e, 2),
+            (
+                "None of the 4 .c files could be preprocessed and parsed.",
+                vec!["a.c: x (a.c:1)", "b.c: y (b.c:2)"],
+                2
+            )
+        );
+        assert_eq!(
+            error_parts("fetch: denied", 6),
+            ("fetch: denied", vec![], 0)
+        );
+    }
+
+    #[test]
+    fn the_terminal_gets_every_left_out_file() {
+        let err = "None of the 2 .c files could be preprocessed and parsed.\na.c: x\nb.c: y";
+        assert_eq!(
+            outcome_text("~/t", Err(err)),
+            "argo-ui: could not open ~/t\n  None of the 2 .c files could be preprocessed and parsed.\n  a.c: x\n  b.c: y\n"
         );
     }
 

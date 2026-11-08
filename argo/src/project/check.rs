@@ -1,52 +1,127 @@
 //! Each `.c` file alone: preprocessed, parsed and built, in parallel. Files that fail here are
 //! left out of the combined unit with the reason.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::Step;
 use super::cpp::{self, Input};
 use super::lines::Mapped;
+use super::{dialect, files};
 use crate::{Parser, templates};
 
-/// Why each file can't be read alone, or `None` when it can.
+/// At most this many optional Makefile features are turned off for one file.
+const MAX_DROPS: usize = 3;
+
+/// What checking one file found.
+pub struct Verdict {
+    /// Flags for this file only, after the shared ones: its Makefile rule's, plus `-UNAME` for
+    /// each optional feature it had to be read without.
+    pub flags: Vec<String>,
+    /// Why it can't be read, or `None` when it can.
+    pub skipped: Option<String>,
+}
+
+pub struct Setup<'a> {
+    pub cc: &'a str,
+    pub root: &'a Path,
+    /// Flags shared by every file.
+    pub flags: &'a [String],
+    /// `-D` flags among `flags` a file may go without (Makefile feature switches).
+    pub optional: &'a [String],
+}
+
+/// Check every file of `sources`, each starting from its own extra flags.
 pub fn all(
-    cc: &str,
-    flags: &[String],
-    sources: &[std::path::PathBuf],
+    setup: &Setup<'_>,
+    sources: &[(PathBuf, Vec<String>)],
     progress: &(dyn Fn(Step) + Sync),
-) -> Vec<Option<String>> {
+) -> Vec<Verdict> {
     let total = sources.len();
     let done = AtomicUsize::new(0);
     let threads = std::thread::available_parallelism()
         .map_or(4, |n| n.get())
         .clamp(1, total.max(1));
     let per = total.div_ceil(threads).max(1);
-    let mut verdicts: Vec<Option<String>> = vec![None; total];
+    let mut verdicts: Vec<Option<Verdict>> = (0..total).map(|_| None).collect();
     std::thread::scope(|scope| {
         for (ci, chunk) in verdicts.chunks_mut(per).enumerate() {
             let done = &done;
             scope.spawn(move || {
                 for (k, verdict) in chunk.iter_mut().enumerate() {
-                    *verdict = one(cc, flags, &sources[ci * per + k]).err();
+                    let (path, extra) = &sources[ci * per + k];
+                    *verdict = Some(one(setup, path, extra.clone()));
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     progress(Step::Checking { done: n, total });
                 }
             });
         }
     });
-    verdicts
+    verdicts.into_iter().map(|v| v.expect("checked")).collect()
 }
 
-/// Preprocess, parse and build one file alone.
-fn one(cc: &str, flags: &[String], path: &Path) -> Result<(), String> {
-    let raw = cpp::preprocess(cc, flags, Input::File(path))?;
-    let mapped = Mapped::new(&raw);
+/// Preprocess, parse and build one file alone. When a header is missing, try turning off the
+/// optional features one at a time: `ifdef CONFIG_FS_NET` in the Makefile adds `-DCONFIG_FS_NET`,
+/// which makes `temu.c` include `<openssl/aes.h>`; without OpenSSL installed the file is still
+/// read, as built without that feature.
+fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> Verdict {
+    let run = |extra: &[String]| {
+        let flags: Vec<String> = setup.flags.iter().chain(extra).cloned().collect();
+        cpp::preprocess(setup.cc, &flags, Input::File(path))
+    };
+    let mut raw = run(&extra);
+    let mut drops = 0;
+    while let Err(e) = &raw {
+        let Some(header) = e.missing_header().map(str::to_string) else {
+            break;
+        };
+        if drops == MAX_DROPS {
+            break;
+        }
+        let found = setup.optional.iter().find_map(|d| {
+            let name = d[2..].split('=').next().unwrap_or_default();
+            let undef = format!("-U{name}");
+            if extra.contains(&undef) {
+                return None;
+            }
+            let mut trial = extra.clone();
+            trial.push(undef);
+            let r = run(&trial);
+            // Progress is reading the file, or only missing another header (which a further
+            // switch may cover); turning off a define the file requires (`#error`) is not.
+            let progress = match &r {
+                Ok(_) => true,
+                Err(e) => e.missing_header().is_some_and(|h| h != header),
+            };
+            progress.then_some((trial, r))
+        });
+        let Some((trial, r)) = found else { break };
+        extra = trial;
+        raw = r;
+        drops += 1;
+    }
+    let skipped = match raw {
+        Ok(raw) => parse(&raw, setup.root).err(),
+        Err(e) => Some(e.describe(|f| files::short(f, setup.root))),
+    };
+    Verdict {
+        flags: extra,
+        skipped,
+    }
+}
+
+fn parse(raw: &[u8], root: &Path) -> Result<(), String> {
+    let mut mapped = Mapped::new(raw);
+    dialect::neutralize(&mut mapped.text);
     let parsed = Parser::default().parse(&mapped.text);
     if let Some(d) = parsed.diagnostics.iter().find(|d| d.severity.is_fatal()) {
         let o = mapped.origin(d.span.lo);
-        let file = o.file.rsplit('/').next().unwrap_or(o.file);
-        return Err(format!("{} ({file}:{})", d.message, o.line));
+        return Err(format!(
+            "{} ({}:{})",
+            d.message,
+            files::short(o.file, root),
+            o.line
+        ));
     }
     parsed
         .ast

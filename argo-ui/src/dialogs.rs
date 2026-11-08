@@ -6,7 +6,7 @@ use rune_ui::{Color, Cursor, El, ScrollSpec, TextStyle, col, el, row, text, text
 use crate::app::State;
 use crate::palette::Pal;
 use crate::project::{self, Modal, Scope};
-use crate::ui::{LABEL, M, TOP, UI, UI_STRONG, card, explorer_w, label, viewport};
+use crate::ui::{LABEL, M, MONO, TOP, UI, UI_STRONG, card, explorer_w, label, viewport};
 
 const TITLE: TextStyle = TextStyle::new(17.0, 650.0);
 const BODY: TextStyle = TextStyle::new(12.5, 450.0);
@@ -336,13 +336,7 @@ fn open_dialog(p: &Pal, s: &State) -> El {
                 .on_submit(|s: &mut State, _| project::start(s))))
             .child(label("Added after any -D/-I flags found in the project's Makefile.", p.faint)));
     if let Some(e) = &f.error {
-        c = c.child(
-            row()
-                .padding(10.0)
-                .radius(8.0)
-                .fill(p.bad.alpha(0.12))
-                .child(text(e.clone()).font(BODY).color(p.bad).wrap()),
-        );
+        c = c.child(error_box(p, e));
     }
     c.child(actions(
         el(),
@@ -353,6 +347,37 @@ fn open_dialog(p: &Pal, s: &State) -> El {
                 .on_press(project::start),
         ],
     ))
+}
+
+/// A load error: its headline, then the first files with their reasons (one line each, the whole
+/// line on hover) and how many more were printed to the terminal.
+fn error_box(p: &Pal, e: &str) -> El {
+    const SHOWN: usize = 6;
+    let (head, files, more) = project::error_parts(e, SHOWN);
+    let mut c = col()
+        .gap(4.0)
+        .padding(10.0)
+        .radius(8.0)
+        .fill(p.bad.alpha(0.12))
+        .child(text(head.to_string()).font(BODY).color(p.bad).wrap());
+    if !files.is_empty() {
+        c = c.child(el().h(2.0));
+    }
+    for line in files {
+        c = c.child(
+            text(line.to_string())
+                .font(MONO)
+                .color(p.text)
+                .single_line()
+                .truncate()
+                .min_w(0.0)
+                .help(line.to_string()),
+        );
+    }
+    if more > 0 {
+        c = c.child(label(&format!("+{more} more · full list in the terminal"), p.faint));
+    }
+    c
 }
 
 fn loading_dialog(p: &Pal, s: &State) -> El {
@@ -374,7 +399,7 @@ fn loading_dialog(p: &Pal, s: &State) -> El {
         )
     });
     c.child(label(
-        "Files that the preprocessor or parser can't read are left out and listed in the explorer.",
+        "Files the preprocessor or parser can't read are left out, listed under the file count in the explorer and printed to the terminal.",
         p.faint,
     ))
 }
