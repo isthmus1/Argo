@@ -9,6 +9,21 @@ use rune_ui::{Color, Cursor, El, LineCap, Path, Phase, Shape, TextStyle, canvas,
 const SOCKET: TextStyle = TextStyle::new(11.0, 450.0);
 /// Matches the floating panels' corner radius.
 pub const RADIUS: f32 = 12.0;
+/// Frames round a little more than the nodes inside them.
+const FRAME_RADIUS: f32 = RADIUS + 4.0;
+/// Header chips (language, member count) are this tall.
+const CHIP_H: f32 = 16.0;
+/// A node header's last chip sits this far from the node's top and right edges.
+const NODE_CHIP_INSET: f32 = (model::HEADER - CHIP_H) / 2.0;
+/// A frame's title row; its chip sits as far from the frame's top as from its right.
+const FRAME_TITLE_H: f32 = 32.0;
+const FRAME_CHIP_INSET: f32 = (FRAME_TITLE_H - CHIP_H) / 2.0;
+
+/// Radius of an element `height` tall inset by `inset` on both sides of a corner of radius
+/// `outer`, so the two curves share a centre (never negative, at most a pill).
+pub fn concentric(outer: f32, inset: f32, height: f32) -> f32 {
+    (outer - inset).clamp(0.0, height / 2.0)
+}
 /// Below this zoom, pin labels are hidden: they would be unreadable noise.
 const LABEL_ZOOM: f32 = 0.55;
 
@@ -95,19 +110,21 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
 }
 
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
-    let title = row().h(32.0).w(w).px(14.0).gap(8.0).items_center()
+    // A trailing chip sits in the frame's corner: equal top and right insets, concentric radius.
+    let chip = f.lang != Lang::None;
+    let title = row().h(FRAME_TITLE_H).w(w).pl(14.0).pr(if chip { FRAME_CHIP_INSET } else { 14.0 }).gap(8.0).items_center()
         .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
         .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0))
-        .child(lang_chip(p, f.lang));
+        .child(lang_chip(p, f.lang).radius(concentric(FRAME_RADIUS, FRAME_CHIP_INSET, CHIP_H)));
     let border = if look.selected { (2.0, p.accent) } else if look.hovered { (1.5, p.muted) } else { (1.5, p.frame_text.alpha(0.22)) };
-    let fr = el().size(w, h).fill(p.frame_fill).radius(RADIUS + 4.0)
+    let fr = el().size(w, h).fill(p.frame_fill).radius(FRAME_RADIUS)
         .border(border.0, border.1)
         .child(title.absolute(0.0, 0.0))
         .on_press(move |s: &mut State| s.select(Item::Group(gi)))
         .on_double_press(move |s: &mut State| s.toggle_group(gi))
         .on_hover_change(move |s: &mut State, on, _| s.hover(Item::Group(gi), on))
         .help("Double-click to collapse");
-    decorate(p, fr, [w, h], RADIUS + 4.0, f.evidence, f.claim, look)
+    decorate(p, fr, [w, h], FRAME_RADIUS, f.evidence, f.claim, look)
 }
 
 fn socket_world(g: &Graph, pl: &crate::layout::Placed, i: usize, output: bool, idx: usize) -> [f32; 2] {
@@ -302,7 +319,7 @@ pub fn lang_chip(p: &Pal, lang: Lang) -> El {
         Lang::Rust => "RS",
     };
     let (fill, fg) = p.chip(lang);
-    row().h(16.0).px(5.0).radius(4.0).fill(fill).border(1.0, Color::BLACK.alpha(0.2)).items_center()
+    row().h(CHIP_H).px(5.0).radius(4.0).fill(fill).border(1.0, Color::BLACK.alpha(0.2)).items_center()
         .child(text(t).font(TextStyle::new(9.5, 750.0).tracking(0.3)).color(fg))
 }
 
@@ -348,17 +365,20 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], look: Look) -> El {
         return interact(decorate(p, emphasis(p, card, look), [w, h], h / 2.0, n.evidence, n.claim, look));
     }
     // Glyph in a fixed 16 px slot, then only the chips that exist: `model::size` budgets exactly
-    // these widths and gaps, so titles that fit are never truncated.
-    let mut header = row().h(model::HEADER).px(10.0).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
+    // these widths and gaps, so titles that fit are never truncated. The last chip sits in the
+    // node's corner, as far from the right edge as from the top, with a concentric radius.
+    let chips = n.kind == Kind::Group || n.lang != Lang::None;
+    let chip_r = concentric(RADIUS, NODE_CHIP_INSET, CHIP_H);
+    let mut header = row().h(model::HEADER).pl(10.0).pr(if chips { NODE_CHIP_INSET } else { 10.0 }).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
         .child(el().w(16.0).center()
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)).single_line()))
         .child(text(n.title.clone()).font(header_font(n.kind)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
     if n.kind == Kind::Group {
-        header = header.child(row().h(16.0).px(5.0).radius(4.0).fill(Color::BLACK.alpha(0.25)).items_center()
+        header = header.child(row().h(CHIP_H).px(5.0).radius(chip_r).fill(Color::BLACK.alpha(0.25)).items_center()
             .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE)));
     }
     if n.lang != Lang::None {
-        header = header.child(lang_chip(p, n.lang));
+        header = header.child(lang_chip(p, n.lang).radius(chip_r));
     }
 
     let mut body = col().py(model::BODY_PAD);
@@ -437,5 +457,28 @@ fn socket(p: &Pal, ty: Ty, [x, y]: [f32; 2]) -> El {
             let outline = if p.dark { Color::BLACK.alpha(0.7) } else { p.node_body };
             el().size(d, d).absolute(x - d / 2.0, y - d / 2.0).fill(p.ty(ty)).radius(d / 2.0).border(1.0, outline)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corner_chips_are_concentric_with_equal_insets() {
+        // Node header: the chip is centred, so its top inset is half the header's slack; the
+        // header's right padding matches it.
+        assert_eq!(NODE_CHIP_INSET, 7.0);
+        assert_eq!(concentric(RADIUS, NODE_CHIP_INSET, CHIP_H), RADIUS - NODE_CHIP_INSET);
+        // Frame title: the radius left over is half the chip, a pill.
+        assert_eq!(FRAME_CHIP_INSET, 8.0);
+        assert_eq!(concentric(FRAME_RADIUS, FRAME_CHIP_INSET, CHIP_H), CHIP_H / 2.0);
+    }
+
+    #[test]
+    fn concentric_radius_is_never_negative_or_past_a_pill() {
+        assert_eq!(concentric(12.0, 4.0, 32.0), 8.0);
+        assert_eq!(concentric(12.0, 16.0, 32.0), 0.0);
+        assert_eq!(concentric(30.0, 2.0, 16.0), 8.0);
     }
 }

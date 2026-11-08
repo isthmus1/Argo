@@ -1,12 +1,16 @@
-//! Floating chrome over a full-bleed canvas. Read-only: the UI visualizes agent work recorded in
-//! SpacetimeDB; it offers navigation and inspection, never editing. Opening a project and
-//! requesting a rewrite live in `dialogs`.
+//! Floating chrome over a full-bleed canvas. Read-only: the UI visualizes agent work (mock
+//! scenes, protocol replays, snapshots and opened projects); it offers navigation and
+//! inspection, never editing. Opening a project and requesting a rewrite live in `dialogs`.
+//!
+//! Controls inside a floating card sit `INSET` from every edge with a radius concentric with
+//! the card's corner (`CONTROL_R = RADIUS - INSET`).
 
 use crate::app::{Item, MARGIN, State};
 use crate::describe::{self, Card};
 use crate::graph::{self, RADIUS};
 use crate::model::{Category, Evidence, Ty};
 use crate::palette::Pal;
+use argo_protocol::NodeId;
 use rune_ui::{Color, Cursor, El, Family, LineCap, Path, Shape, TextStyle, canvas, col, el, row, text};
 
 pub const MONO: TextStyle = TextStyle::new(11.0, 400.0).family(Family::Named("JetBrains Mono, DejaVu Sans Mono"));
@@ -97,6 +101,19 @@ pub(crate) fn card(p: &Pal) -> El {
         .shadow(8.0, 30.0, p.shadow.alpha(if p.dark { 0.5 } else { 0.12 }))
 }
 
+/// Height of the floating top-bar cards (breadcrumb, toolbar, status).
+pub(crate) const BAR_H: f32 = 40.0;
+/// How far a control sits inside a bar card, the same on every side.
+pub(crate) const INSET: f32 = 4.0;
+/// A control inside a bar card: its height and its radius, concentric with the card's corner.
+pub(crate) const CONTROL_H: f32 = BAR_H - 2.0 * INSET;
+pub(crate) const CONTROL_R: f32 = RADIUS - INSET;
+
+/// A floating top-bar card holding one row of controls, each `INSET` from every edge.
+pub(crate) fn bar(p: &Pal, controls: El) -> El {
+    card(p).child(controls.h(BAR_H).padding(INSET).gap(INSET).items_center())
+}
+
 /// The whole window. `inset` is the width macOS's traffic lights take at the top-left (0
 /// elsewhere); the breadcrumb starts after them.
 pub fn view(p: &Pal, s: &State, inset: f32) -> El {
@@ -125,52 +142,221 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
     root
 }
 
+/// The protocol containers behind the breadcrumb, root first, when the crumbs are a real
+/// hierarchy (protocol scenes, snapshots and projects); `None` for mock scenes.
+pub(crate) fn crumb_path(s: &State) -> Option<Vec<NodeId>> {
+    let live = s.live.as_ref()?;
+    let nodes = &live.snap.graph.nodes;
+    let mut path = vec![];
+    let mut cur = live.container;
+    while let Some(id) = cur {
+        let n = nodes.iter().find(|n| n.id == id)?;
+        path.push(id);
+        cur = n.parent;
+    }
+    path.reverse();
+    (path.len() == s.view.crumbs.len()).then_some(path)
+}
+
+/// Show an ancestor's level: it becomes the container with its body opened (as the explorer
+/// opens a function), relaid out and framed.
+pub(crate) fn go_to_crumb(s: &mut State, id: NodeId) {
+    crate::project::open_function(s, id);
+    // A file crumb keeps that file expanded in the explorer.
+    if s.project.as_ref().is_some_and(|p| p.modules.iter().any(|m| m.id == id)) {
+        s.forms.expanded = Some(id);
+    }
+}
+
+/// One breadcrumb: ancestors are buttons that navigate up; the current level, and every crumb
+/// of a mock scene, is plain text.
+fn crumb(p: &Pal, name: &str, current: bool, target: Option<NodeId>) -> El {
+    let t = if current { text(name.to_string()).font(UI_STRONG).color(p.text) } else { label(name, p.muted) };
+    let c = row().h(CONTROL_H).px(8.0).radius(CONTROL_R).items_center().child(t);
+    match target {
+        Some(id) if !current => c.hover(p.code_bg).cursor(Cursor::Pointer).help(format!("Show {name}"))
+            .on_press(move |s: &mut State| go_to_crumb(s, id)),
+        _ => c,
+    }
+}
+
 fn breadcrumb(p: &Pal, s: &State) -> El {
-    let mut r = row().h(40.0).px(14.0).gap(8.0).items_center()
-        .child(text("◆").font(TextStyle::new(13.0, 700.0)).color(p.accent));
+    let path = crumb_path(s);
+    let mut r = row().gap(0.0)
+        .child(el().size(CONTROL_H, CONTROL_H).center().child(text("◆").font(TextStyle::new(13.0, 700.0)).color(p.accent)));
     let last = s.view.crumbs.len().saturating_sub(1);
     for (i, c) in s.view.crumbs.iter().enumerate() {
         if i > 0 {
             r = r.child(label("›", p.faint));
         }
-        r = r.child(if i == last { text(c.clone()).font(UI_STRONG).color(p.text) } else { label(c, p.muted) });
+        r = r.child(crumb(p, c, i == last, path.as_ref().map(|p| p[i])).key(format!("crumb-{i}")));
     }
-    card(p).child(r)
+    bar(p, r).key("breadcrumb")
 }
 
 fn icon_button(p: &Pal, content: El, help: &str) -> El {
-    el().size(32.0, 32.0).radius(8.0).center().hover(p.code_bg).cursor(Cursor::Pointer).help(help).child(content)
+    el().size(CONTROL_H, CONTROL_H).radius(CONTROL_R).center().hover(p.code_bg).cursor(Cursor::Pointer).help(help).child(content)
 }
 
-/// Connection plus worker presence, one row of icon buttons with tooltips.
-fn status(p: &Pal, s: &State) -> El {
-    let conn = {
-        let c = if s.online { p.ok } else { p.faint };
-        el().size(14.0, 14.0).radius(7.0).border(2.0, c.alpha(0.35)).center().child(el().size(6.0, 6.0).radius(3.0).fill(c))
-    };
-    let mut workers: Vec<(u8, bool, String)> = vec![];
-    for n in &s.graph.nodes {
+/// Where the graph on screen comes from. Nothing here is a live backend connection.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Source {
+    /// A seeded mock scene with simulated agent activity.
+    Mock(&'static str),
+    /// The `argo-protocol` fixture, replaying its recorded updates (`left` still to come).
+    Fixture { left: usize },
+    /// A snapshot file (`ARGO_SNAPSHOT`).
+    Snapshot(String),
+    /// A C project opened from a git URL or directory.
+    Project(String),
+}
+
+pub(crate) fn source(s: &State) -> Source {
+    if let Some(proj) = &s.project {
+        return Source::Project(proj.source.clone());
+    }
+    match &s.live {
+        None => Source::Mock(s.scene),
+        Some(_) if s.scene == "snapshot" => Source::Snapshot(std::env::var("ARGO_SNAPSHOT").unwrap_or_else(|_| "snapshot".into())),
+        Some(live) => Source::Fixture { left: live.pending() },
+    }
+}
+
+impl Source {
+    fn tip(&self) -> String {
+        match self {
+            Source::Mock(scene) => format!("Mock scene “{scene}” · simulated agents"),
+            Source::Fixture { left: 0 } => "Protocol fixture · replay finished".into(),
+            Source::Fixture { left } => format!("Protocol fixture · replaying, {left} updates left"),
+            Source::Snapshot(path) => format!("Snapshot file · {path}"),
+            Source::Project(src) => format!("C project · {src}"),
+        }
+    }
+}
+
+/// The data source as a small glyph: dashed ring (simulated), play (replaying), document
+/// (snapshot), folder (project). Not a button: it has nothing to do when clicked.
+fn source_glyph(p: &Pal, src: &Source) -> Shape {
+    let c = p.muted;
+    match src {
+        Source::Mock(_) => {
+            let mut sh = Shape::new();
+            for k in 0..8 {
+                let a = k as f32 * std::f32::consts::TAU / 8.0;
+                let b = a + 0.45;
+                sh = sh.stroke(vec![[7.0 + 5.5 * a.cos(), 7.0 + 5.5 * a.sin()], [7.0 + 5.5 * b.cos(), 7.0 + 5.5 * b.sin()]], 1.5, p.faint);
+            }
+            sh
+        }
+        Source::Fixture { left } => Shape::new().fill(vec![[3.5, 2.0], [12.0, 7.0], [3.5, 12.0]], if *left > 0 { p.accent } else { c }),
+        Source::Snapshot(_) => {
+            let outline = Path::new().move_to([3.0, 1.5]).line_to([8.5, 1.5]).line_to([11.5, 4.5]).line_to([11.5, 12.5]).line_to([3.0, 12.5]).close();
+            Shape::new().stroke_path(&outline, 1.4, LineCap::Round, c).line([5.5, 7.0], [9.0, 7.0], 1.2, LineCap::Round, c)
+                .line([5.5, 9.5], [9.0, 9.5], 1.2, LineCap::Round, c)
+        }
+        Source::Project(_) => {
+            let outline = Path::new().move_to([1.5, 3.0]).line_to([5.5, 3.0]).line_to([7.0, 4.5]).line_to([12.5, 4.5]).line_to([12.5, 11.5]).line_to([1.5, 11.5]).close();
+            Shape::new().stroke_path(&outline, 1.4, LineCap::Round, c)
+        }
+    }
+}
+
+/// Every claimed item on screen: worker, whether it is translating, title, and the item.
+pub(crate) fn workers(s: &State) -> Vec<(u8, bool, String, Item)> {
+    let mut out = vec![];
+    for (i, n) in s.view.nodes.iter().enumerate() {
         if let Some(c) = n.claim {
-            workers.push((c.worker, c.active, n.title.clone()));
+            out.push((c.worker, c.active, n.title.clone(), Item::Node(i)));
         }
     }
-    for g in &s.graph.groups {
-        if let Some(c) = g.claim {
-            workers.push((c.worker, c.active, g.title.clone()));
+    for (g, grp) in s.view.groups.iter().enumerate() {
+        let drawn = !s.collapsed.get(g).copied().unwrap_or(false) && s.placed.frames.get(g).is_some_and(|f| f[2] > 0.0);
+        if let Some(c) = grp.claim.filter(|_| drawn) {
+            out.push((c.worker, c.active, grp.title.clone(), Item::Group(g)));
         }
     }
-    workers.sort_by_key(|w| w.0);
-    let mut r = row().h(40.0).px(6.0).gap(4.0).items_center()
-        .child(icon_button(p, conn, if s.online { "SpacetimeDB · live" } else { "SpacetimeDB · offline" }));
-    r = r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0));
-    for (worker, active, title) in &workers {
-        let a = graph::avatar(p, *worker, true, 22.0).child(state_glyph(p, *active).absolute(12.0, 12.0));
-        let tip = format!("worker {worker} · {} {title}", if *active { "translating" } else { "queued for" });
-        r = r.child(icon_button(p, a, &tip));
+    out.sort_by_key(|w| (w.0, !w.1));
+    out
+}
+
+/// Select `item` and pan it to the middle of the canvas left free beside the details panel
+/// (its top-left corner when it is larger than that area).
+pub(crate) fn reveal(s: &mut State, item: Item) {
+    s.select(item);
+    let [x, y, w, h] = item_rect(s, item);
+    let [fx, fy, fw, fh] = free_area(true, s.project.is_some());
+    let place = |at: f32, len: f32, from: f32, room: f32| if len <= room { from + (room - len) / 2.0 - at } else { from + 24.0 - at };
+    s.cam.pan[0] += place(x, w, fx, fw);
+    s.cam.pan[1] += place(y, h, fy, fh);
+}
+
+/// Data source, worker presence (click one to go to its work), framing and appearance.
+fn status(p: &Pal, s: &State) -> El {
+    let sep = || el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0);
+    let src = source(s);
+    let mut r = row().child(el().key("source").size(CONTROL_H, CONTROL_H).center().help(src.tip()).child(canvas(source_glyph(p, &src)).size(14.0, 14.0)));
+    let workers = workers(s);
+    if !workers.is_empty() {
+        r = r.child(sep());
     }
-    r = r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0))
-        .child(icon_button(p, canvas(fit_icon(p)).size(14.0, 14.0), "Frame whole graph (F)").on_press(|s: &mut State| s.fit_all()));
-    card(p).child(r)
+    for (k, (worker, active, title, item)) in workers.into_iter().enumerate() {
+        let a = graph::avatar(p, worker, true, 22.0).child(state_glyph(p, active).absolute(12.0, 12.0));
+        let tip = format!("worker {worker} · {} {title}", if active { "translating" } else { "queued for" });
+        r = r.child(icon_button(p, a, &tip).key(format!("worker-{k}")).on_press(move |s: &mut State| reveal(s, item)));
+    }
+    let dark = p.dark;
+    r = r.child(sep())
+        .child(icon_button(p, canvas(fit_icon(p)).size(14.0, 14.0), "Frame whole graph (F)").on_press(|s: &mut State| s.fit_all()))
+        .child(icon_button(p, canvas(theme_icon(p, dark)).size(14.0, 14.0), if dark { "Switch to light mode" } else { "Switch to dark mode" })
+            .key("theme").on_press(move |_: &mut State| set_theme(Some(!dark))));
+    bar(p, r).key("status")
+}
+
+/// The appearance a click switches to: a moon in light mode, a sun in dark mode.
+fn theme_icon(p: &Pal, dark: bool) -> Shape {
+    let c = p.muted;
+    let circle = |cx: f32, cy: f32, r: f32, from: f32, to: f32, n: usize| -> Vec<[f32; 2]> {
+        (0..=n).map(|k| {
+            let a = from + (to - from) * k as f32 / n as f32;
+            [cx + r * a.cos(), cy + r * a.sin()]
+        }).collect()
+    };
+    if dark {
+        let mut sh = Shape::new().fill(circle(7.0, 7.0, 3.0, 0.0, std::f32::consts::TAU, 24), c);
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::TAU / 8.0;
+            sh = sh.line([7.0 + 4.9 * a.cos(), 7.0 + 4.9 * a.sin()], [7.0 + 6.3 * a.cos(), 7.0 + 6.3 * a.sin()], 1.4, LineCap::Round, c);
+        }
+        sh
+    } else {
+        Shape::new().fill(crescent([7.0, 7.0], 6.0, [10.0, 4.0], 4.8), c)
+    }
+}
+
+/// The part of the disc at `c0` (radius `r0`) outside the disc at `c1` (radius `r1`), as one
+/// simple polygon: the outer arc, then the bite's arc back. The circles must intersect.
+fn crescent(c0: [f32; 2], r0: f32, c1: [f32; 2], r1: f32) -> Vec<[f32; 2]> {
+    let (dx, dy) = (c1[0] - c0[0], c1[1] - c0[1]);
+    let d = (dx * dx + dy * dy).sqrt();
+    let phi = dy.atan2(dx);
+    // Half-angles of the intersection points, seen from each centre.
+    let alpha = ((r0 * r0 + d * d - r1 * r1) / (2.0 * r0 * d)).clamp(-1.0, 1.0).acos();
+    let beta = ((r1 * r1 + d * d - r0 * r0) / (2.0 * r1 * d)).clamp(-1.0, 1.0).acos();
+    let n = 20;
+    let mut pts = vec![];
+    // Outer arc, the long way round away from the bite.
+    for k in 0..=n {
+        let a = phi + alpha + (std::f32::consts::TAU - 2.0 * alpha) * k as f32 / n as f32;
+        pts.push([c0[0] + r0 * a.cos(), c0[1] + r0 * a.sin()]);
+    }
+    // The bite's arc inside the disc, facing back toward `c0`, from where the outer arc ended
+    // (`back + beta` seen from `c1`) to where it began.
+    let back = phi + std::f32::consts::PI;
+    for k in 1..n {
+        let a = back + beta - 2.0 * beta * k as f32 / n as f32;
+        pts.push([c1[0] + r1 * a.cos(), c1[1] + r1 * a.sin()]);
+    }
+    pts
 }
 
 /// A small spinner arc (translating) or pause bars (queued) on the avatar's corner.
@@ -462,5 +648,109 @@ fn shell(p: &Pal, body: El, docked: bool, family: Color) -> El {
     } else {
         col().fill(p.panel).radius(RADIUS).border(1.0, family.alpha(0.45)).padding(14.0).child(body)
             .shadow(8.0, 24.0, p.shadow.alpha(if p.dark { 0.6 } else { 0.18 }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argo_protocol::NodeKind;
+
+    fn kind(s: &State, id: NodeId) -> NodeKind {
+        s.live.as_ref().unwrap().snap.graph.nodes.iter().find(|n| n.id == id).unwrap().kind
+    }
+
+    #[test]
+    fn bar_controls_are_concentric_with_the_card() {
+        assert_eq!(CONTROL_H + 2.0 * INSET, BAR_H);
+        assert_eq!(CONTROL_R, graph::concentric(RADIUS, INSET, CONTROL_H));
+    }
+
+    #[test]
+    fn protocol_crumbs_name_real_containers_root_first() {
+        let s = State::protocol_fixture();
+        let path = crumb_path(&s).expect("protocol crumbs are a hierarchy");
+        assert_eq!(s.view.crumbs, ["fixture", "compute.c", "compute"]);
+        assert_eq!(path.len(), 3);
+        assert_eq!(kind(&s, path[0]), NodeKind::Program);
+        assert_eq!(kind(&s, path[1]), NodeKind::Module);
+        assert_eq!(Some(path[2]), s.live.as_ref().unwrap().container);
+    }
+
+    #[test]
+    fn mock_scene_crumbs_are_not_navigable() {
+        let s = State::load("fixture");
+        assert!(!s.view.crumbs.is_empty());
+        assert_eq!(crumb_path(&s), None);
+    }
+
+    #[test]
+    fn clicking_an_ancestor_crumb_shows_that_level() {
+        let mut s = State::protocol_fixture();
+        let path = crumb_path(&s).unwrap();
+        s.selected = Some(Item::Node(0));
+        go_to_crumb(&mut s, path[1]);
+        assert_eq!(s.live.as_ref().unwrap().container, Some(path[1]));
+        assert_eq!(s.view.crumbs, ["fixture", "compute.c"]);
+        assert_eq!(crumb_path(&s).unwrap(), path[..2]);
+        assert!(s.view.nodes.iter().any(|n| n.title == "compute"), "the file's functions are drawn");
+        assert_eq!(s.selected, None, "the old selection indexed another level");
+        assert_eq!(s.placed.pos.len(), s.view.nodes.len(), "relaid out");
+        // And on up to the program.
+        go_to_crumb(&mut s, path[0]);
+        assert_eq!(s.view.crumbs, ["fixture"]);
+        assert!(s.view.nodes.iter().any(|n| n.title == "compute.c"));
+        // Back down: the function opens with its body in place, as the explorer opens it.
+        go_to_crumb(&mut s, path[2]);
+        assert_eq!(s.view.crumbs, ["fixture", "compute.c", "compute"]);
+        assert!(s.view.nodes.iter().any(|n| n.title.starts_with("for (")));
+    }
+
+    #[test]
+    fn the_source_says_where_the_graph_comes_from() {
+        assert_eq!(source(&State::load("devices")), Source::Mock("devices"));
+        let mut s = State::protocol_fixture();
+        assert!(matches!(source(&s), Source::Fixture { left } if left > 0));
+        s.replay(usize::MAX);
+        assert_eq!(source(&s), Source::Fixture { left: 0 });
+        for src in [source(&State::load("devices")), source(&s)] {
+            let tip = src.tip();
+            assert!(!tip.contains("SpacetimeDB") && !tip.contains("live"), "{tip}");
+        }
+    }
+
+    #[test]
+    fn clicking_a_worker_selects_its_item_and_centres_it() {
+        let mut s = State::load("fixture");
+        s.selected = None;
+        let ws = workers(&s);
+        assert!(ws.len() >= 2, "the fixture has two workers");
+        for (_, _, title, item) in ws {
+            s.cam.pan = [-900.0, 700.0];
+            reveal(&mut s, item);
+            assert_eq!(s.selected, Some(item), "{title}");
+            let [x, y, w, h] = item_rect(&s, item);
+            let [fx, fy, fw, fh] = free_area(true, false);
+            assert!((x + w / 2.0 - (fx + fw / 2.0)).abs() < 0.5, "{title} centred across");
+            assert!((y + h / 2.0 - (fy + fh / 2.0)).abs() < 0.5, "{title} centred down");
+        }
+    }
+
+    #[test]
+    fn the_moon_is_one_simple_crescent() {
+        let (c0, r0, c1, r1) = ([7.0, 7.0], 6.0, [10.0, 4.0], 4.8);
+        let pts = crescent(c0, r0, c1, r1);
+        let dist = |p: [f32; 2], c: [f32; 2]| ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2)).sqrt();
+        for p in &pts {
+            assert!(dist(*p, c0) <= r0 + 1e-3, "inside the disc: {p:?}");
+            assert!(dist(*p, c1) >= r1 - 1e-3, "outside the bite: {p:?}");
+        }
+        // Successive points stay close, so the bite's arc starts where the outer arc ends and
+        // closes back to its start: one simple outline.
+        let n = pts.len();
+        for k in 0..n {
+            let (a, b) = (pts[k], pts[(k + 1) % n]);
+            assert!(dist(a, b) < 2.0, "{a:?} → {b:?}");
+        }
     }
 }

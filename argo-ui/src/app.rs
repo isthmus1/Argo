@@ -55,7 +55,6 @@ pub struct State {
     pub cam: Cam,
     pub hovered: Option<Item>,
     pub selected: Option<Item>,
-    pub online: bool,
     /// Set when the graph comes from an `argo-protocol` snapshot rather than a seeded mock.
     pub live: Option<Live>,
     /// An opened C project, with its file/function index.
@@ -79,6 +78,13 @@ pub struct Live {
     frames: Vec<NodeId>,
 }
 
+impl Live {
+    /// Recorded updates still to replay.
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+}
+
 impl State {
     pub fn load(scene: &'static str) -> State {
         let graph = layout::with_getters(scenes::scene(scene));
@@ -86,7 +92,7 @@ impl State {
         let selected = graph.selected_group.map(Item::Group);
         let mut s = State {
             scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![] },
-            cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None, next_event: 4.0, step: 0,
+            cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, live: None, next_event: 4.0, step: 0,
             project: None, forms: project::Forms::default(), modal: None, loader: None,
             // A state built after the window's first layout already knows its size.
             sized: ui::viewport() != [ui::W, ui::H],

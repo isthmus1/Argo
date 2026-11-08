@@ -6,7 +6,7 @@ use rune_ui::{Color, Cursor, El, ScrollSpec, TextStyle, col, el, row, text, text
 use crate::app::State;
 use crate::palette::Pal;
 use crate::project::{self, Modal, Scope};
-use crate::ui::{LABEL, M, TOP, UI, UI_STRONG, card, explorer_w, label, viewport};
+use crate::ui::{CONTROL_H, CONTROL_R, LABEL, M, TOP, UI, UI_STRONG, bar, card, explorer_w, label, viewport};
 
 const TITLE: TextStyle = TextStyle::new(17.0, 650.0);
 const BODY: TextStyle = TextStyle::new(12.5, 450.0);
@@ -15,6 +15,17 @@ const DIALOG_W: f32 = 520.0;
 /// Rows the explorer lists at most while filtering.
 const FILTER_LIMIT: usize = 300;
 
+/// Horizontal padding inside a text button.
+const BUTTON_PX: f32 = 14.0;
+
+/// A width a button's label is sure to fit in: a generous per-character advance for the
+/// 11.5 pt semibold UI face, so a platform font that sets wider than measured still fits.
+fn button_min_w(title: &str) -> f32 {
+    title.chars().count() as f32 * 7.2 + 2.0 * BUTTON_PX
+}
+
+/// A text button, as tall as a bar control and concentric with a bar card's corner. Its width
+/// comes from its label and it never shrinks, so the label is never cut.
 fn button(p: &Pal, title: &str, primary: bool) -> El {
     let (fill, fg, hover) = if primary {
         (p.accent, Color::WHITE, p.accent.mix(Color::WHITE, 0.12))
@@ -22,20 +33,17 @@ fn button(p: &Pal, title: &str, primary: bool) -> El {
         (p.code_bg, p.text, p.code_bg.mix(p.text, 0.08))
     };
     row()
-        .h(32.0)
-        .px(14.0)
-        .radius(8.0)
+        .h(CONTROL_H)
+        .px(BUTTON_PX)
+        .min_w(button_min_w(title))
+        .radius(CONTROL_R)
         .fill(fill)
         .hover(hover)
         .items_center()
+        .justify_center()
         .cursor(Cursor::Pointer)
         .border(1.0, if primary { fill } else { p.panel_border })
-        .child(
-            text(title.to_string())
-                .font(UI_STRONG)
-                .color(fg)
-                .single_line(),
-        )
+        .child(text(title.to_string()).font(UI_STRONG).color(fg))
 }
 
 fn field(p: &Pal, input: El) -> El {
@@ -54,7 +62,7 @@ fn field_label(p: &Pal, s: &str) -> El {
 
 /// Top-right actions beside the status card: open a project, and (with one open) start a rewrite.
 pub fn toolbar(p: &Pal, s: &State) -> El {
-    let mut r = row().h(40.0).px(6.0).gap(6.0).items_center().child(
+    let mut r = row().child(
         button(p, "Open…", false)
             .help("Open a git repository or local directory (Ctrl+O)")
             .on_press(|s: &mut State| s.modal = Some(Modal::Open)),
@@ -66,7 +74,7 @@ pub fn toolbar(p: &Pal, s: &State) -> El {
                 .on_press(|s: &mut State| s.modal = Some(Modal::Rewrite)),
         );
     }
-    card(p).child(r)
+    bar(p, r).key("toolbar")
 }
 
 /// Files and their functions, filterable, docked on the left under the breadcrumb.
