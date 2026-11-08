@@ -129,8 +129,20 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         let a = socket_world(g, pl, w.from.0, true, w.from.1);
         let b = socket_world(g, pl, w.to.0, false, w.to.1);
         let (a, b) = ([a[0] + o[0], a[1] + o[1]], [b[0] + o[0], b[1] + o[1]]);
-        let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
-        let path = Path::new().move_to(a).cubic_to([a[0] + dx, a[1]], [b[0] - dx, b[1]], b);
+        let path = if w.back {
+            // A loop backedge runs out of its source, under both nodes, and back into the target.
+            let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
+            let below = bottom(w.from.0).max(bottom(w.to.0)) + 22.0;
+            let r = 26.0;
+            Path::new()
+                .move_to(a)
+                .cubic_to([a[0] + r * 1.4, a[1]], [a[0] + r * 1.4, below], [a[0], below])
+                .line_to([b[0], below])
+                .cubic_to([b[0] - r * 1.4, below], [b[0] - r * 1.4, b[1]], b)
+        } else {
+            let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
+            Path::new().move_to(a).cubic_to([a[0] + dx, a[1]], [b[0] - dx, b[1]], b)
+        };
         let ty = g.wire_ty(w);
         let exec = ty == Ty::Exec;
         let lit = touches(w);
@@ -163,6 +175,9 @@ pub fn kind_glyph(kind: Kind) -> &'static str {
         Kind::Set => "←",
         Kind::Get => "↦",
         Kind::Group => "▣",
+        Kind::Region => "≡",
+        Kind::Case => "⤷",
+        Kind::Type => "▤",
     }
 }
 

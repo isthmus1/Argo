@@ -7,4 +7,6 @@ publish.workspace = true
 description = "Argo control-plane client: node-graph canvas, inspectors and live migration evidence."
 
 [dependencies]
+argo-protocol = { path = "../argo-protocol" }
 rune-ui.workspace = true
+serde_json.workspace = true

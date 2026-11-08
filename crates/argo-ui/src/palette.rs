@@ -59,6 +59,8 @@ impl Pal {
             Category::Function => ("#2a5d82", "#3a75a3"),
             Category::Expression => ("#474c99", "#5a60b4"),
             Category::Variable => ("#6b5326", "#8f6e2f"),
+            Category::Statement => ("#4a5160", "#5f6878"),
+            Category::Type => ("#56622a", "#6e7d35"),
         };
         h(if self.dark { dark } else { light })
     }

@@ -1,14 +1,14 @@
 //! Hover-card content derived from a node's pins, connections and kind: a signature line,
 //! its connections, inferred effects and migration status. View text only; never semantic truth.
 
-use crate::model::{Graph, Kind, Lang, Node, Ty};
+use crate::model::{Graph, Kind, Lang, Node, Pin, Ty};
 
 pub struct Card {
     pub signature: String,
-    /// (pin, type, connected to) for each data input.
-    pub inputs: Vec<(String, Ty, String)>,
-    /// (pin, type, consumers) for each data output.
-    pub outputs: Vec<(String, Ty, String)>,
+    /// (pin, type, type spelled in the node's language, connected to) for each data input.
+    pub inputs: Vec<(String, Ty, String, String)>,
+    /// (pin, type, type spelled in the node's language, consumers) for each data output.
+    pub outputs: Vec<(String, Ty, String, String)>,
     /// Exec flow: where control arrives from and goes to.
     pub flow: Option<String>,
     pub effects: Vec<&'static str>,
@@ -23,21 +23,31 @@ fn c_ty(ty: Ty) -> &'static str {
     }
 }
 
+/// A pin's C spelling: exact when the source knows it, else derived from its view type.
+fn c_of(p: &Pin) -> String {
+    p.spelled.as_ref().map_or_else(|| c_ty(p.ty).to_string(), |[c, _]| c.clone())
+}
+
+/// A pin's Rust spelling at the current ABI.
+fn rs_of(p: &Pin) -> String {
+    p.spelled.as_ref().map_or_else(|| ty_name(p.ty).to_string(), |[_, rs]| rs.clone())
+}
+
+/// Type text in the node's implementation language (C nodes read as C).
+fn pin_ty(lang: Lang, p: &Pin) -> String {
+    if lang == Lang::C { c_of(p) } else { rs_of(p) }
+}
+
 /// C prototype: the first data output is the return value, the rest become out-parameters.
 fn c_prototype(n: &Node) -> String {
     let outs: Vec<_> = n.outs.iter().enumerate().filter(|(_, p)| p.ty != Ty::Exec).collect();
-    let ret = outs.first().map_or("void", |(_, p)| c_ty(p.ty));
+    let ret = outs.first().map_or_else(|| "void".to_string(), |(_, p)| c_of(p));
     let mut ps: Vec<String> = n.ins.iter().enumerate().filter(|(_, p)| p.ty != Ty::Exec)
-        .map(|(i, p)| { let t = c_ty(p.ty); let sep = if t.ends_with('*') { "" } else { " " }; format!("{t}{sep}{}", pin_name(&p.label, i)) })
+        .map(|(i, p)| { let t = c_of(p); let sep = if t.ends_with('*') { "" } else { " " }; format!("{t}{sep}{}", pin_name(&p.label, i)) })
         .collect();
-    ps.extend(outs.iter().skip(1).map(|(i, p)| format!("{} *{}", c_ty(p.ty), pin_name(&p.label, *i))));
+    ps.extend(outs.iter().skip(1).map(|(i, p)| format!("{} *{}", c_of(p), pin_name(&p.label, *i))));
     let ps = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
     format!("{ret} {}({ps});", ident(&n.title))
-}
-
-/// Type name in the node's implementation language (C nodes read as C).
-pub fn ty_in(lang: Lang, ty: Ty) -> &'static str {
-    if lang == Lang::C { c_ty(ty) } else { ty_name(ty) }
 }
 
 pub fn ty_name(ty: Ty) -> &'static str {
@@ -59,7 +69,7 @@ fn pin_name(label: &str, i: usize) -> String {
 
 fn params(n: &Node) -> String {
     n.ins.iter().enumerate().filter(|(_, p)| p.ty != Ty::Exec)
-        .map(|(i, p)| format!("{}: {}", pin_name(&p.label, i), ty_name(p.ty)))
+        .map(|(i, p)| format!("{}: {}", pin_name(&p.label, i), rs_of(p)))
         .collect::<Vec<_>>().join(", ")
 }
 
@@ -67,8 +77,8 @@ fn returns(n: &Node) -> String {
     let outs: Vec<_> = n.outs.iter().enumerate().filter(|(_, p)| p.ty != Ty::Exec).collect();
     match outs.as_slice() {
         [] => String::new(),
-        [(_, p)] => format!(" -> {}", ty_name(p.ty)),
-        many => format!(" -> ({})", many.iter().map(|(i, p)| format!("{}: {}", pin_name(&p.label, *i), ty_name(p.ty))).collect::<Vec<_>>().join(", ")),
+        [(_, p)] => format!(" -> {}", rs_of(p)),
+        many => format!(" -> ({})", many.iter().map(|(i, p)| format!("{}: {}", pin_name(&p.label, *i), rs_of(p))).collect::<Vec<_>>().join(", ")),
     }
 }
 
@@ -89,21 +99,23 @@ fn signature(g: &Graph, n: &Node) -> String {
         }
         Kind::Set => format!("{} = value", n.title.trim_start_matches("Set ")),
         Kind::Local => {
-            let ty = n.outs.first().map_or("u32", |p| ty_name(p.ty));
+            let ty = n.outs.first().map_or_else(|| "u32".to_string(), rs_of);
             match n.title.split_once(" = ") {
                 Some((name, v)) => format!("let {name}: {ty} = {v}"),
                 None => format!("const {}: {ty}", n.title),
             }
         }
-        Kind::Get => format!("param {}: {}", n.title, n.outs.first().map_or("u32", |p| ty_name(p.ty))),
+        Kind::Get => format!("param {}: {}", n.title, n.outs.first().map_or_else(|| "u32".to_string(), rs_of)),
         Kind::GroupIn => {
-            let ps: Vec<_> = n.outs.iter().filter(|p| p.ty != Ty::Exec).map(|p| format!("{}: {}", p.label, ty_name(p.ty))).collect();
-            format!("fn {}({})", g.crumbs.last().copied().unwrap_or("?"), ps.join(", "))
+            let ps: Vec<_> = n.outs.iter().filter(|p| p.ty != Ty::Exec).map(|p| format!("{}: {}", p.label, rs_of(p))).collect();
+            format!("fn {}({})", g.crumbs.last().map_or("?", String::as_str), ps.join(", "))
         }
         Kind::GroupOut => {
-            let rs: Vec<_> = n.ins.iter().filter(|p| p.ty != Ty::Exec).map(|p| format!("{}: {}", p.label, ty_name(p.ty))).collect();
+            let rs: Vec<_> = n.ins.iter().filter(|p| p.ty != Ty::Exec).map(|p| format!("{}: {}", p.label, rs_of(p))).collect();
             if rs.is_empty() { "return".into() } else { format!("return {}", rs.join(", ")) }
         }
+        Kind::Region | Kind::Case => n.title.clone(),
+        Kind::Type => format!("type {}", n.title),
     }
 }
 
@@ -135,17 +147,17 @@ pub fn card(g: &Graph, i: usize) -> Card {
         let src = g.wires.iter().find(|w| w.to == (i, pi))
             .map(|w| endpoint(g, w.from.0, &g.nodes[w.from.0].outs[w.from.1].label))
             .unwrap_or_else(|| "unconnected".into());
-        inputs.push((pin_name(&p.label, pi), p.ty, src));
+        inputs.push((pin_name(&p.label, pi), p.ty, pin_ty(n.lang, p), src));
     }
     let mut outputs = vec![];
-    for (pi, p) in n.outs.iter().enumerate().filter(|(_, p)| p.ty != Ty::Exec) {
+    for (k, (pi, p)) in n.outs.iter().enumerate().filter(|(_, p)| p.ty != Ty::Exec).enumerate() {
         let uses: Vec<_> = g.wires.iter().filter(|w| w.from == (i, pi)).map(|w| name(g, w.to.0)).collect();
         let to = match uses.len() {
             0 => "unused".into(),
             1 => uses[0].clone(),
             k => format!("{} +{} more", uses[0], k - 1),
         };
-        outputs.push((pin_name(&p.label, pi), p.ty, to));
+        outputs.push((pin_name(&p.label, k), p.ty, pin_ty(n.lang, p), to));
     }
     let from: Vec<_> = g.wires.iter().filter(|w| w.to.0 == i && n.ins[w.to.1].ty == Ty::Exec).map(|w| g.nodes[w.from.0].title.clone()).collect();
     let to: Vec<_> = g.wires.iter().filter(|w| w.from.0 == i && n.outs[w.from.1].ty == Ty::Exec).map(|w| g.nodes[w.to.0].title.clone()).collect();

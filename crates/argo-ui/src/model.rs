@@ -23,6 +23,12 @@ pub enum Kind {
     Get,
     /// A collapsed node group.
     Group,
+    /// A closed straight-line statement region (sequence, block, fragment, opaque).
+    Region,
+    /// A closed case group of a switch.
+    Case,
+    /// A struct, union, enum or typedef.
+    Type,
 }
 
 /// Header colour families, following the parser's template kinds: every control-flow template
@@ -37,16 +43,21 @@ pub enum Category {
     Expression,
     /// Variables, declarations, assignments and getters.
     Variable,
+    /// Straight-line statement regions.
+    Statement,
+    Type,
 }
 
 impl Kind {
     pub fn category(self) -> Category {
         match self {
             Kind::GroupIn | Kind::GroupOut => Category::Interface,
-            Kind::Loop | Kind::Branch | Kind::Switch => Category::Control,
+            Kind::Loop | Kind::Branch | Kind::Switch | Kind::Case => Category::Control,
             Kind::Call | Kind::Group => Category::Function,
             Kind::Op => Category::Expression,
             Kind::Local | Kind::Set | Kind::Get => Category::Variable,
+            Kind::Region => Category::Statement,
+            Kind::Type => Category::Type,
         }
     }
 }
@@ -78,6 +89,8 @@ pub struct Claim {
 pub struct Pin {
     pub label: String,
     pub ty: Ty,
+    /// Exact type spelling as (C, Rust), when the source knows it; otherwise derived from `ty`.
+    pub spelled: Option<[String; 2]>,
 }
 
 #[derive(Clone)]
@@ -100,6 +113,8 @@ pub struct Node {
 pub struct Wire {
     pub from: (usize, usize),
     pub to: (usize, usize),
+    /// A loop backedge (next iteration): drawn, but ignored when ranking layout columns.
+    pub back: bool,
 }
 
 /// An expanded node group, drawn as a frame around its members. Frames exist only for expanded
@@ -114,7 +129,7 @@ pub struct Group {
 
 #[derive(Clone)]
 pub struct Graph {
-    pub crumbs: Vec<&'static str>,
+    pub crumbs: Vec<String>,
     pub nodes: Vec<Node>,
     pub wires: Vec<Wire>,
     pub groups: Vec<Group>,
@@ -185,7 +200,7 @@ impl Graph {
             } else {
                 (b, w.to.1)
             };
-            out.wires.push(Wire { from, to });
+            out.wires.push(Wire { from, to, back: w.back });
         }
         // Exec pins first on collapsed nodes, keeping wire indices consistent.
         for (vi, node) in out.nodes.iter_mut().enumerate() {

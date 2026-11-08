@@ -15,11 +15,11 @@ const P: Ty = Ty::Ptr;
 
 impl B {
     fn new(crumbs: Vec<&'static str>) -> B {
-        B { g: Graph { crumbs, nodes: vec![], wires: vec![], groups: vec![], selected_group: None }, group: None }
+        B { g: Graph { crumbs: crumbs.into_iter().map(String::from).collect(), nodes: vec![], wires: vec![], groups: vec![], selected_group: None }, group: None }
     }
 
     fn node(&mut self, kind: Kind, title: &str, lang: Lang, ins: &[(&str, Ty)], outs: &[(&str, Ty)]) -> usize {
-        let pins = |ps: &[(&str, Ty)]| ps.iter().map(|&(l, ty)| Pin { label: l.into(), ty }).collect();
+        let pins = |ps: &[(&str, Ty)]| ps.iter().map(|&(l, ty)| Pin { label: l.into(), ty, spelled: None }).collect();
         self.g.nodes.push(Node {
             kind, title: title.into(), lang, evidence: Evidence::None, claim: None,
             ins: pins(ins), outs: pins(outs), group: self.group, members: 0,
@@ -28,7 +28,7 @@ impl B {
     }
 
     fn w(&mut self, a: usize, ao: usize, b: usize, bi: usize) {
-        self.g.wires.push(Wire { from: (a, ao), to: (b, bi) });
+        self.g.wires.push(Wire { from: (a, ao), to: (b, bi), back: false });
     }
 
     fn begin_group(&mut self, title: &str, lang: Lang, evidence: Evidence, claim: Option<Claim>) -> usize {

@@ -72,7 +72,7 @@ fn breadcrumb(p: &Pal, s: &State) -> El {
         if i > 0 {
             r = r.child(label("›", p.faint));
         }
-        r = r.child(if i == last { text(*c).font(UI_STRONG).color(p.text) } else { label(c, p.muted) });
+        r = r.child(if i == last { text(c.clone()).font(UI_STRONG).color(p.text) } else { label(c, p.muted) });
     }
     card(p).child(r)
 }
@@ -234,14 +234,14 @@ fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence) -> 
     any.then_some(c)
 }
 
-fn ports(p: &Pal, lang: crate::model::Lang, rows: &[(String, Ty, String)], tag: &str, arrow: &str, limit: usize) -> El {
+fn ports(p: &Pal, rows: &[(String, Ty, String, String)], tag: &str, arrow: &str, limit: usize) -> El {
     let mut t = col().gap(2.0);
-    for (k, (name, ty, other)) in rows.iter().take(limit).enumerate() {
+    for (k, (name, ty, ty_text, other)) in rows.iter().take(limit).enumerate() {
         t = t.child(row().h(22.0).gap(8.0).items_center()
             .child(text(if k == 0 { tag } else { "" }).font(LABEL).color(p.faint).w(26.0))
             .child(el().size(8.0, 8.0).radius(4.0).fill(p.ty(*ty)))
             .child(mono(name, p.text).single_line().w(64.0))
-            .child(mono(describe::ty_in(lang, *ty), p.ty_text(*ty)).single_line().w(64.0))
+            .child(mono(ty_text, p.ty_text(*ty)).single_line().w(64.0))
             .child(label(&format!("{arrow} {other}"), p.muted).truncate().grow(1.0)));
     }
     if rows.len() > limit {
@@ -279,13 +279,13 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             if !c.inputs.is_empty() || !c.outputs.is_empty() {
                 let mut t = col().gap(6.0);
                 if !c.inputs.is_empty() {
-                    t = t.child(ports(p, n.lang, &c.inputs, "IN", "←", limit));
+                    t = t.child(ports(p, &c.inputs, "IN", "←", limit));
                 }
                 if !c.inputs.is_empty() && !c.outputs.is_empty() {
                     t = t.child(divider(p));
                 }
                 if !c.outputs.is_empty() {
-                    t = t.child(ports(p, n.lang, &c.outputs, "OUT", "→", limit));
+                    t = t.child(ports(p, &c.outputs, "OUT", "→", limit));
                 }
                 body = body.child(t);
             }

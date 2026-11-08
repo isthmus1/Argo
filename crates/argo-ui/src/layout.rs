@@ -83,7 +83,7 @@ pub fn layout(g: &Graph) -> Placed {
             offset_in_unit[m] = o;
         }
     }
-    let edges: Vec<Edge> = g.wires.iter().filter(|w| unit_of[w.from.0] != unit_of[w.to.0]).map(|w| {
+    let edges: Vec<Edge> = g.wires.iter().filter(|w| !w.back && unit_of[w.from.0] != unit_of[w.to.0]).map(|w| {
         let a = w.from.0;
         let b = w.to.0;
         let ay = offset_in_unit[a][1] + model::socket_local(&g.nodes[a], size[a][0], true, w.from.1)[1];
@@ -127,7 +127,7 @@ pub fn layout(g: &Graph) -> Placed {
 /// relative to the subset's top-left, and its width and height.
 fn arrange(g: &Graph, size: &[[f32; 2]], members: &[usize]) -> (Vec<[f32; 2]>, f32, f32) {
     let local = |i: usize| members.iter().position(|&m| m == i);
-    let edges: Vec<Edge> = g.wires.iter().filter_map(|w| {
+    let edges: Vec<Edge> = g.wires.iter().filter(|w| !w.back).filter_map(|w| {
         let (a, b) = (local(w.from.0)?, local(w.to.0)?);
         let ay = model::socket_local(&g.nodes[w.from.0], size[w.from.0][0], true, w.from.1)[1];
         let by = model::socket_local(&g.nodes[w.to.0], size[w.to.0][0], false, w.to.1)[1];
@@ -562,10 +562,10 @@ pub fn with_getters(mut g: Graph) -> Graph {
         if src.kind == Kind::GroupIn && pin.ty != Ty::Exec && fanout[&w.from] >= GETTER_FANOUT {
             let getter = Node {
                 kind: Kind::Get, title: pin.label.clone(), lang: Lang::None, evidence: Evidence::None, claim: None,
-                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty }], group: g.nodes[w.to.0].group, members: 0,
+                ins: vec![], outs: vec![Pin { label: String::new(), ty: pin.ty, spelled: pin.spelled.clone() }], group: g.nodes[w.to.0].group, members: 0,
             };
             g.nodes.push(getter);
-            g.wires.push(Wire { from: (g.nodes.len() - 1, 0), to: w.to });
+            g.wires.push(Wire { from: (g.nodes.len() - 1, 0), to: w.to, back: false });
         } else {
             g.wires.push(w);
         }
