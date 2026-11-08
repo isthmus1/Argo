@@ -160,6 +160,10 @@ fn main() {
             }),
             ("project", |_| {}),
             ("project-open", |s| s.modal = Some(project::Modal::Open)),
+            ("project-open-error", |s| {
+                s.forms.error = Some(project::SAMPLE_ERROR.into());
+                s.modal = Some(project::Modal::Open);
+            }),
             ("project-rewrite", |s| s.modal = Some(project::Modal::Rewrite)),
             ("project-rewrite-file", |s| {
                 s.forms.scope = project::Scope::File;
