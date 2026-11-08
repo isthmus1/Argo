@@ -35,6 +35,7 @@ rune-ui = { package = "rune", git = "https://github.com/anomalyco/rune", rev = "
 # so a caret range would break this crate on a patch release. The graph records
 # are the stable thing here; the parser is an implementation detail behind them.
 [dependencies]
+argo-protocol = { path = "crates/argo-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 rucc-ast = "=0.30.15"

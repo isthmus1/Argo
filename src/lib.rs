@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod c_node;
 pub mod c_node_role;
+pub mod export;
 pub mod graph;
 pub mod lexer;
 pub mod parser;
