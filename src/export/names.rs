@@ -105,7 +105,7 @@ impl Exporter<'_> {
 }
 
 /// Header text longer than this is cut with an ellipsis.
-const HEADER_MAX: usize = 44;
+const HEADER_MAX: usize = 72;
 
 /// Source text on one line: newlines and runs of spaces become single spaces.
 fn collapse(text: &str) -> String {

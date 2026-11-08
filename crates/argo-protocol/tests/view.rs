@@ -23,10 +23,18 @@ fn closed_level_shows_region_pins() {
     let lv = level(&ix, Some(ids.compute), |_| false);
     assert_eq!(
         names(&ix, lv.nodes.iter().map(|n| n.id)),
-        ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "return acc", "Output"]
+        [
+            "Input",
+            "uint32_t acc = 0",
+            "for (uint32_t i = 0; i < n; i++)",
+            "return acc",
+            "Output"
+        ]
     );
     let wires: HashSet<_> = lv.wires.iter().map(|w| wire(&ix, w)).collect();
-    assert!(wires.contains("uint32_t acc = 0.live.acc -> for (uint32_t i = 0; i < n; i++).live.acc"));
+    assert!(
+        wires.contains("uint32_t acc = 0.live.acc -> for (uint32_t i = 0; i < n; i++).live.acc")
+    );
     assert!(wires.contains("Input.param.n -> for (uint32_t i = 0; i < n; i++).live.n"));
     assert!(wires.contains("for (uint32_t i = 0; i < n; i++).exec.then -> return acc.exec.in"));
     assert!(lv.frames.is_empty());
@@ -42,7 +50,14 @@ fn opened_regions_resolve_wires_through_their_interfaces() {
     let shown = names(&ix, lv.nodes.iter().map(|n| n.id));
     assert_eq!(
         shown,
-        ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output"]
+        [
+            "Input",
+            "uint32_t acc = 0",
+            "for (uint32_t i = 0; i < n; i++)",
+            "step(acc, i)",
+            "return acc",
+            "Output"
+        ]
     );
     assert_eq!(lv.frames.len(), 2);
     let step = lv.nodes.iter().find(|n| n.id == ids.call_step).unwrap();

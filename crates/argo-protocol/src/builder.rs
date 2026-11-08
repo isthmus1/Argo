@@ -198,7 +198,20 @@ impl GraphBuilder {
         self.graph.layouts.push(layout);
     }
 
-    fn specs(&self, node: NodeId) -> Vec<PinSpec> {
+    /// Change a pin's display label.
+    pub fn relabel(&mut self, pin: &PinRef, label: impl Into<String>) {
+        if let Some(p) = self
+            .graph
+            .pins
+            .iter_mut()
+            .find(|p| p.node == pin.node && p.key == pin.key)
+        {
+            p.label = label.into();
+        }
+    }
+
+    /// The pins added to `node` so far.
+    pub fn specs(&self, node: NodeId) -> Vec<PinSpec> {
         self.graph
             .pins
             .iter()

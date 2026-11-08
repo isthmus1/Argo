@@ -76,7 +76,7 @@ impl State {
         let collapsed = vec![false; graph.groups.len()];
         let selected = graph.selected_group.map(Item::Group);
         let mut s = State {
-            scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4] },
+            scene, view: graph.clone(), graph, collapsed, placed: Placed { pos: vec![], size: vec![], frames: vec![], bounds: [0.0; 4], row_gaps: vec![] },
             cam: Cam { zoom: 1.0, ..Cam::default() }, hovered: None, selected, online: true, live: None, next_event: 4.0, step: 0,
         };
         s.relayout();
@@ -115,12 +115,16 @@ impl State {
             .iter()
             .find(|n| n.kind == NodeKind::Function && function.is_none_or(|name| n.name == name))
             .ok_or_else(|| format!("{path}: no function {}", function.unwrap_or("")))?;
-        // A function whose body is one block shows the block's level directly.
-        let kids: Vec<_> = snap.graph.nodes.iter().filter(|n| n.parent == Some(f.id) && !n.kind.is_interface()).collect();
-        let container = match kids.as_slice() {
-            [body] if body.kind == NodeKind::Scope => body.id,
-            _ => f.id,
-        };
+        // Show the function itself, so its parameters and result are on the canvas, with its body
+        // block open (the bridge draws no frame for it).
+        let container = f.id;
+        let body: Vec<NodeId> = snap
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.parent == Some(f.id) && n.kind == NodeKind::Scope)
+            .map(|n| n.id)
+            .collect();
         // `ARGO_OPEN=all` opens every construct inside the shown level.
         let open = if std::env::var("ARGO_OPEN").is_ok_and(|v| v == "all") {
             let mut open = HashSet::new();
@@ -133,7 +137,7 @@ impl State {
             }
             open
         } else {
-            HashSet::new()
+            body.into_iter().collect()
         };
         Ok(State::from_snapshot("snapshot", snap, Some(container), open, vec![]))
     }

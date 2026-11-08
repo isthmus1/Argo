@@ -39,6 +39,9 @@ impl Exporter<'_> {
         let g = self.g;
         let n = &g.nodes[id];
         let gi = self.b.group_input(node);
+        if kind == NodeKind::Function {
+            self.declare_params(gi);
+        }
         let mut out = Outputs {
             container: node,
             function: kind == NodeKind::Function,
@@ -75,6 +78,18 @@ impl Exporter<'_> {
             (NodeKind::Loop(_), Some(d)) => self.loop_body(gi, d, &kids, &mut out),
             (NodeKind::Switch, Some(d)) => self.switch(gi, d, &kids, &mut out),
             _ => self.sequential(gi, &kids, &mut out),
+        }
+    }
+
+    /// Inside a function, its input reads like the parameter list: `struct ram *r`.
+    fn declare_params(&mut self, gi: NodeId) {
+        for spec in self.b.specs(gi) {
+            let (Some(name), Some(ty)) = (spec.key.as_str().strip_prefix("param."), spec.kind.value_type()) else {
+                continue;
+            };
+            let ty = ty.c();
+            let label = if ty.ends_with('*') { format!("{ty}{name}") } else { format!("{ty} {name}") };
+            self.b.relabel(&argo_protocol::PinRef::new(gi, spec.key.clone()), label);
         }
     }
 

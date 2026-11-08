@@ -10,7 +10,14 @@ pub struct Placed {
     pub frames: Vec<[f32; 4]>,
     /// x, y, w, h of everything.
     pub bounds: [f32; 4],
+    /// World y of the empty band between wrapped rows, top to bottom.
+    pub row_gaps: Vec<f32>,
 }
+
+/// Width-to-height ratio of the canvas area a graph is framed in.
+const VIEW_ASPECT: f32 = 1.9;
+/// Vertical space between wrapped rows; wires going back to the next row's start run through it.
+const WRAP_GAP: f32 = 70.0;
 
 const COL_GAP: f32 = 80.0;
 /// Exec wires dominate placement so the execution path stays straight.
@@ -97,6 +104,7 @@ pub fn layout(g: &Graph) -> Placed {
     })).collect();
     let sizes: Vec<[f32; 2]> = units.iter().map(|u| u.size).collect();
     let (upos, _, _) = layered(&sizes, &edges, &pure);
+    let (upos, row_gaps) = wrap_rows(upos, &sizes);
 
     for (ui, u) in units.iter().enumerate() {
         let [ux, uy] = upos[ui];
@@ -120,7 +128,64 @@ pub fn layout(g: &Graph) -> Placed {
         b[2] = b[2].max(upos[ui][0] + u.size[0]);
         b[3] = b[3].max(upos[ui][1] + u.size[1]);
     }
-    Placed { pos, size, frames, bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]] }
+    Placed { pos, size, frames, bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], row_gaps }
+}
+
+/// A long left-to-right chain shrinks to unreadable when framed. Cut it into rows at column
+/// boundaries so the whole graph keeps roughly the canvas's shape, reading order intact: each row
+/// continues where the previous one ended, like lines of text.
+fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]]) -> (Vec<[f32; 2]>, Vec<f32>) {
+    if pos.is_empty() {
+        return (pos, vec![]);
+    }
+    let x0 = pos.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
+    let x1 = pos.iter().zip(sizes).map(|(p, s)| p[0] + s[0]).fold(f32::MIN, f32::max);
+    let y0 = pos.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+    let y1 = pos.iter().zip(sizes).map(|(p, s)| p[1] + s[1]).fold(f32::MIN, f32::max);
+    let (w, h) = (x1 - x0, (y1 - y0).max(1.0));
+    let rows = ((w / (h * VIEW_ASPECT)).sqrt().round() as usize).max(1);
+    if rows == 1 {
+        return (pos, vec![]);
+    }
+    // Break at column starts, so a column (one rank) never splits across rows.
+    let mut starts: Vec<f32> = pos.iter().map(|p| p[0]).collect();
+    starts.sort_by(f32::total_cmp);
+    starts.dedup();
+    let target = w / rows as f32;
+    let mut breaks = vec![x0];
+    for &s in &starts {
+        if s - breaks.last().copied().unwrap_or(x0) >= target && breaks.len() < rows {
+            breaks.push(s);
+        }
+    }
+    let row_of = |x: f32| breaks.iter().rposition(|&b| x >= b).unwrap_or(0);
+    let n_rows = breaks.len();
+    let mut top = vec![f32::MAX; n_rows];
+    let mut bottom = vec![f32::MIN; n_rows];
+    for (p, s) in pos.iter().zip(sizes) {
+        let r = row_of(p[0]);
+        top[r] = top[r].min(p[1]);
+        bottom[r] = bottom[r].max(p[1] + s[1]);
+    }
+    let mut offset = vec![0.0; n_rows];
+    let mut gaps = Vec::new();
+    let mut y = y0;
+    for r in 0..n_rows {
+        if top[r] > bottom[r] {
+            continue; // empty row
+        }
+        offset[r] = y - top[r];
+        y += bottom[r] - top[r] + WRAP_GAP;
+        if r + 1 < n_rows {
+            gaps.push(y - WRAP_GAP / 2.0);
+        }
+    }
+    for p in &mut pos {
+        let r = row_of(p[0]);
+        p[0] -= breaks[r] - x0;
+        p[1] += offset[r];
+    }
+    (pos, gaps)
 }
 
 /// Lays out a subset of nodes (one group's members) by themselves; returns their offsets

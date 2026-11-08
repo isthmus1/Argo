@@ -123,16 +123,28 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         None => true,
     };
     // Faded wires first, then data, exec on top.
+    let mut gap_lanes = std::collections::HashMap::<usize, usize>::new();
     let mut order: Vec<_> = g.wires.iter().collect();
     order.sort_by_key(|w| (touches(w), g.wire_ty(w) == Ty::Exec));
     for w in order {
         let a = socket_world(g, pl, w.from.0, true, w.from.1);
         let b = socket_world(g, pl, w.to.0, false, w.to.1);
         let (a, b) = ([a[0] + o[0], a[1] + o[1]], [b[0] + o[0], b[1] + o[1]]);
-        let path = if w.back {
+        // Wrapped rows: a wire into a later row runs back through the gap between the rows.
+        let wrap_gap = (b[0] < a[0] && !w.back)
+            .then(|| pl.row_gaps.iter().position(|&g| g + o[1] > a[1] && g + o[1] < b[1]))
+            .flatten()
+            .map(|gi| {
+                // Each wire in a gap gets its own lane, so parallel runs don't merge into one line.
+                let lane = gap_lanes.entry(gi).or_insert(0usize);
+                let y = pl.row_gaps[gi] + o[1] + (*lane as f32 - 1.0) * 12.0;
+                *lane += 1;
+                y
+            });
+        let path = if w.back || wrap_gap.is_some() {
             // A loop backedge runs out of its source, under both nodes, and back into the target.
             let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
-            let below = bottom(w.from.0).max(bottom(w.to.0)) + 22.0;
+            let below = wrap_gap.unwrap_or_else(|| bottom(w.from.0).max(bottom(w.to.0)) + 22.0);
             let r = 26.0;
             Path::new()
                 .move_to(a)

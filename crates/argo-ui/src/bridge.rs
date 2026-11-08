@@ -44,6 +44,21 @@ fn kind(k: P) -> Kind {
     }
 }
 
+/// An opened construct's frame says what kind of construct it is; the dispatch node inside
+/// carries the header (`for (…)`, `if (…)`), so the two never repeat each other.
+fn frame_title(n: &argo_protocol::Node) -> String {
+    use argo_protocol::LoopKind;
+    match n.kind {
+        P::Loop(LoopKind::For) => "for loop".into(),
+        P::Loop(LoopKind::While) => "while loop".into(),
+        P::Loop(LoopKind::DoWhile) => "do … while loop".into(),
+        P::Branch if n.name.ends_with("… else") => "if … else".into(),
+        P::Branch => "if".into(),
+        P::Switch => "switch".into(),
+        _ => n.name.clone(),
+    }
+}
+
 fn ty(k: &PinKind) -> Ty {
     match k {
         PinKind::Exec { .. } => Ty::Exec,
@@ -111,27 +126,44 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     let ix = GraphIndex::new(&snap.graph);
     let level = view::level(&ix, container, |id| open.contains(&id));
 
-    // One frame level: every node joins its outermost frame.
-    let outermost: HashMap<NodeId, NodeId> = {
+    // One frame level: every node joins its outermost drawn frame. A function's body block draws
+    // no frame: it is the whole function, already named by the breadcrumb.
+    let drawn = |f: NodeId| {
+        let n = ix.node(f);
+        let body = n.is_some_and(|n| n.kind == P::Scope)
+            && n.and_then(|n| n.parent).and_then(|p| ix.node(p)).is_some_and(|p| p.kind == P::Function);
+        !body
+    };
+    let outermost: HashMap<NodeId, Option<NodeId>> = {
         let parent: HashMap<_, _> = level.frames.iter().map(|f| (f.id, f.parent)).collect();
         level
             .frames
             .iter()
             .map(|f| {
-                let mut top = f.id;
-                while let Some(Some(p)) = parent.get(&top) {
-                    top = *p;
+                let (mut cur, mut top) = (Some(f.id), None);
+                while let Some(c) = cur {
+                    if drawn(c) {
+                        top = Some(c);
+                    }
+                    cur = parent.get(&c).copied().flatten();
                 }
                 (f.id, top)
             })
             .collect()
     };
-    let frames: Vec<NodeId> = level.frames.iter().filter(|f| f.parent.is_none()).map(|f| f.id).collect();
+    let mut frames: Vec<NodeId> = Vec::new();
+    for f in &level.frames {
+        if let Some(top) = outermost[&f.id]
+            && !frames.contains(&top)
+        {
+            frames.push(top);
+        }
+    }
     let groups = frames
         .iter()
         .map(|&f| {
             let (lang, evidence, claim) = status(snap, &ix, f);
-            Group { title: ix.node(f).map_or_else(String::new, |n| n.name.clone()), lang, evidence, claim }
+            Group { title: ix.node(f).map_or_else(String::new, frame_title), lang, evidence, claim }
         })
         .collect();
 
@@ -164,7 +196,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         }
         let kind = kind(n.kind);
         let has_children = !ix.children(Some(ln.id)).is_empty();
-        let group = ln.frame.and_then(|f| frames.iter().position(|&g| g == outermost[&f]));
+        let group = ln.frame.and_then(|f| outermost[&f]).and_then(|top| frames.iter().position(|&g| g == top));
         nodes.push(Node {
             kind,
             title: n.name.clone(),
@@ -223,7 +255,7 @@ mod tests {
         let titles: Vec<_> = p.graph.nodes.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output"]);
         assert_eq!(p.graph.groups.len(), 1, "nested frames draw as one");
-        assert_eq!(p.graph.groups[0].title, "for (uint32_t i = 0; i < n; i++)");
+        assert_eq!(p.graph.groups[0].title, "for loop");
         assert!(p.graph.nodes.iter().filter(|n| n.group == Some(0)).count() == 2);
         let back: Vec<_> = p.graph.wires.iter().filter(|w| w.back).map(|w| p.graph.nodes[w.from.0].title.as_str()).collect();
         assert_eq!(back, ["step(acc, i)", "step(acc, i)"], "exec and acc both loop back into the dispatch");
