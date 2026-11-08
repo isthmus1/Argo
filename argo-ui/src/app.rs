@@ -27,6 +27,18 @@ const FIT_FLOOR: f32 = 0.72;
 const FIT_MAX: f32 = 1.6;
 /// Gap between the free canvas area's edge and content aligned to it.
 const EDGE_PAD: f32 = 24.0;
+/// Zoom step the default view tries between [`READABLE_ZOOM`] and [`FIT_FLOOR`].
+const ZOOM_STEP: f32 = 0.02;
+/// How far badges (worker avatar, evidence flag) hang outside an item's rectangle, in points.
+const BADGE_OUT: f32 = 10.0;
+/// The start of a frame's title row (name, language chip) that must show, in world units.
+const TITLE_ROW: [f32; 2] = [140.0, 32.0];
+/// Gap kept between a revealed item and the overview card, in points.
+const MAP_GAP: f32 = 8.0;
+/// Pan distance (points) worth moving to keep one more node out from under the overview card.
+const COVER_COST: f32 = 80.0;
+/// Most candidate pans per axis the view solver tries.
+const MAX_CANDS: usize = 160;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Item {
@@ -129,6 +141,41 @@ impl Live {
     pub fn pending(&self) -> usize {
         self.pending.len()
     }
+}
+
+/// How well a camera meets the view goals; fields compare in priority order (better is greater).
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
+struct Score {
+    /// The selection shows whole in the padded free area, clear of the overview card.
+    selection: bool,
+    /// No claimed item is cut by the free area's edge or the overview card.
+    claims: bool,
+    /// Every frame on screen shows the start of its title row.
+    frames: bool,
+    /// How many of the graph's left and top edges are in view.
+    start: u8,
+    claims_shown: usize,
+    /// Minus the pan distance moved and [`COVER_COST`] per node under the overview card.
+    closeness: f32,
+}
+
+impl Score {
+    const WORST: Score = Score { selection: false, claims: false, frames: false, start: 0, claims_shown: 0, closeness: f32::NEG_INFINITY };
+
+    /// Everything but closeness: what a different zoom must improve on to be chosen.
+    fn goals(&self) -> (bool, bool, bool, u8, usize) {
+        (self.selection, self.claims, self.frames, self.start, self.claims_shown)
+    }
+}
+
+/// Screen rectangles `a` and `b` overlap by more than half a point.
+fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+    a[0] < b[0] + b[2] - 0.5 && b[0] < a[0] + a[2] - 0.5 && a[1] < b[1] + b[3] - 0.5 && b[1] < a[1] + a[3] - 0.5
+}
+
+/// `r` lies inside `a`, with `slack` points to spare.
+fn contains(a: [f32; 4], r: [f32; 4], slack: f32) -> bool {
+    r[0] >= a[0] - slack && r[1] >= a[1] - slack && r[0] + r[2] <= a[0] + a[2] + slack && r[1] + r[3] <= a[1] + a[3] + slack
 }
 
 impl State {
@@ -284,9 +331,12 @@ impl State {
         self.cam.pan = [axis(bw, vx, vw), axis(bh, vy, vh)];
     }
 
-    /// Default view: fit everything when that stays readable; otherwise keep a readable zoom,
-    /// read the graph from its top-left, and bring the selection (or where an agent is
-    /// working) into the free area, leaving the rest to panning.
+    /// Default view: fit everything when that stays readable; otherwise keep a readable zoom
+    /// (from [`READABLE_ZOOM`] down to [`FIT_FLOOR`]) and pan, leaving the rest to panning, so
+    /// that, in priority order: the selection shows whole in the free area; every claimed item
+    /// shows whole or not at all (never cut by the details panel); every frame on screen shows
+    /// its title; the graph's top-left (where it starts reading) stays in view; and as many
+    /// claimed items as possible show. A lower zoom is used only when it meets more of these.
     pub fn fit(&mut self) {
         self.fit_all();
         // Captures can pan like a person would: `ARGO_TILE=col,row` at `ARGO_ZOOM`.
@@ -300,41 +350,164 @@ impl State {
         if self.cam.zoom >= FIT_FLOOR || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
             return;
         }
-        // Start where the program starts (reading order); the far edges fade to show more.
-        self.place(READABLE_ZOOM);
-        // Where an agent is working, then the selection (which wins), stay in view.
-        for item in [self.claimed(), self.selected].into_iter().flatten() {
-            self.show(item);
+        let mut best: Option<(Score, f32, [f32; 2])> = None;
+        let steps = ((READABLE_ZOOM - FIT_FLOOR) / ZOOM_STEP).round() as usize;
+        for k in 0..=steps {
+            let zoom = READABLE_ZOOM - k as f32 * ZOOM_STEP;
+            // Start where the program starts (reading order); the far edges fade to show more.
+            self.place(zoom);
+            let (score, pan) = self.solve(zoom, self.cam.pan, self.selected, true);
+            // Ties keep the larger, more readable zoom.
+            if best.as_ref().is_none_or(|(b, _, _)| score.goals() > b.goals()) {
+                best = Some((score, zoom, pan));
+            }
+        }
+        if let Some((_, zoom, pan)) = best {
+            self.cam.zoom = zoom;
+            self.cam.pan = pan;
         }
     }
 
-    /// The item an agent is working on: an active claim first, else a queued one.
-    fn claimed(&self) -> Option<Item> {
-        let nodes = self.view.nodes.iter().enumerate().filter_map(|(i, n)| Some((n.claim?, Item::Node(i))));
-        let groups = self.view.groups.iter().enumerate()
-            .filter(|&(g, _)| !self.collapsed.get(g).copied().unwrap_or(false) && self.placed.frames.get(g).is_some_and(|f| f[2] > 0.0))
-            .filter_map(|(g, grp)| Some((grp.claim?, Item::Group(g))));
-        let claims: Vec<_> = nodes.chain(groups).collect();
-        claims.iter().find(|(c, _)| c.active).or(claims.first()).map(|&(_, item)| item)
+    /// Every item an agent has claimed (active or queued), as drawn.
+    fn claims(&self) -> Vec<Item> {
+        let nodes = self.view.nodes.iter().enumerate().filter(|(_, n)| n.claim.is_some()).map(|(i, _)| Item::Node(i));
+        let groups = (0..self.view.groups.len()).filter(|&g| self.view.groups[g].claim.is_some() && self.expanded(g)).map(Item::Group);
+        nodes.chain(groups).collect()
     }
 
-    /// Pan the least distance that puts `item` inside the free canvas area (padded). An item
-    /// larger than that area on an axis shows from its top or left edge, where a frame's title
-    /// and collapse button are.
+    /// Whether group `g` is drawn as a frame.
+    fn expanded(&self, g: usize) -> bool {
+        !self.collapsed.get(g).copied().unwrap_or(false) && self.placed.frames.get(g).is_some_and(|f| f[2] > 0.0)
+    }
+
+    /// The pan, at `zoom`, closest to `from` that best meets the view goals (see [`State::fit`]):
+    /// `selection` whole in the free area, claimed items whole or hidden, frames on screen with
+    /// their titles, and, when `reading`, the graph's top-left in view. Items revealed keep clear
+    /// of the overview card. Candidate pans line item edges up with the free area's edges, its
+    /// padding and the card's edges.
+    fn solve(&self, zoom: f32, from: [f32; 2], selection: Option<Item>, reading: bool) -> (Score, [f32; 2]) {
+        let free = self.free();
+        let world = |item| self.world(item);
+        let sel = selection.map(world);
+        let claims: Vec<[f32; 4]> = self.claims().into_iter().map(world).collect();
+        let frames: Vec<[f32; 4]> = (0..self.view.groups.len()).filter(|&g| self.expanded(g)).map(|g| world(Item::Group(g))).collect();
+        let nodes: Vec<[f32; 4]> = (0..self.placed.pos.len()).map(|i| world(Item::Node(i))).collect();
+        let [_, _, bw, bh] = self.placed.bounds;
+        let content = [MARGIN, MARGIN, bw, bh];
+        let map = crate::overview::rect(self);
+
+        let mut cands = [vec![from[0]], vec![from[1]]];
+        for axis in 0..2 {
+            let (lo, room) = (free[axis], free[axis + 2]);
+            let mut targets = vec![lo, lo + EDGE_PAD, lo + room - EDGE_PAD, lo + room];
+            if let Some(m) = map {
+                targets.push(if axis == 0 { m[0] + m[2] + MAP_GAP } else { m[1] - MAP_GAP });
+            }
+            let title = TITLE_ROW[axis] * zoom;
+            let mut edges = vec![];
+            for (r, out) in sel.iter().chain(&claims).map(|r| (r, BADGE_OUT)).chain(frames.iter().map(|r| (r, 0.0))) {
+                let (start, len) = (r[axis] * zoom - out, r[axis + 2] * zoom + 2.0 * out);
+                edges.extend([start, start + len]);
+                if out == 0.0 {
+                    edges.push(start + title.min(len));
+                }
+            }
+            for e in edges {
+                cands[axis].extend(targets.iter().map(|t| t - e));
+            }
+            // Nodes lined up with the overview card's edge, to slide them out from under it.
+            if let Some(m) = map {
+                let edge = if axis == 0 { m[0] + m[2] + MAP_GAP } else { m[1] - MAP_GAP };
+                let near = nodes.iter().map(|r| if axis == 0 { r[0] * zoom } else { (r[1] + r[3]) * zoom });
+                cands[axis].extend(near.map(|e| edge - e));
+            }
+            // Large graphs with many frames: the pans nearest `from` bound the search.
+            let near = from[axis];
+            cands[axis].sort_by(|a, b| (a - near).abs().total_cmp(&(b - near).abs()));
+            cands[axis].truncate(MAX_CANDS);
+            cands[axis].sort_by(f32::total_cmp);
+            cands[axis].dedup_by(|a, b| (*a - *b).abs() < 0.25);
+        }
+
+        let mut best = (Score::WORST, from);
+        for &px in &cands[0] {
+            for &py in &cands[1] {
+                let pan = [px, py];
+                let rect = |r: &[f32; 4], out: f32| [px + r[0] * zoom - out, py + r[1] * zoom - out, r[2] * zoom + 2.0 * out, r[3] * zoom + 2.0 * out];
+                let c = rect(&content, 0.0);
+                // The overview card shows (at the free area's bottom-left) when the graph overflows.
+                let card = map.filter(|_| !contains(free, c, 1.0)).map(|m| [m[0], m[1] - MAP_GAP, m[2] + MAP_GAP, m[3] + MAP_GAP]);
+                let clear = |r: [f32; 4]| card.is_none_or(|k| !overlaps(r, k));
+                // Whole inside the free area, `pad` from its edges; an item too big for it shows
+                // from its top or left edge.
+                let shown = |r: [f32; 4], pad: f32| {
+                    let mut fits = true;
+                    let axes = (0..2).all(|a| {
+                        let (lo, hi) = (free[a] + pad, free[a] + free[a + 2] - pad);
+                        if r[a + 2] <= hi - lo {
+                            r[a] >= lo - 0.5 && r[a] + r[a + 2] <= hi + 0.5
+                        } else {
+                            fits = false;
+                            r[a] >= free[a] - 0.5 && r[a] <= lo + 0.5
+                        }
+                    });
+                    axes && (!fits || clear(r))
+                };
+                let selection = sel.is_none_or(|r| shown(rect(&r, BADGE_OUT), EDGE_PAD));
+                let mut claims_shown = 0;
+                let mut claims_ok = true;
+                for r in &claims {
+                    let r = rect(r, BADGE_OUT);
+                    if shown(r, 0.0) {
+                        claims_shown += 1;
+                    } else if overlaps(r, free) {
+                        claims_ok = false;
+                    }
+                }
+                let frames_ok = frames.iter().all(|r| {
+                    let r = rect(r, 0.0);
+                    let title = [r[0], r[1], r[2].min(TITLE_ROW[0] * zoom), r[3].min(TITLE_ROW[1] * zoom)];
+                    !overlaps(r, free) || (contains(free, title, 0.5) && clear(title))
+                });
+                // Per axis, the graph reads from its start: whole in view where it fits, else
+                // its edge just inside the free area (not pushed in, leaving an empty band).
+                let reads = |a: usize| {
+                    let (lo, room) = (free[a], free[a + 2]);
+                    let ok_end = if c[a + 2] <= room + 1.0 { c[a] + c[a + 2] <= lo + room + 0.5 } else { c[a] <= lo + EDGE_PAD + 0.5 };
+                    c[a] >= lo - 0.5 && ok_end
+                };
+                let start = if reading { u8::from(reads(0)) + u8::from(reads(1)) } else { 0 };
+                let shift = (px - from[0]).abs() + (py - from[1]).abs();
+                let covered = card.map_or(0, |k| nodes.iter().filter(|r| overlaps(rect(r, 0.0), k)).count());
+                let score = Score { selection, claims: claims_ok, frames: frames_ok, start, claims_shown, closeness: -shift - COVER_COST * covered as f32 };
+                if score > best.0 {
+                    best = (score, pan);
+                }
+            }
+        }
+        best
+    }
+
+    /// Pan the least distance that puts `item` inside the free canvas area (padded) and clear of
+    /// the overview card, without cutting a claimed item or a frame's title at the area's edge.
+    /// An item larger than that area on an axis shows from its top or left edge, where a frame's
+    /// title and collapse button are.
     fn show(&mut self, item: Item) {
-        let r = self.item_rect(item);
-        let [vx, vy, vw, vh] = self.free();
-        for (axis, start, len, lo, room) in [(0, r[0], r[2], vx, vw), (1, r[1], r[3], vy, vh)] {
-            let (lo, hi) = (lo + EDGE_PAD, lo + room - EDGE_PAD);
-            let shift = if len > hi - lo || start < lo {
-                lo - start
-            } else if start + len > hi {
-                hi - (start + len)
-            } else {
-                0.0
-            };
-            self.cam.pan[axis] += shift;
-        }
+        self.cam.pan = self.solve(self.cam.zoom, self.cam.pan, Some(item), false).1;
+    }
+
+    /// An item's rectangle in world units, relative to the camera pan at zoom 1 (screen rectangle
+    /// = pan + this × zoom).
+    fn world(&self, item: Item) -> [f32; 4] {
+        let [bx, by, _, _] = self.placed.bounds;
+        let ([x, y], [w, h]) = match item {
+            Item::Node(i) => (self.placed.pos[i], self.placed.size[i]),
+            Item::Group(g) => {
+                let [x, y, w, h] = self.placed.frames[g];
+                ([x, y], [w, h])
+            }
+        };
+        [x - bx + MARGIN, y - by + MARGIN, w, h]
     }
 
     /// Point the camera at one tile of a grid covering the whole graph at `zoom`. Neighbouring
@@ -377,11 +550,7 @@ impl State {
 
     /// Screen rectangle of a view node under the current camera.
     pub fn screen_rect(&self, i: usize) -> [f32; 4] {
-        let [bx, by, _, _] = self.placed.bounds;
-        let z = self.cam.zoom;
-        let [x, y] = self.placed.pos[i];
-        let [w, h] = self.placed.size[i];
-        [self.cam.pan[0] + (x - bx + MARGIN) * z, self.cam.pan[1] + (y - by + MARGIN) * z, w * z, h * z]
+        self.item_rect(Item::Node(i))
     }
 
     /// Select an item; when the docked details panel would cover part of it (a node or a
@@ -412,15 +581,9 @@ impl State {
 
     /// Screen rectangle of a frame or node under the current camera.
     pub fn item_rect(&self, item: Item) -> [f32; 4] {
-        match item {
-            Item::Node(i) => self.screen_rect(i),
-            Item::Group(g) => {
-                let [bx, by, _, _] = self.placed.bounds;
-                let z = self.cam.zoom;
-                let [x, y, w, h] = self.placed.frames[g];
-                [self.cam.pan[0] + (x - bx + MARGIN) * z, self.cam.pan[1] + (y - by + MARGIN) * z, w * z, h * z]
-            }
-        }
+        let [x, y, w, h] = self.world(item);
+        let z = self.cam.zoom;
+        [self.cam.pan[0] + x * z, self.cam.pan[1] + y * z, w * z, h * z]
     }
 
     /// Whether a view node is a collapsed node group that can be viewed as a frame.
@@ -705,7 +868,8 @@ mod tests {
         assert!(!s.collapsed[g]);
         assert_eq!(s.view.nodes.len(), total);
         assert_eq!(crossing(&s.view, g), crossed);
-        assert!(near(s.item_rect(Item::Group(g)), frame), "{title}: the frame opens where the node was");
+        // Opening may slide the frame up or left to show more of it, never off its anchor.
+        assert!(anchored(&s, s.item_rect(Item::Group(g)), frame), "{title}: the frame opens where the node was: {:?} vs {frame:?}", s.item_rect(Item::Group(g)));
         assert_eq!(s.selected, Some(Item::Group(g)));
     }
 
@@ -863,6 +1027,96 @@ mod tests {
         }
     }
 
+    /// The default view of each review scene with something selected or claimed, as captured.
+    fn focused_scenes() -> Vec<State> {
+        let mut states: Vec<State> = ["fixture", "branches", "dataflow", "interp"].into_iter().map(State::load).collect();
+        // `dataflow-select`: round_pack selected after loading, then the first layout's fit.
+        let mut df = State::load("dataflow");
+        df.select(Item::Node(df.find("round_pack").unwrap()));
+        states.push(df);
+        let mut df = State::load("dataflow");
+        df.selected = Some(Item::Node(df.find("round_pack").unwrap()));
+        df.fit();
+        states.push(df);
+        let mut collapsed = State::load("interp");
+        collapsed.toggle_group(0);
+        collapsed.fit();
+        states.push(collapsed);
+        states.push(State::protocol_fixture());
+        states.push(State::protocol_module(true));
+        states
+    }
+
+    #[test]
+    fn fit_never_cuts_a_claimed_item_at_the_details_panel() {
+        ui::set_viewport([1024.0, 640.0]);
+        let s = State::load("fixture");
+        let free = s.free();
+        let right = free[0] + free[2];
+        let sel = s.item_rect(s.selected.expect("the fixture selects its group"));
+        assert!(inside(sel, free), "selection {sel:?} outside {free:?}");
+        let claims = s.claims();
+        assert!(claims.len() >= 2, "the fixture claims its group and report");
+        for item in claims {
+            let r = s.item_rect(item);
+            assert!(!(r[0] < right - 0.5 && r[0] + r[2] > right + 0.5), "{item:?} {r:?} straddles the free area's right edge {right}");
+            assert!(inside(r, free) || !overlaps(r, free), "{item:?} {r:?} is cut by the free area {free:?}");
+        }
+        // The report node shows whole beside the panel, its badges too.
+        let report = s.item_rect(Item::Node(s.find("report").unwrap()));
+        assert!(inside(report, free), "report {report:?} outside {free:?}");
+        for s in focused_scenes() {
+            let free = s.free();
+            let right = free[0] + free[2];
+            if let Some(sel) = s.selected {
+                let r = s.item_rect(sel);
+                assert!(inside(r, free), "{}: selection {r:?} outside {free:?}", s.scene);
+            }
+            for item in s.claims() {
+                let r = s.item_rect(item);
+                assert!(!(r[0] < right - 0.5 && r[0] + r[2] > right + 0.5), "{}: {item:?} {r:?} straddles {right}", s.scene);
+            }
+        }
+    }
+
+    #[test]
+    fn frames_on_screen_show_their_titles() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            for s in focused_scenes() {
+                let free = s.free();
+                for g in (0..s.view.groups.len()).filter(|&g| s.expanded(g)) {
+                    let r = s.item_rect(Item::Group(g));
+                    if overlaps(r, free) {
+                        let (x, y) = (r[0], r[1]);
+                        let start = x >= free[0] - 0.5 && x <= free[0] + free[2] && y >= free[1] - 0.5 && y <= free[1] + free[3];
+                        assert!(start, "{size:?} {}: frame {g} at {r:?} shows without its title in {free:?}", s.scene);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn revealed_items_keep_clear_of_the_overview_card() {
+        for size in SIZES {
+            ui::set_viewport(size);
+            for s in focused_scenes() {
+                if !crate::overview::overflows(&s) {
+                    continue;
+                }
+                let card = crate::overview::rect(&s).unwrap();
+                let free = s.free();
+                for item in s.selected.into_iter().chain(s.claims()) {
+                    let r = s.item_rect(item);
+                    if inside(r, free) {
+                        assert!(!overlaps(r, card), "{size:?} {}: {item:?} {r:?} under the overview {card:?}", s.scene);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn content_never_starts_under_the_top_bar() {
         for size in SIZES {
@@ -877,9 +1131,11 @@ mod tests {
                 let free = s.free();
                 // A selected or claimed item wins over reading from the top-left: showing it may
                 // pan other content off an edge, but it starts inside the free area itself.
-                if let Some(focus) = s.selected.or(s.claimed()) {
-                    let r = s.item_rect(focus);
-                    assert!(r[0] >= free[0] - 0.5 && r[1] >= free[1] - 0.5, "{size:?} {}: focus {r:?} starts outside the free area", s.scene);
+                let focus: Vec<Item> = s.selected.into_iter().chain(s.claims()).collect();
+                if !focus.is_empty() {
+                    for r in focus.into_iter().map(|it| s.item_rect(it)) {
+                        assert!(r[0] >= free[0] - 0.5 && r[1] >= free[1] - 0.5, "{size:?} {}: focus {r:?} starts outside the free area", s.scene);
+                    }
                     continue;
                 }
                 for r in drawn(&s) {

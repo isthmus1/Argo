@@ -5,7 +5,7 @@
 use crate::app::{MARGIN, State};
 use crate::palette::Pal;
 use crate::ui;
-use rune_ui::{Drag, El, Phase, Shape, Tx, canvas, el};
+use rune_ui::{Drag, El, Phase, Shape, Tx, canvas};
 
 /// Largest size of the overview card, in points.
 const W: f32 = 160.0;
@@ -33,6 +33,13 @@ pub fn map(s: &State) -> Option<Map> {
     Some(Map { size, at: [INNER, INNER], k })
 }
 
+/// The card's screen rectangle, at the free canvas area's bottom-left, whether or not it shows.
+pub fn rect(s: &State) -> Option<[f32; 4]> {
+    let m = map(s)?;
+    let [vx, vy, _, vh] = ui::free_area(s.selected.is_some(), s.project.is_some());
+    Some([vx, vy + vh - m.size[1], m.size[0], m.size[1]])
+}
+
 /// Whether some of the graph lies outside the free canvas area.
 pub fn overflows(s: &State) -> bool {
     let [_, _, bw, bh] = s.placed.bounds;
@@ -57,13 +64,11 @@ pub fn view(p: &Pal, s: &State) -> Option<El> {
         return None;
     }
     let m = map(s)?;
-    let [vx, vy, _, vh] = ui::free_area(s.selected.is_some(), s.project.is_some());
-    let card = el()
+    let [x, y, _, _] = rect(s)?;
+    // Opaque, with the chrome bars' shadow: wires under it must not show through.
+    let card = ui::card(p)
         .key("overview")
         .size(m.size[0], m.size[1])
-        .fill(p.panel.alpha(0.88))
-        .radius(8.0)
-        .border(1.0, p.panel_border)
         .child(canvas(shape(p, s, m)).size(m.size[0], m.size[1]).absolute(0.0, 0.0))
         .on_drag(move |s: &mut State, d: &mut Drag, tx: &mut Tx| {
             if d.phase != Phase::Up || !d.cancelled() {
@@ -71,7 +76,7 @@ pub fn view(p: &Pal, s: &State) -> Option<El> {
             }
             tx.instant();
         });
-    Some(card.absolute(vx, vy + vh - m.size[1]))
+    Some(card.absolute(x, y))
 }
 
 /// Frames as faint outlines, nodes as muted blocks, the visible part as an accent outline.
