@@ -347,3 +347,37 @@ fn provenance_nests_inside_the_parent() {
         "{v:?}"
     );
 }
+
+#[test]
+fn every_pin_has_a_distinct_label() {
+    let v = broken(|g, ids| {
+        let pin = g
+            .pins
+            .iter_mut()
+            .find(|p| p.node == ids.call_step && p.key.as_str() == "param.i")
+            .unwrap();
+        pin.label.clear();
+    });
+    assert!(
+        has(
+            &v,
+            |x| matches!(x, Violation::PinLabel { detail, .. } if detail.contains("labelled"))
+        ),
+        "{v:?}"
+    );
+    let v = broken(|g, ids| {
+        let pin = g
+            .pins
+            .iter_mut()
+            .find(|p| p.node == ids.call_step && p.key.as_str() == "param.i")
+            .unwrap();
+        pin.label = "acc".into();
+    });
+    assert!(
+        has(
+            &v,
+            |x| matches!(x, Violation::PinLabel { detail, .. } if detail.contains("unique"))
+        ),
+        "{v:?}"
+    );
+}

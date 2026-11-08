@@ -120,6 +120,29 @@ pub mod key {
     }
 }
 
+/// A readable label for a pin key, for records published without one. Producers should label
+/// pins themselves; this keeps old snapshots legible.
+pub fn label_for_key(key: &str) -> String {
+    match key {
+        key::ENTER => "run".into(),
+        key::THEN => "then".into(),
+        key::NEXT => "continue".into(),
+        key::RETURN => "result".into(),
+        key::VALUE => "value".into(),
+        key::ELSE => "false".into(),
+        k => match k.split_once('.') {
+            Some(("exit", rest)) => rest.replace('.', " "),
+            Some(("init", var)) => format!("initial {var}"),
+            Some(("next", var)) => format!("next {var}"),
+            Some(("arm", n)) => format!("arm {n}"),
+            Some(("case", n)) => format!("case {n}"),
+            Some(("operand", n)) => format!("operand {n}"),
+            Some((_, name)) => name.into(),
+            None => k.into(),
+        },
+    }
+}
+
 /// Pin direction. An `in_out` pin is drawn as a paired input and output handle on one row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -312,19 +335,25 @@ impl PinSpec {
     pub fn enter() -> Self {
         Self::exec(
             key::ENTER,
-            "",
+            "run",
             Direction::In,
             Flow::Entry,
             PinOrigin::Syntax,
         )
     }
     pub fn then() -> Self {
-        Self::exec(key::THEN, "", Direction::Out, Flow::Then, PinOrigin::Syntax)
+        Self::exec(
+            key::THEN,
+            "then",
+            Direction::Out,
+            Flow::Then,
+            PinOrigin::Syntax,
+        )
     }
     pub fn backedge() -> Self {
         Self::exec(
             key::NEXT,
-            "next",
+            "continue",
             Direction::In,
             Flow::Backedge,
             PinOrigin::Syntax,
@@ -371,10 +400,11 @@ impl PinSpec {
             PinOrigin::Signature,
         )
     }
+    /// The value leaving with `return`: a function's result, or a region's when it returns.
     pub fn ret(ty: ValueType) -> Self {
         Self::value(
             key::RETURN.into(),
-            "",
+            "result",
             Direction::Out,
             ty,
             PinOrigin::Signature,
@@ -385,7 +415,13 @@ impl PinSpec {
         Self::value(key::live(var), var, direction, ty, PinOrigin::Liveness)
     }
     pub fn init(var: &str, ty: ValueType) -> Self {
-        Self::value(key::init(var), var, Direction::In, ty, PinOrigin::Liveness)
+        Self::value(
+            key::init(var),
+            &format!("initial {var}"),
+            Direction::In,
+            ty,
+            PinOrigin::Liveness,
+        )
     }
     pub fn next(var: &str, ty: ValueType) -> Self {
         Self::value(
@@ -446,7 +482,13 @@ impl PinSpec {
         Self::value(key::operand(n), label, Direction::In, ty, PinOrigin::Syntax)
     }
     pub fn value_out(ty: ValueType) -> Self {
-        Self::value(key::VALUE.into(), "", Direction::Out, ty, PinOrigin::Syntax)
+        Self::value(
+            key::VALUE.into(),
+            "value",
+            Direction::Out,
+            ty,
+            PinOrigin::Syntax,
+        )
     }
     pub fn field(name: &str, ty: ValueType) -> Self {
         Self::value(

@@ -124,7 +124,7 @@ pub fn graph() -> (Graph, Ids) {
             r,
             [
                 PinSpec::exit(crate::Flow::Return),
-                PinSpec::live("return", Direction::Out, u32t()).labelled(""),
+                PinSpec::ret(u32t()).origin(crate::PinOrigin::Liveness),
             ],
         );
     };
@@ -150,7 +150,7 @@ pub fn graph() -> (Graph, Ids) {
     b.exec((gi, key::ENTER), (seq, key::ENTER));
     b.data((gi, &key::param("x")), (seq, &key::live("x")));
     b.exec((seq, key::RETURN_EXIT), (go, key::THEN));
-    b.data((seq, &key::live("return")), (go, key::RETURN));
+    b.data((seq, key::RETURN), (go, key::RETURN));
 
     // step(acc, i) = normalize(acc + i), with the sequence opened to statement detail.
     let step = function(
@@ -180,7 +180,7 @@ pub fn graph() -> (Graph, Ids) {
     b.data((gi, &key::param("acc")), (step_body, &key::live("acc")));
     b.data((gi, &key::param("i")), (step_body, &key::live("i")));
     b.exec((step_body, key::RETURN_EXIT), (go, key::THEN));
-    b.data((step_body, &key::live("return")), (go, key::RETURN));
+    b.data((step_body, key::RETURN), (go, key::RETURN));
     let call_normalize = {
         let gi = b.group_input(step_body);
         let sum = b.node(Some(step_body), NodeKind::Expression, "acc + i");
@@ -189,18 +189,18 @@ pub fn graph() -> (Graph, Ids) {
         b.pins(
             sum,
             [
-                PinSpec::operand(0, "a", u32t()),
-                PinSpec::operand(1, "b", u32t()),
+                PinSpec::operand(0, "acc", u32t()),
+                PinSpec::operand(1, "i", u32t()),
                 PinSpec::value_out(u32t()),
             ],
         );
         let call = b.call(step_body, normalize, true);
         b.provenance(call, at("normalize(acc + i)"));
-        let go = b.group_output(step_body, key::RETURN_EXIT, &["live.return"]);
+        let go = b.group_output(step_body, key::RETURN_EXIT, &[key::RETURN]);
         b.data((gi, &key::live("acc")), (sum, &key::operand(0)));
         b.data((gi, &key::live("i")), (sum, &key::operand(1)));
         b.data((sum, key::VALUE), (call, &key::param("x")));
-        b.data((call, key::RETURN), (go, "live.return"));
+        b.data((call, key::RETURN), (go, key::RETURN));
         b.exec((gi, key::ENTER), (go, key::RETURN_EXIT));
         call
     };
@@ -256,7 +256,7 @@ pub fn graph() -> (Graph, Ids) {
     b.data((gi, &key::param("n")), (loop_region, &key::live("n")));
     b.data((init, &key::live("acc")), (loop_region, &key::live("acc")));
     b.data((loop_region, &key::live("acc")), (ret, &key::live("acc")));
-    b.data((ret, &key::live("return")), (go, key::RETURN));
+    b.data((ret, key::RETURN), (go, key::RETURN));
 
     // Loop interior: the dispatch owns init/condition/step; acc is carried explicitly.
     let gi = b.group_input(loop_region);
@@ -293,7 +293,7 @@ pub fn graph() -> (Graph, Ids) {
             PinSpec::init("acc", u32t()),
             PinSpec::next("acc", u32t()),
             PinSpec::live("acc", Direction::Out, u32t()),
-            PinSpec::live("i", Direction::Out, u32t()).labelled("index"),
+            PinSpec::live("i", Direction::Out, u32t()),
         ],
     );
     let loop_body = region(

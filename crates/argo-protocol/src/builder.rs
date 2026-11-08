@@ -212,11 +212,18 @@ impl GraphBuilder {
         let gi = self.node(Some(container), NodeKind::GroupInput, "Input");
         for spec in self.specs(container) {
             if spec.direction.is_input() {
+                // Inside, the container's entry is where its body starts.
+                let label = if spec.key.as_str() == crate::pin::key::ENTER {
+                    "start".into()
+                } else {
+                    spec.label.clone()
+                };
                 self.pin(
                     gi,
                     PinSpec {
                         direction: Direction::Out,
                         origin: PinOrigin::Mirror,
+                        label,
                         ..spec
                     },
                 );
@@ -235,11 +242,18 @@ impl GraphBuilder {
                 Family::Data => values.contains(&spec.key.as_str()),
             };
             if wanted && spec.direction.is_output() {
+                // Inside, falling off the container's end is where its body ends.
+                let label = if spec.key.as_str() == crate::pin::key::THEN {
+                    "end".into()
+                } else {
+                    spec.label.clone()
+                };
                 self.pin(
                     go,
                     PinSpec {
                         direction: Direction::In,
                         origin: PinOrigin::Mirror,
+                        label,
                         ..spec
                     },
                 );

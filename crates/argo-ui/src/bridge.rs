@@ -147,7 +147,12 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         pins.sort_by_key(|p| p.family() != Family::Control);
         let (mut ins, mut outs) = (Vec::new(), Vec::new());
         for p in pins {
-            let pin = Pin { label: p.label.clone(), ty: ty(&p.kind), spelled: spelled(&p.kind) };
+            let label = if p.label.trim().is_empty() {
+                argo_protocol::pin::label_for_key(p.key.as_str())
+            } else {
+                p.label.clone()
+            };
+            let pin = Pin { label, ty: ty(&p.kind), spelled: spelled(&p.kind) };
             if p.direction.is_input() {
                 socket.insert((ln.id, p.key.to_string(), false), (vi, ins.len()));
                 ins.push(pin.clone());

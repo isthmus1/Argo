@@ -34,6 +34,12 @@ pub enum Violation {
         node: NodeId,
         detail: &'static str,
     },
+    /// A pin with no label, or one its node's other inputs (or outputs) already use: the GUI
+    /// couldn't tell them apart.
+    PinLabel {
+        pin: PinRef,
+        detail: &'static str,
+    },
     /// An opened container's group input/output doesn't mirror the container's pins.
     Interface {
         node: NodeId,
@@ -97,6 +103,7 @@ pub fn validate(graph: &Graph) -> Vec<Violation> {
     identities(graph, &mut v);
     containment(&ix, &mut v);
     node_pins(&ix, &mut v);
+    labels(&ix, &mut v);
     interfaces(&ix, &mut v);
     wires(&ix, &mut v);
     cycles(&ix, Family::Control, &mut v);
@@ -254,6 +261,35 @@ fn node_pins(ix: &GraphIndex, v: &mut Vec<Violation>) {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+fn labels(ix: &GraphIndex, v: &mut Vec<Violation>) {
+    for n in &ix.graph.nodes {
+        let mut seen: HashSet<(bool, &str)> = HashSet::new();
+        for p in ix.pins(n.id) {
+            if p.label.trim().is_empty() {
+                v.push(Violation::PinLabel {
+                    pin: p.pin_ref(),
+                    detail: "every pin is labelled",
+                });
+                continue;
+            }
+            for side in [
+                p.direction.is_input().then_some(false),
+                p.direction.is_output().then_some(true),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !seen.insert((side, p.label.as_str())) {
+                    v.push(Violation::PinLabel {
+                        pin: p.pin_ref(),
+                        detail: "labels are unique per side",
+                    });
+                }
+            }
         }
     }
 }

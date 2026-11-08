@@ -20,9 +20,11 @@ impl B {
 
     fn node(&mut self, kind: Kind, title: &str, lang: Lang, ins: &[(&str, Ty)], outs: &[(&str, Ty)]) -> usize {
         let pins = |ps: &[(&str, Ty)]| ps.iter().map(|&(l, ty)| Pin { label: l.into(), ty, spelled: None }).collect();
+        let (mut ins, mut outs): (Vec<Pin>, Vec<Pin>) = (pins(ins), pins(outs));
+        label_unnamed(kind, &mut ins, &mut outs);
         self.g.nodes.push(Node {
             kind, title: title.into(), lang, evidence: Evidence::None, claim: None,
-            ins: pins(ins), outs: pins(outs), group: self.group, members: 0,
+            ins, outs, group: self.group, members: 0,
         });
         self.g.nodes.len() - 1
     }
@@ -58,6 +60,33 @@ impl B {
     }
 }
 
+/// Name the pins a scene left unnamed, the way protocol pins are named: `run`/`then` for exec,
+/// `start`/`end` on group input/output, `result` from calls, `value` otherwise. Constants and
+/// getters stay pills whose title names their one output.
+fn label_unnamed(kind: Kind, ins: &mut [Pin], outs: &mut [Pin]) {
+    if ins.is_empty() && outs.len() == 1 && kind != Kind::GroupIn {
+        return;
+    }
+    for p in ins.iter_mut().filter(|p| p.label.is_empty()) {
+        p.label = match (p.ty, kind) {
+            (Ty::Exec, Kind::GroupOut) => "end",
+            (Ty::Exec, _) => "run",
+            (_, Kind::GroupOut) => "result",
+            _ => "value",
+        }
+        .into();
+    }
+    for p in outs.iter_mut().filter(|p| p.label.is_empty()) {
+        p.label = match (p.ty, kind) {
+            (Ty::Exec, Kind::GroupIn) => "start",
+            (Ty::Exec, _) => "then",
+            (_, Kind::Call | Kind::Group) => "result",
+            _ => "value",
+        }
+        .into();
+    }
+}
+
 const fn claim(worker: u8, active: bool) -> Option<Claim> {
     Some(Claim { worker, active })
 }
@@ -79,7 +108,7 @@ fn fixture() -> Graph {
     let input = b.node(GroupIn, "Input", Lang::None, &[], &[("", E), ("n", U)]);
     let acc0 = b.node(Local, "acc = 0", Lang::None, &[], &[("acc", U)]);
     let lp = b.node(Loop, "for i in 0..n", Lang::C, &[("", E), ("n", U), ("acc", U)],
-        &[("loop body", E), ("index", U), ("acc", U), ("completed", E), ("acc", U)]);
+        &[("loop body", E), ("index", U), ("acc", U), ("completed", E), ("final acc", U)]);
     let g = b.begin_group("step ∘ normalize", Lang::Rust, Evidence::Accepted, claim(2, false));
     let add = b.node(Op, "acc + i", Lang::Rust, &[("acc", U), ("i", U)], &[("sum", U)]);
     let norm = b.node(Call, "normalize", Lang::Rust, &[("x", U)], &[("result", U)]);
@@ -144,7 +173,7 @@ fn branches() -> Graph {
     b.w(input, 1, count, 0);
     b.w(setv, 1, count, 1);
     let lp = b.node(Loop, "for i in 0..n", c, &[("", E), ("n", U), ("total", U)],
-        &[("loop body", E), ("index", U), ("total", U), ("completed", E), ("total", U)]);
+        &[("loop body", E), ("index", U), ("total", U), ("completed", E), ("final total", U)]);
     let t0 = b.node(Local, "total = 0", Lang::None, &[], &[("total", U)]);
     b.w(setv, 0, lp, 0);
     b.w(count, 0, lp, 1);
@@ -400,3 +429,49 @@ fn interp() -> Graph {
     b.g
 }
 
+
+#[cfg(test)]
+mod tests {
+    use crate::model::Graph;
+
+    /// Every pin outside a titled pill has a label, and no node repeats one on a side.
+    pub(crate) fn problems(name: &str, g: &Graph) -> Vec<String> {
+        let mut problems = Vec::new();
+        for n in &g.nodes {
+            let pill = n.ins.is_empty() && n.outs.len() == 1 && n.outs[0].label.is_empty();
+            if pill {
+                continue;
+            }
+            for (side, pins) in [("in", &n.ins), ("out", &n.outs)] {
+                let mut seen = std::collections::HashSet::new();
+                for p in pins.iter() {
+                    if p.label.is_empty() {
+                        problems.push(format!("{name}: {} has an unlabelled {side} pin", n.title));
+                    } else if !seen.insert(&p.label) {
+                        problems.push(format!("{name}: {} repeats {side} label {:?}", n.title, p.label));
+                    }
+                }
+            }
+        }
+        problems.dedup();
+        problems
+    }
+
+    #[test]
+    fn every_scene_pin_is_labelled() {
+        let all: Vec<_> = ["fixture", "branches", "dataflow", "devices", "interp"]
+            .into_iter()
+            .flat_map(|name| problems(name, &crate::layout::with_getters(super::scene(name))))
+            .collect();
+        assert!(all.is_empty(), "{}", all.join("\n"));
+    }
+
+    #[test]
+    fn protocol_projection_is_labelled() {
+        let (_, ids) = argo_protocol::fixture::graph();
+        let open = [ids.loop_region, ids.loop_body].into_iter().collect();
+        let p = crate::bridge::project(&argo_protocol::fixture::snapshot(), Some(ids.compute), &open);
+        let found = problems("protocol", &p.graph);
+        assert!(found.is_empty(), "{}", found.join("\n"));
+    }
+}

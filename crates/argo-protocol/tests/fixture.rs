@@ -182,3 +182,45 @@ fn call_relations_lift_to_functions() {
     calls.sort();
     assert_eq!(calls, [(ids.step, ids.normalize), (ids.compute, ids.step)]);
 }
+
+#[test]
+fn pins_read_like_their_meaning() {
+    let (graph, ids) = fixture::graph();
+    let ix = GraphIndex::new(&graph);
+    let labels = |id, input: bool| -> Vec<String> {
+        ix.pins(id)
+            .filter(|p| {
+                if input {
+                    p.direction.is_input()
+                } else {
+                    p.direction.is_output()
+                }
+            })
+            .map(|p| p.label.clone())
+            .collect()
+    };
+    assert_eq!(
+        labels(ids.loop_dispatch, true),
+        ["run", "continue", "n", "initial acc", "next acc"]
+    );
+    assert_eq!(
+        labels(ids.loop_dispatch, false),
+        ["loop body", "completed", "acc", "i"]
+    );
+    assert_eq!(labels(ids.call_step, true), ["run", "acc", "i"]);
+    assert_eq!(labels(ids.call_step, false), ["then", "result"]);
+    let gi = ix.group_input(ids.compute).unwrap();
+    assert_eq!(labels(gi, false), ["start", "n"]);
+    let go = ix.group_outputs(ids.compute)[0];
+    assert_eq!(labels(go, true), ["end", "result"]);
+    for key in [
+        "exec.in",
+        "exit.break",
+        "init.acc",
+        "operand.1",
+        "return",
+        "live.acc",
+    ] {
+        assert!(!argo_protocol::pin::label_for_key(key).is_empty(), "{key}");
+    }
+}
