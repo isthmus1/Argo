@@ -1,9 +1,9 @@
 use serde_json::Value;
 const CONTEXT_LINES: u32 = 10;
-const testCode: &str = include_str!("../../tests/basic_game.c");
+const testCode: &str = include_str!("../examples/internet_example.c");
 
 fn main() {
-    if let Err(err) = sendPrompt(testCode, 100, 115) {
+    if let Err(err) = sendPrompt(testCode, 1, 65) {
         eprintln!("error: {err}");
     }
 }
@@ -72,7 +72,7 @@ async fn sendPrompt(
     }
 
     let specPrompt = format!(
-        "You're not allowed to say anything that isn't code. This is either comments or c code. Take the TARGET lines and convert them into rust. The BEFORE and AFTER lines are surrounding reference only: do NOT rewrite, repeat, or output them. Only output the rewritten TARGET lines. You're ONLY allowed to give back code, if you need to say something, it has to be consize and in the form of rust comments. never turn rust code into comments and never give back comments without comment marks. If you have ANYTHING to say that isn't code it has to be in rust comment form.\n{context}TARGET (lines {start_line}-{end_line}, rewrite ONLY these into rust):\n{target}\n"
+        "You're not allowed to say anything that isn't code. This is either comments or c code. Take the TARGET lines and convert them into rust. The BEFORE and AFTER lines are surrounding reference only: do NOT rewrite, repeat, or output them. Only output the rewritten TARGET lines. You're ONLY allowed to give back code, if you need to say something, it has to be consize and in the form of rust comments. never turn rust code into comments and never give back comments without comment marks. If you have ANYTHING to say that isn't code it has to be in rust comment form. Preserve the exact C semantics, not just the values visible in this snippet: C treats integers as truthy when nonzero, so translate `while (x)` as `while x != 0` and `if (p)` as `if p != 0`, keeping the correct signedness and zero/negative behavior. Every C local that is assigned or reassigned after its declaration must be declared with `let mut` in Rust. The Rust you output must be valid and compilable. When the TARGET is a whole program, output a self-contained Rust program that compiles on its own and preserves the C program's observable behavior, including stdout content and order and exit behavior.\n{context}TARGET (lines {start_line}-{end_line}, rewrite ONLY these into rust):\n{target}\n"
     );
 
     let api_key = std::env::var("OPENAI_API_KEY")?;

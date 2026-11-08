@@ -2,7 +2,9 @@
 resolver = "3"
 members = ["argo", "argo-protocol", "argo-ui", "iterator"]
 
-[workspace.package]
+[package]
+name = "Argo"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -14,3 +16,11 @@ serde_json = "1"
 # crates.io. Rune is pre-release with an unstable API: its README says to pin a revision of `dev`
 # (never rewritten). Pinned to dev@c762af1 (2026-11-07); bump deliberately, never to a branch.
 rune-ui = { package = "rune", git = "https://github.com/anomalyco/rune", rev = "c762af1427930c90c845c260ef551397529c5eee" }
+[dependencies]
+rucc-ast = "=0.30.15"
+rucc-base = "=0.30.15"
+rucc-diag = "=0.30.15"
+rucc-lex = "=0.30.15"
+rucc-parse = "=0.30.15"
+rucc-session = "=0.30.15"
+rucc-target = "=0.30.15"
