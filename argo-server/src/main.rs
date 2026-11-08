@@ -7,6 +7,15 @@
 //! rows through `argo-db-client` (located in the original files through `Opened::places`), then
 //! supervises the host until interrupted. Reducers never read files; this process does all of
 //! the I/O.
+//!
+//! Unix-only: children run in their own process groups and are stopped by signal ([`group`]),
+//! and SIGINT/SIGTERM are handled through `tokio::signal::unix`. Linux additionally kills them
+//! if `argo-server` itself is SIGKILLed; other Unixes don't (see [`group::isolate`]).
+
+#[cfg(not(unix))]
+compile_error!(
+    "argo-server is Unix-only: it manages its child processes with process groups and signals"
+);
 
 mod args;
 mod checkout;

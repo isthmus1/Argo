@@ -35,8 +35,7 @@ impl Host {
     /// Spawn the host. The port is checked first, so readiness can't be mistaken for another
     /// process already answering there.
     pub fn spawn(port: u16, data_dir: &Path) -> Result<Host, String> {
-        std::net::TcpListener::bind(("127.0.0.1", port))
-            .map_err(|e| format!("127.0.0.1:{port} is not free: {e}"))?;
+        std::net::TcpListener::bind(("127.0.0.1", port)).map_err(|e| busy(port, &e))?;
         std::fs::create_dir_all(data_dir)
             .map_err(|e| format!("cannot create {}: {e}", data_dir.display()))?;
         let log = data_dir.join("host.log");
@@ -120,11 +119,43 @@ impl Host {
     }
 }
 
+const PING: &[u8] = b"GET /v1/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+
+/// Why `port` can't be used. A SpacetimeDB host answering there is most likely one an earlier
+/// `argo-server` left when it was killed hard (outside Linux nothing stops its children then;
+/// see [`crate::group::isolate`]), so say so instead of starting a second host.
+fn busy(port: u16, e: &std::io::Error) -> String {
+    if !ping_now(port) {
+        return format!("127.0.0.1:{port} is not free: {e}");
+    }
+    format!(
+        "a SpacetimeDB host is already answering on 127.0.0.1:{port}, probably left by an \
+         argo-server that was killed; stop it (`pgrep -af spacetimedb-standalone`) or use \
+         another --port"
+    )
+}
+
+/// [`ping`] for the synchronous start-up check.
+fn ping_now(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let timeout = Some(Duration::from_secs(1));
+    let probe = || {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(1))?;
+        s.set_read_timeout(timeout)?;
+        s.set_write_timeout(timeout)?;
+        s.write_all(PING)?;
+        let mut head = [0; 12];
+        s.read_exact(&mut head)?;
+        std::io::Result::Ok(head.ends_with(b" 200"))
+    };
+    probe().unwrap_or(false)
+}
+
 async fn ping(port: u16) -> bool {
     let probe = async {
         let mut s = TcpStream::connect(("127.0.0.1", port)).await?;
-        s.write_all(b"GET /v1/ping HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
-            .await?;
+        s.write_all(PING).await?;
         let mut head = [0; 12];
         s.read_exact(&mut head).await?;
         std::io::Result::Ok(head.ends_with(b" 200"))
@@ -133,4 +164,44 @@ async fn ping(port: u16) -> bool {
         tokio::time::timeout(Duration::from_secs(1), probe).await,
         Ok(Ok(true))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    use super::busy;
+
+    fn taken() -> (TcpListener, u16, std::io::Error) {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = held.local_addr().unwrap().port();
+        let e = TcpListener::bind(("127.0.0.1", port)).unwrap_err();
+        (held, port, e)
+    }
+
+    #[test]
+    fn a_host_left_on_the_port_is_named() {
+        let (held, port, e) = taken();
+        let answer = std::thread::spawn(move || {
+            let (mut s, _) = held.accept().unwrap();
+            let mut req = [0; 16];
+            let _ = s.read(&mut req);
+            s.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        });
+        let why = busy(port, &e);
+        answer.join().unwrap();
+        assert!(
+            why.contains("SpacetimeDB host is already answering"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn anything_else_on_the_port_is_just_busy() {
+        let (held, port, e) = taken();
+        let why = busy(port, &e);
+        drop(held);
+        assert!(why.contains("is not free"), "{why}");
+    }
 }
