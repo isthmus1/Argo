@@ -537,10 +537,13 @@ impl Job {
         {
             let replaced = format!("{}{c}{}", &site.text[..site.lo], &site.text[site.hi..]);
             let libs = tools.libs.join(" ");
-            match crate::oracle::run(cmd, site, &replaced, &lib, &libs, &self.dir) {
-                Ok(()) => {
+            match crate::oracle::run(cmd, &self.name, site, &replaced, &lib, &libs, &self.dir) {
+                Ok(crate::oracle::Tested::Passed) => {
                     done.push(format!("passed the project's build and tests (`{cmd}`)"));
                     return Verdict::Unvalidated(done.join("; "));
+                }
+                Ok(crate::oracle::Tested::NotCovered) => {
+                    done.push("built with the project's build; its tests don't cover this piece".into());
                 }
                 Err((summary, log)) => {
                     let notes = log.lines().rev().take(15).collect::<Vec<_>>();
