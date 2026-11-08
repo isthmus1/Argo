@@ -97,7 +97,7 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
     let title = row().h(32.0).w(w).px(14.0).gap(8.0).items_center()
         .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
-        .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().grow(1.0))
+        .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0))
         .child(lang_chip(p, f.lang));
     let border = if look.selected { (2.0, p.accent) } else if look.hovered { (1.5, p.muted) } else { (1.5, p.frame_text.alpha(0.22)) };
     let fr = el().size(w, h).fill(p.frame_fill).radius(RADIUS + 4.0)
@@ -222,7 +222,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], look: Look) -> El {
     }
     let header = row().h(model::HEADER).px(10.0).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, 0.0, 0.0])
         .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)))
-        .child(text(n.title.clone()).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE).single_line().grow(1.0))
+        .child(text(n.title.clone()).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0))
         .child(if n.kind == Kind::Group {
             row().h(16.0).px(5.0).radius(4.0).fill(Color::BLACK.alpha(0.25)).items_center()
                 .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE))

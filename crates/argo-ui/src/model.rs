@@ -240,7 +240,15 @@ pub fn size(n: &Node) -> [f32; 2] {
         let w = ((text_w(&n.title, 6.9) + 44.0).max(56.0) / 10.0).ceil() * 10.0;
         return [w, HEADER + 2.0];
     }
-    let title = text_w(&n.title, 6.9) + 46.0;
+    // Header: padding, family glyph, title, then the language chip (and a collapsed group's
+    // member-count chip), each with its gap.
+    let chip = match n.lang {
+        Lang::None => 0.0,
+        Lang::C => 16.0 + 7.0,
+        Lang::Rust => 26.0 + 7.0,
+    };
+    let count = if n.kind == Kind::Group { 34.0 + 7.0 } else { 0.0 };
+    let title = 10.0 + 16.0 + 7.0 + text_w(&n.title, 6.9) + chip + count + 10.0;
     let pins = rows(n)
         .iter()
         .map(|&(o, i)| {
