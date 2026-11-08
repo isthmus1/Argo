@@ -258,13 +258,21 @@ impl State {
     /// Double-click on a node: a collapsed group expands; other nodes have nothing inside yet.
     pub fn open_node(&mut self, i: usize) {
         if let Some(live) = &mut self.live {
-            if let Some(&id) = live.origin.get(i).filter(|&&id| bridge::openable(&live.snap, id)) {
+            let Some(&id) = live.origin.get(i) else { return };
+            // Double-click opens a closed construct in place; on an opened construct's own node
+            // (it has no frame to click), it closes the construct again.
+            let parent = live.snap.graph.nodes.iter().find(|n| n.id == id).and_then(|n| n.parent);
+            if bridge::openable(&live.snap, id) {
                 live.open.insert(id);
-                self.hovered = None;
-                self.selected = None;
-                self.reproject();
-                self.relayout();
+            } else if let Some(p) = parent.filter(|p| live.open.contains(p)) {
+                live.open.remove(&p);
+            } else {
+                return;
             }
+            self.hovered = None;
+            self.selected = None;
+            self.reproject();
+            self.relayout();
             return;
         }
         if self.view.nodes[i].kind == Kind::Group

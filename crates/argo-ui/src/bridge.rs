@@ -126,13 +126,12 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     let ix = GraphIndex::new(&snap.graph);
     let level = view::level(&ix, container, |id| open.contains(&id));
 
-    // One frame level: every node joins its outermost drawn frame. A function's body block draws
-    // no frame: it is the whole function, already named by the breadcrumb.
+    // Frames are only for opening a node group: a function's internals, or a merged group (§5.10).
+    // Control flow is never framed: an opened `for`/`if`/`switch`/block lays its contents out
+    // flat, and the construct's own node (the dispatch) wires straight to them, as in UE5.
     let drawn = |f: NodeId| {
-        let n = ix.node(f);
-        let body = n.is_some_and(|n| n.kind == P::Scope)
-            && n.and_then(|n| n.parent).and_then(|p| ix.node(p)).is_some_and(|p| p.kind == P::Function);
-        !body
+        let group = ix.node(f).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program | P::MacroGroup));
+        group || snap.status(f).is_some_and(|s| s.collapsed)
     };
     let outermost: HashMap<NodeId, Option<NodeId>> = {
         let parent: HashMap<_, _> = level.frames.iter().map(|f| (f.id, f.parent)).collect();
@@ -273,16 +272,25 @@ mod tests {
     }
 
     #[test]
-    fn projects_one_frame_with_backedges_flagged() {
+    fn control_flow_opens_flat_without_frames() {
         let p = compute_level(&fixture::snapshot());
         let titles: Vec<_> = p.graph.nodes.iter().map(|n| n.title.as_str()).collect();
         assert_eq!(titles, ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output"]);
-        assert_eq!(p.graph.groups.len(), 1, "nested frames draw as one");
-        assert_eq!(p.graph.groups[0].title, "for loop");
-        assert!(p.graph.nodes.iter().filter(|n| n.group == Some(0)).count() == 2);
+        assert!(p.graph.groups.is_empty(), "an opened loop is not a node group");
+        assert!(p.graph.nodes.iter().all(|n| n.group.is_none()));
         let back: Vec<_> = p.graph.wires.iter().filter(|w| w.back).map(|w| p.graph.nodes[w.from.0].title.as_str()).collect();
         assert_eq!(back, ["step(acc, i)", "step(acc, i)"], "exec and acc both loop back into the dispatch");
         assert_eq!(p.graph.crumbs, ["fixture", "compute.c", "compute"]);
+    }
+
+    #[test]
+    fn opened_functions_are_framed() {
+        let (_, ids) = fixture::graph();
+        let open = [ids.compute].into_iter().collect();
+        let p = project(&fixture::snapshot(), Some(ids.module), &open);
+        let titles: Vec<_> = p.graph.groups.iter().map(|g| g.title.as_str()).collect();
+        assert_eq!(titles, ["compute"], "a function's internals are a node group");
+        assert!(p.graph.nodes.iter().any(|n| n.title == "uint32_t acc = 0" && n.group == Some(0)));
     }
 
     #[test]
