@@ -1,29 +1,38 @@
-mod returnValue;
-mod returnValue_AI;
+//mod returnValue;
+//mod returnValue_AI;
 use serde_json::Value;
 const testCode: &str = "
-        aa
-        more
-        bb
-        c
-        c
-        d
-        d
+int ram_read(struct ram *r, unsigned long addr, enum bus_width w, unsigned long *out)
+{
+    unsigned long offset;
+
+    if (r == 0 || r->data == 0)
+        return -1;
+
+    offset = addr - r->base;
+    if (offset >= r->size)
+        return -1;
+
+    *out = 0;
+    switch (w) {
+    case BUS_8:
+        *out = r->data[offset];
+        break;
+    case BUS_16:
+        *out = r->data[offset] | ((unsigned long)r->data[offset + 1] << 8);
+        break;
+    default:
+        return -2;
+    }
+
+    return 0;
+}
         ";
 
 fn main() {
-    let c_code = r#"
-#include <stdio.h>
-
-int main(void) {
-    printf("aa");
-    return 0;
-}
-"#;
-
-    let result = returnValue_AI::compiled_c_return_val(c_code);
-    println!("--- result ---");
-    println!("{result}");
+    if let Err(err) = sendPrompt(getLines(testCode, 3, 1000)) {
+        eprintln!("error: {err}");
+    }
 }
 
 fn getLines(code: &str, startLine: u32, endLine: u32) -> String {
@@ -70,7 +79,7 @@ async fn sendPrompt(inputCode: String) -> Result<(), Box<dyn std::error::Error>>
     let url = format!("{base_url}/v1/chat/completions");
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": 512,
+        //"max_tokens": 512,
         "messages": [
             {
                 "role": "user",
