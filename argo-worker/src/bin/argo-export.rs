@@ -31,6 +31,11 @@ struct Args {
     /// The crate's name.
     #[arg(long, default_value = "argo_rewrite")]
     name: String,
+    /// Also write the C program with every accepted piece spliced in to `<out>/mixed`, from this
+    /// clone of the repository at the ingested commit (a worker's clone will do). Build it with
+    /// the project's own build, linking `<out>`'s static library.
+    #[arg(long, value_name = "CHECKOUT")]
+    mixed: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -52,16 +57,40 @@ async fn run(args: &Args) -> Result<String, String> {
     let db = Db::connect(&args.db, &args.module).await?;
     let (chunks, rusts) = (db.chunks(), db.rusts());
     db.close();
-    let origin = db.ingested()?.map_or_else(|| args.module.clone(), |o| o.locator);
+    let ingested = db.ingested()?;
+    let origin = ingested.as_ref().map_or_else(|| args.module.clone(), |o| o.locator.clone());
     let crate_ = build(&chunks, &rusts, &args.name, &origin);
     write(&args.out, &crate_)?;
-    Ok(format!(
+    let mut summary = format!(
         "{} functions exported to {} ({} modules); {} not exported, see REPORT.md",
         crate_.exported,
         args.out.display(),
         crate_.modules.len(),
         crate_.left_out
-    ))
+    );
+    if let Some(checkout) = &args.mixed {
+        let units: Vec<String> = ingested
+            .iter()
+            .flat_map(|o| &o.units)
+            .filter(|u| u.skipped.is_none())
+            .map(|u| u.path.clone())
+            .collect();
+        let out = args.out.join("mixed");
+        let m = argo_worker::mixed::write(&chunks, &rusts, &units, checkout, &out)?;
+        for (id, why) in &m.skipped {
+            eprintln!("argo-export: chunk {id} stays C in the mixed program: {why}");
+        }
+        let _ = write!(
+            summary,
+            "; mixed C program in {}: {} pieces and {} functions spliced into {} files, {} left as C",
+            out.display(),
+            m.pieces,
+            m.functions,
+            m.files,
+            m.skipped.len()
+        );
+    }
+    Ok(summary)
 }
 
 struct Crate {
