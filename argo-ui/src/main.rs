@@ -1,11 +1,14 @@
-//! Argo UI: a read-only visualization of agent work recorded in SpacetimeDB.
+//! Argo UI: a read-only visualization of agent work on a C program's graph.
 //!
-//! `cargo run -p argo-ui --release` opens the window: drag to pan, scroll or pinch to zoom, hover
-//! for details, click to select, double-click a frame or collapsed group to fold it, `F` to
-//! frame, `1`–`5` to switch mock scene, `6` for the protocol fixture. Headless:
+//! `cargo run -p argo-ui --release` opens the window on the protocol fixture: drag to pan,
+//! scroll or pinch to zoom, hover for details, click to select, a frame's collapse button (or a
+//! double-click) folds a node group into one node and the node's expand button (or a
+//! double-click) opens it again, click a breadcrumb to go up a level, `F` to frame, `1`–`5` to
+//! switch mock scene, `6` for the protocol fixture. Headless:
 //! `-- --snap out.png --scene interp --theme dark`.
 //!
-//! Protocol data: scene `protocol` replays `argo_protocol::fixture` live. `ARGO_SNAPSHOT=x.json`
+//! Protocol data: scene `protocol` replays `argo_protocol::fixture`'s recorded updates (the
+//! default with no arguments). `ARGO_SNAPSHOT=x.json`
 //! (from `cargo run -- --protocol-json x.c`) opens a snapshot file instead; `ARGO_FUNCTION` picks
 //! the function shown.
 //!
@@ -26,6 +29,7 @@ mod dialogs;
 mod graph;
 mod layout;
 mod model;
+mod overview;
 mod palette;
 mod project;
 mod scenes;
@@ -39,7 +43,15 @@ use std::time::Duration;
 const SCENES: [&str; 5] = ["fixture", "branches", "dataflow", "devices", "interp"];
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
-    ui::view(&Pal::new(cx.system_dark()), s)
+    let p = Pal::new(ui::dark(cx.system_dark()));
+    // Text fields and anything else left uncoloured draw in the theme's text colour, not white.
+    cx.foreground(p.text);
+    let root = ui::view(&p, s, cx.titlebar_inset());
+    // The overview layers over the canvas and chrome, at the free area's bottom-left.
+    match overview::view(&p, s) {
+        Some(map) => root.child(map),
+        None => root,
+    }
 }
 
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
@@ -71,6 +83,11 @@ fn on_key(s: &mut State, k: &KeyEvent, _: &mut Tx) -> bool {
     }
     true
 }
+
+/// The `dataflow-select` capture: the node it selects, and the one it hovers. A scripted pointer
+/// hovers only what a person could see: `normalize` (claimed, feeding round_pack) stays in view
+/// beside the details panel at every review size.
+const DATAFLOW_SELECT: [&str; 2] = ["round_pack", "normalize"];
 
 /// Hover a node by title, as a scripted pointer would.
 fn hover(s: &mut State, title: &str) {
@@ -104,7 +121,9 @@ fn init() -> State {
         return watch(&uri, module.as_deref().unwrap_or("argo"));
     }
     let Some(spec) = spec else {
-        return snapshot_from_env().unwrap_or_else(|| State::load("fixture"));
+        // Real protocol data by default, so the breadcrumb is a hierarchy to navigate; the
+        // mock scenes stay on keys 1–5 and `--scene`.
+        return snapshot_from_env().unwrap_or_else(State::protocol_fixture);
     };
     let mut s = State::load("fixture");
     project::prefill(&mut s.forms, &spec, &flags);
@@ -181,10 +200,10 @@ fn main() {
             }),
             ("dataflow-select", |s| {
                 *s = State::load("dataflow");
-                if let Some(i) = s.find("round_pack") {
+                if let Some(i) = s.find(DATAFLOW_SELECT[0]) {
                     s.select(Item::Node(i));
                 }
-                hover(s, "is_nan(a|b)");
+                hover(s, DATAFLOW_SELECT[1]);
             }),
             ("protocol", |s| *s = State::protocol_fixture()),
             ("protocol-hover", |s| {
@@ -199,12 +218,22 @@ fn main() {
             }),
             ("project", |_| {}),
             ("project-open", |s| s.modal = Some(project::Modal::Open)),
-            ("project-rewrite", |s| s.modal = Some(project::Modal::Rewrite)),
-            ("project-rewrite-file", |s| {
-                s.forms.scope = project::Scope::File;
-                s.modal = Some(project::Modal::Rewrite);
+            ("project-open-error", |s| {
+                s.forms.error = Some(project::SAMPLE_ERROR.into());
+                s.modal = Some(project::Modal::Open);
             }),
-            ("project-not-implemented", |s| s.modal = Some(project::Modal::NotImplemented)),
+            ("project-open-error-all", |s| {
+                s.forms.error = Some(project::SAMPLE_ERROR.into());
+                s.forms.error_open = true;
+                s.modal = Some(project::Modal::Open);
+            }),
+            // A project that parsed but defines no functions: the explorer's empty state.
+            ("project-empty", |s| {
+                if let Err(e) = project::open_sample_empty(s) {
+                    eprintln!("argo-ui: {e}");
+                }
+            }),
+            ("project-loading", |s|project::show_loading(s, "Fetching https://github.com/fernandotcl/TinyEMU.git @ HEAD")),
             ("project-filter", |s| {
                 s.forms.filter = rune_ui::TextEdit::new(std::env::var("ARGO_FILTER").unwrap_or_else(|_| "read".into()));
             }),
@@ -215,14 +244,38 @@ fn main() {
                     hover(s, &name);
                 }
             }),
+            ("hover", |s| {
+                // Hover-card placement checks: `ARGO_SCENE` (a mock scene or `protocol`) with
+                // `ARGO_HOVER` naming the node; `ARGO_TILE`/`ARGO_ZOOM` move the camera.
+                let scene = std::env::var("ARGO_SCENE").unwrap_or_default();
+                *s = match SCENES.iter().find(|n| **n == scene) {
+                    Some(n) => State::load(n),
+                    None => {
+                        let mut s = State::protocol_fixture();
+                        s.replay(usize::MAX);
+                        s
+                    }
+                };
+                hover(s, &std::env::var("ARGO_HOVER").unwrap_or_default());
+            }),
             ("interp-collapsed", |s| {
                 *s = State::load("interp");
                 s.toggle_group(0);
                 s.fit();
                 hover(s, "alu");
             }),
+            // Node groups both ways: as a frame, and collapsed to one node.
+            ("fixture-collapsed", |s| {
+                *s = State::load("fixture");
+                if let Some(g) = s.graph.groups.iter().position(|g| g.title == "step ∘ normalize") {
+                    s.collapse_group(g);
+                }
+                s.fit();
+            }),
+            ("protocol-module", |s| *s = State::protocol_module(false)),
+            ("protocol-module-open", |s| *s = State::protocol_module(true)),
         ],
-        min_size: Some((ui::W, ui::H)),
+        min_size: Some((ui::MIN_W, ui::MIN_H)),
         poll: Some(poll),
         on_key: Some(on_key),
         setup: Some(|_, waker| {

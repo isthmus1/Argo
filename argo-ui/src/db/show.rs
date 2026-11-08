@@ -50,6 +50,7 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
     let nav = checkpoint(s).or_else(|| s.db.as_mut().and_then(|l| l.nav.take()));
     let ids: HashSet<NodeId> = snap.graph.nodes.iter().map(|n| n.id).collect();
     let modules = project::index(&snap);
+    let declarations = project::declarations(&snap);
     let entry = project::entry(&modules);
     let name = snap
         .graph
@@ -76,10 +77,12 @@ pub fn show(s: &mut State, structure: u64, snap: Snapshot, origin: &Origin) {
             .map(|u| Unit {
                 path: u.path.clone(),
                 skipped: u.skipped.clone(),
+                flags: vec![],
             })
             .collect(),
         flags: origin.flags.clone(),
         modules,
+        declarations,
     });
     next.db = s.db.take();
     next.online = s.online;

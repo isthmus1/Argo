@@ -7,17 +7,22 @@
 //!   outermost frame. Frames carry no semantics, so nothing is lost.
 //! - Status drives the language chip, evidence badge and worker ring. A call site shows its
 //!   callee's status: the call runs whichever implementation the manifest selects for it.
+//! - A rejected candidate carries its report's failure, case count and counterexample; declared
+//!   effects pass through (an empty protocol list is "not analysed", left to inference).
 //! - Loop backedges (`exec.next`, `next.*`) are drawn but don't rank layout columns.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use argo_protocol::{
-    AttemptId, ClaimPhase, Family, GraphIndex, Language, NodeId, NodeKind as P, PinKind, Relation,
-    Snapshot, ValueType, Verdict, view,
+    AttemptId, Candidate, ClaimPhase, Failure, Family, GraphIndex, Language, NodeId, NodeKind as P,
+    NodeStatus, Outcome, PinKind, Relation, Snapshot, ValueType, Verdict, view,
 };
 
-use crate::model::{Claim, Evidence, Graph, Group, Kind, Lang, Node, Pin, Ty, Wire};
+use crate::model::{
+    Claim, Counterexample, Effect, Evidence, Graph, Group, Kind, Lang, Node, Pin, Rejection, Ty,
+    Wire,
+};
 
 pub struct Projection {
     pub graph: Graph,
@@ -82,7 +87,18 @@ fn spelled(k: &PinKind) -> Option<[String; 2]> {
     }
 }
 
-/// The node whose status `id` shows: a call site shows its callee's.
+/// What a node shows: language, evidence, claim, the rejecting report's summary and declared
+/// effects.
+struct Shown {
+    lang: Lang,
+    evidence: Evidence,
+    claim: Option<Claim>,
+    rejection: Option<Rejection>,
+    effects: Option<Vec<Effect>>,
+}
+
+/// The node whose status and effects a node shows: a call site shows its callee's, since the
+/// call runs whichever implementation the manifest selects for it.
 fn shown(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> NodeId {
     match ix.node(id).map(|n| n.kind) {
         Some(P::Call) => snap
@@ -98,9 +114,60 @@ fn shown(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> NodeId {
     }
 }
 
-/// Language, evidence and claim for a node. Call sites take their callee's.
-fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> (Lang, Evidence, Option<Claim>) {
-    own_status(snap, shown(snap, ix, id))
+fn failure(f: Failure) -> &'static str {
+    match f {
+        Failure::Build => "build failed",
+        Failure::Mismatch => "output mismatch",
+        Failure::Unsupported => "unsupported",
+        Failure::Timeout => "timed out",
+        Failure::ModelUnavailable => "model unavailable",
+        Failure::Stale => "stale base",
+    }
+}
+
+fn effect(e: &argo_protocol::Effect) -> Effect {
+    use argo_protocol::Effect as E;
+    match e {
+        E::Pure => Effect::Pure,
+        E::StateRead { .. } => Effect::StateRead,
+        E::StateWrite { .. } => Effect::StateWrite,
+        E::MemoryRead { .. } => Effect::MemoryRead,
+        E::MemoryWrite { .. } => Effect::MemoryWrite,
+        E::IndirectCall { .. } => Effect::IndirectCall,
+        E::HostIo { .. } => Effect::HostIo,
+        E::NonReturn => Effect::NonReturn,
+        E::Unknown { .. } => Effect::Unknown,
+    }
+}
+
+/// The rejected candidate's report, reduced to its failure category, case count and
+/// counterexample. Before the report arrives only the verdict's category is known.
+fn rejection(snap: &Snapshot, s: &NodeStatus) -> Option<Rejection> {
+    let Some(Candidate { verdict: Verdict::Failed { report, failure: f }, .. }) = &s.candidate else { return None };
+    let r = snap.report(*report);
+    let category = match r.map(|r| &r.outcome) {
+        Some(Outcome::Failed { failure: rf }) => *rf,
+        _ => *f,
+    };
+    Some(Rejection {
+        failure: failure(category),
+        cases: r.filter(|r| r.cases_total > 0).map(|r| (r.cases_passed, r.cases_total)),
+        counterexample: r.and_then(|r| r.counterexample.as_ref()).map(|c| Counterexample {
+            input: c.input.clone(),
+            expected: c.expected.clone(),
+            actual: c.actual.clone(),
+        }),
+    })
+}
+
+/// Status and effects for a node. Call sites take their callee's.
+fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> Shown {
+    let shown = shown(snap, ix, id);
+    // An empty effect list means "not analysed yet", not pure: the card infers from shape.
+    let effects = ix.node(shown).filter(|n| !n.effects.is_empty()).map(|n| n.effects.iter().map(effect).collect());
+    let (lang, evidence, claim) = own_status(snap, shown);
+    let rejection = snap.status(shown).and_then(|s| rejection(snap, s));
+    Shown { lang, evidence, claim, rejection, effects }
 }
 
 /// Language, evidence and claim of the node itself (a function, as the explorer lists it).
@@ -127,6 +194,13 @@ pub fn own_status(snap: &Snapshot, id: NodeId) -> (Lang, Evidence, Option<Claim>
     (lang, evidence, claim)
 }
 
+/// Whether opening this container draws a frame: a function, module or program, or a container
+/// collapsed into a merged group (§5.10). Control flow never does.
+fn node_group(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> bool {
+    let group = ix.node(id).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program));
+    group || snap.status(id).is_some_and(|s| s.collapsed)
+}
+
 /// Whether a claim's attempt outlived its lease: its worker stopped renewing it (it died or lost
 /// its connection), so nothing is being translated until another worker reclaims the node. A zero
 /// lease is unknown (the fixture and snapshot files record none).
@@ -149,10 +223,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     // Frames are only for opening a node group: a function's internals, or a merged group (§5.10).
     // Control flow is never framed: an opened `for`/`if`/`switch`/block lays its contents out
     // flat, and the construct's own node (the dispatch) wires straight to them, as in UE5.
-    let drawn = |f: NodeId| {
-        let group = ix.node(f).is_some_and(|n| matches!(n.kind, P::Function | P::Module | P::Program));
-        group || snap.status(f).is_some_and(|s| s.collapsed)
-    };
+    let drawn = |f: NodeId| node_group(snap, &ix, f);
     let outermost: HashMap<NodeId, Option<NodeId>> = {
         let parent: HashMap<_, _> = level.frames.iter().map(|f| (f.id, f.parent)).collect();
         level
@@ -181,8 +252,8 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     let groups = frames
         .iter()
         .map(|&f| {
-            let (lang, evidence, claim) = status(snap, &ix, f);
-            Group { title: ix.node(f).map_or_else(String::new, frame_title), lang, evidence, claim }
+            let Shown { lang, evidence, claim, rejection, effects } = status(snap, &ix, f);
+            Group { title: ix.node(f).map_or_else(String::new, frame_title), lang, evidence, claim, effects, rejection }
         })
         .collect();
 
@@ -192,7 +263,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     for ln in &level.nodes {
         let Some(n) = ix.node(ln.id) else { continue };
         let vi = nodes.len();
-        let (lang, evidence, claim) = status(snap, &ix, ln.id);
+        let Shown { lang, evidence, claim, rejection, effects } = status(snap, &ix, ln.id);
         // Exec pins first, so a leading exec input and output share the top row.
         let mut pins: Vec<_> = ix.pins(ln.id).collect();
         pins.sort_by_key(|p| p.family() != Family::Control);
@@ -213,8 +284,10 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
                 outs.push(pin);
             }
         }
-        let kind = kind(n.kind);
         let has_children = !ix.children(Some(ln.id)).is_empty();
+        // A closed node group (a function's internals, a merged bundle) is drawn as a collapsed
+        // group node, which opens in place as a frame.
+        let kind = if has_children && node_group(snap, &ix, ln.id) { Kind::Group } else { kind(n.kind) };
         let group = ln.frame.and_then(|f| outermost[&f]).and_then(|top| frames.iter().position(|&g| g == top));
         nodes.push(Node {
             kind,
@@ -226,6 +299,8 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
             outs,
             group,
             members: if kind == Kind::Group && has_children { ix.member_count(ln.id) } else { 0 },
+            effects,
+            rejection,
         });
         origin.push(ln.id);
     }
@@ -280,7 +355,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         .collect();
     crumbs.reverse();
     Projection {
-        graph: Graph { crumbs, nodes, wires, groups, selected_group: None },
+        graph: Graph { crumbs, nodes, wires, groups, selected_group: None, expanded: None },
         origin,
         frames,
     }
@@ -335,6 +410,35 @@ mod tests {
         let titles: Vec<_> = p.graph.groups.iter().map(|g| g.title.as_str()).collect();
         assert_eq!(titles, ["compute"], "a function's internals are a node group");
         assert!(p.graph.nodes.iter().any(|n| n.title == "uint32_t acc = 0" && n.group == Some(0)));
+    }
+
+    #[test]
+    fn a_rejected_candidate_carries_its_counterexample() {
+        // Replay up to the rejection of the wrong `step` candidate.
+        let mut snap = fixture::snapshot();
+        let updates = fixture::transcript();
+        let upto = updates.iter().position(|u| matches!(u, argo_protocol::Update::Status(s) if s.is_rejected())).unwrap();
+        for u in updates.into_iter().take(upto + 1) {
+            snap.apply(u);
+        }
+        let p = compute_level(&snap);
+        let step = p.graph.nodes.iter().find(|n| n.title == "step(acc, i)").unwrap();
+        assert_eq!(step.evidence, Evidence::Rejected);
+        let r = step.rejection.as_ref().expect("the report's summary");
+        assert_eq!((r.failure, r.cases), ("output mismatch", Some((9, 33))));
+        let cx = r.counterexample.as_ref().unwrap();
+        assert_eq!((cx.input.as_str(), cx.expected.as_str(), cx.actual.as_str()), ("acc = 250, i = 10", "4", "260"));
+        // Nothing else was rejected, and nothing is invented for it.
+        assert!(p.graph.nodes.iter().filter(|n| n.title != "step(acc, i)").all(|n| n.rejection.is_none()));
+    }
+
+    #[test]
+    fn declared_effects_pass_through_and_unanalysed_stay_unknown() {
+        let p = compute_level(&fixture::snapshot());
+        let step = p.graph.nodes.iter().find(|n| n.title == "step(acc, i)").unwrap();
+        assert_eq!(step.effects.as_deref(), Some(&[Effect::Pure][..]), "the callee is declared pure");
+        let input = p.graph.nodes.iter().find(|n| n.kind == Kind::GroupIn).unwrap();
+        assert_eq!(input.effects, None, "an empty list is not analysed, not pure");
     }
 
     #[test]

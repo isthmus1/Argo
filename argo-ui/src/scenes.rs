@@ -15,7 +15,7 @@ const P: Ty = Ty::Ptr;
 
 impl B {
     fn new(crumbs: Vec<&'static str>) -> B {
-        B { g: Graph { crumbs: crumbs.into_iter().map(String::from).collect(), nodes: vec![], wires: vec![], groups: vec![], selected_group: None }, group: None }
+        B { g: Graph { crumbs: crumbs.into_iter().map(String::from).collect(), nodes: vec![], wires: vec![], groups: vec![], selected_group: None, expanded: None }, group: None }
     }
 
     fn node(&mut self, kind: Kind, title: &str, lang: Lang, ins: &[(&str, Ty)], outs: &[(&str, Ty)]) -> usize {
@@ -24,7 +24,7 @@ impl B {
         label_unnamed(kind, &mut ins, &mut outs);
         self.g.nodes.push(Node {
             kind, title: title.into(), lang, evidence: Evidence::None, claim: None,
-            ins, outs, group: self.group, members: 0,
+            ins, outs, group: self.group, members: 0, effects: None, rejection: None,
         });
         self.g.nodes.len() - 1
     }
@@ -34,7 +34,7 @@ impl B {
     }
 
     fn begin_group(&mut self, title: &str, lang: Lang, evidence: Evidence, claim: Option<Claim>) -> usize {
-        self.g.groups.push(Group { title: title.into(), lang, evidence, claim });
+        self.g.groups.push(Group { title: title.into(), lang, evidence, claim, effects: None, rejection: None });
         self.group = Some(self.g.groups.len() - 1);
         self.g.groups.len() - 1
     }
@@ -104,7 +104,7 @@ pub fn scene(name: &str) -> Graph {
 }
 
 /// Headers say what construct a node is, in C terms: `if (cond)` with the condition's source,
-/// `switch (opcode)`, `for (…)`, `return`, `x = …`.
+/// `switch (opcode)`, `for (…)`, `return`, `x =` (the value arrives on its pin).
 fn code_headers(g: &mut Graph) {
     let source = |g: &Graph, node: usize, pin: usize| {
         g.wires.iter().find(|w| w.to == (node, pin)).map(|w| g.nodes[w.from.0].title.clone())
@@ -125,7 +125,7 @@ fn code_headers(g: &mut Graph) {
             },
             Kind::GroupOut if n.title == "Return" => "return".into(),
             Kind::Set => match n.title.strip_prefix("Set ") {
-                Some(var) => format!("{var} = …"),
+                Some(var) => format!("{var} ="),
                 None => continue,
             },
             Kind::Loop if n.title == "for i in 0..n" => "for (i = 0; i < n; i++)".into(),

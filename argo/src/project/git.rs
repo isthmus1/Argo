@@ -1,7 +1,22 @@
 //! Fetch a git reference into a fresh temporary directory.
+//!
+//! Every git command runs under a deadline and a cancel flag: a stalled server or a dropped
+//! connection ends in an error instead of blocking the caller forever.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+/// How long one clone or fetch step may run before it is killed.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long asking the remote for its default branch may take.
+pub const LS_REMOTE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Local bookkeeping (`init`, `remote add`, `checkout`).
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// What a cancelled git command or project load reports.
+pub const CANCELLED: &str = "cancelled";
 
 /// A repository URL (or local path) plus an optional branch, tag or commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +71,8 @@ impl GitRef {
 
 /// Clone `r` into a new directory under the system temp dir and check out its revision.
 /// Shallow when the server allows it; falls back to a full clone (e.g. a commit on a local repo).
-pub fn fetch(r: &GitRef, log: &dyn Fn(&str)) -> Result<PathBuf, String> {
+/// Setting `cancel` kills the running git command and returns [`CANCELLED`].
+pub fn fetch(r: &GitRef, log: &dyn Fn(&str), cancel: &AtomicBool) -> Result<PathBuf, String> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
@@ -65,35 +81,32 @@ pub fn fetch(r: &GitRef, log: &dyn Fn(&str)) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let rev = r.rev.as_deref().unwrap_or("HEAD");
     log(&format!("Fetching {} @ {rev}", r.url));
-    git(&dir, &["init", "-q"])?;
-    git(&dir, &["remote", "add", "origin", &r.url])?;
-    if git(&dir, &["fetch", "-q", "--depth", "1", "origin", rev]).is_err() {
+    let git = |args: &[&str], timeout| git(&dir, args, timeout, cancel);
+    git(&["init", "-q"], LOCAL_TIMEOUT)?;
+    git(&["remote", "add", "origin", &r.url], LOCAL_TIMEOUT)?;
+    if let Err(e) = git(&["fetch", "-q", "--depth", "1", "origin", rev], FETCH_TIMEOUT) {
+        // A cancel or a stalled server isn't a refused shallow fetch: don't try again in full.
+        if e == CANCELLED || e.contains("timed out") {
+            return Err(e);
+        }
         log("Shallow fetch refused; fetching full history");
-        git(&dir, &["fetch", "-q", "--tags", "origin"])?;
+        git(&["fetch", "-q", "--tags", "origin"], FETCH_TIMEOUT)?;
         let target = if r.rev.is_some() {
             rev.to_string()
         } else {
-            "origin/HEAD".into()
-        };
-        let target = if target == "origin/HEAD" {
             // No remote HEAD ref after a plain fetch: take the default branch it advertises.
-            default_branch(&dir).unwrap_or(target)
-        } else {
-            target
+            default_branch(&dir, cancel).unwrap_or_else(|| "origin/HEAD".into())
         };
-        git(&dir, &["checkout", "-q", "--detach", &target])?;
+        git(&["checkout", "-q", "--detach", &target], LOCAL_TIMEOUT)?;
         return Ok(dir);
     }
-    git(&dir, &["checkout", "-q", "--detach", "FETCH_HEAD"])?;
+    git(&["checkout", "-q", "--detach", "FETCH_HEAD"], LOCAL_TIMEOUT)?;
     Ok(dir)
 }
 
-fn default_branch(dir: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(["ls-remote", "--symref", "origin", "HEAD"])
-        .output()
-        .ok()?;
+fn default_branch(dir: &Path, cancel: &AtomicBool) -> Option<String> {
+    let cmd = command(dir, &["ls-remote", "--symref", "origin", "HEAD"]);
+    let out = run(cmd, "ls-remote", LS_REMOTE_TIMEOUT, cancel).ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let line = text.lines().find(|l| l.starts_with("ref:"))?;
     let branch = line
@@ -103,22 +116,125 @@ fn default_branch(dir: &Path) -> Option<String> {
     Some(format!("origin/{branch}"))
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<(), String> {
-    let out = Command::new("git")
-        .current_dir(dir)
+/// `git args…` in `dir`: never prompting, and giving up on a transfer slower than 1 KB/s for
+/// 30 s.
+fn command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1000")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "30");
+    cmd
+}
+
+fn git(dir: &Path, args: &[&str], timeout: Duration, cancel: &AtomicBool) -> Result<(), String> {
+    let out = run(command(dir, args), args[0], timeout, cancel)?;
     if out.status.success() {
         Ok(())
     } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        Err(format!(
-            "git {}: {}",
-            args[0],
-            err.lines().last().unwrap_or("failed").trim()
-        ))
+        Err(failure(args[0], &String::from_utf8_lossy(&out.stderr)))
+    }
+}
+
+/// A failed `git <what>`'s error: `git <what>: <summary>` on the first line, then the whole of
+/// its stderr when that says more than the summary does (`Show all` and `Copy diagnostics` read
+/// it). The summary is the first `fatal:` or `error:` line without its prefix, since git ends a
+/// failure with advice ("…and the repository exists.") that names no cause; else the last line.
+fn failure(what: &str, stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let cause = lines.iter().find_map(|l| {
+        ["fatal:", "error:"].iter().find_map(|p| {
+            l.get(..p.len())
+                .filter(|head| head.eq_ignore_ascii_case(p))
+                .map(|_| l[p.len()..].trim())
+        })
+    });
+    let summary = cause
+        .or(lines.last().copied())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("failed");
+    if lines.len() > 1 {
+        format!("git {what}: {summary}\n{}", stderr.trim())
+    } else {
+        format!("git {what}: {summary}")
+    }
+}
+
+/// A finished command's status and output.
+struct Output {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// `120 s`, or `400 ms` under a second.
+fn seconds(d: Duration) -> String {
+    if d >= Duration::from_secs(1) {
+        format!("{} s", d.as_secs())
+    } else {
+        format!("{} ms", d.as_millis())
+    }
+}
+
+/// Run `cmd` to completion, killing it when `timeout` passes (`git <what>: timed out after N s`)
+/// or `cancel` is set ([`CANCELLED`]).
+fn run(
+    mut cmd: Command,
+    what: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Output, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    // Drain both pipes on their own threads so a chatty command can't fill one and stall.
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = vec![];
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(Output {
+                    status,
+                    stdout: stdout.join().unwrap_or_default(),
+                    stderr: stderr.join().unwrap_or_default(),
+                });
+            }
+            Ok(None) => {}
+            Err(e) => return Err(format!("git {what}: {e}")),
+        }
+        let stop = if cancel.load(Ordering::Relaxed) {
+            Some(CANCELLED.to_string())
+        } else if start.elapsed() >= timeout {
+            Some(format!("git {what}: timed out after {}", seconds(timeout)))
+        } else {
+            None
+        };
+        if let Some(e) = stop {
+            let _ = child.kill();
+            let _ = child.wait();
+            // The pipe threads are left to finish on their own: a helper git started (a remote
+            // transport) may hold the pipes open a while longer.
+            return Err(e);
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -156,5 +272,110 @@ mod tests {
             GitRef::parse("https://github.com/a/TinyEMU.git").name(),
             "TinyEMU"
         );
+    }
+
+    /// A remote whose transport never answers: ssh is replaced by a command that only sleeps
+    /// (the `#` comments out the host and command git appends).
+    fn stuck_ls_remote() -> Command {
+        let mut cmd = command(&std::env::temp_dir(), &["ls-remote", "ssh://argo.invalid/x"]);
+        cmd.env("GIT_SSH_COMMAND", "sleep 30 #");
+        cmd
+    }
+
+    #[test]
+    fn a_stuck_git_command_is_killed_at_its_deadline() {
+        let t = Instant::now();
+        let r = run(
+            stuck_ls_remote(),
+            "ls-remote",
+            Duration::from_millis(400),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            r.err().as_deref(),
+            Some("git ls-remote: timed out after 400 ms")
+        );
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(seconds(FETCH_TIMEOUT), "120 s");
+    }
+
+    #[test]
+    fn cancelling_stops_a_running_git_command() {
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let t = Instant::now();
+        let r = run(stuck_ls_remote(), "fetch", FETCH_TIMEOUT, &cancel);
+        assert_eq!(r.err().as_deref(), Some(CANCELLED));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn a_failure_names_its_cause_and_keeps_the_whole_stderr() {
+        // A missing repository over https.
+        let https = "remote: Repository not found.\nfatal: repository 'https://github.com/a/missing.git/' not found\n";
+        assert_eq!(
+            failure("fetch", https),
+            "git fetch: repository 'https://github.com/a/missing.git/' not found\n\
+             remote: Repository not found.\n\
+             fatal: repository 'https://github.com/a/missing.git/' not found"
+        );
+        // A missing repository over ssh: the server's `ERROR:` comes first, and git's closing
+        // advice is kept in the details but never the summary.
+        let ssh = "ERROR: Repository not found.\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n";
+        let e = failure("fetch", ssh);
+        assert_eq!(e.lines().next(), Some("git fetch: Repository not found."));
+        assert!(e.contains("fatal: Could not read from remote repository."), "{e}");
+        assert!(e.ends_with("and the repository exists."), "{e}");
+        // An unknown revision: one line, so nothing is repeated under it.
+        assert_eq!(
+            failure("fetch", "fatal: couldn't find remote ref nope\n"),
+            "git fetch: couldn't find remote ref nope"
+        );
+        assert_eq!(
+            failure("checkout", "error: pathspec 'nope' did not match any file(s) known to git\n"),
+            "git checkout: pathspec 'nope' did not match any file(s) known to git"
+        );
+        // No fatal or error line: the last line; nothing at all: `failed`.
+        assert_eq!(
+            failure("fetch", "warning: x\nsomething broke\n"),
+            "git fetch: something broke\nwarning: x\nsomething broke"
+        );
+        assert_eq!(failure("init", "  \n"), "git init: failed");
+    }
+
+    #[test]
+    fn a_missing_local_repository_reports_git_s_cause() {
+        let dir = std::env::temp_dir().join(format!("argo-git-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel = AtomicBool::new(false);
+        git(&dir, &["init", "-q"], LOCAL_TIMEOUT, &cancel).unwrap();
+        let e = git(
+            &dir,
+            &["fetch", "-q", "/argo/definitely/not/a/repo"],
+            LOCAL_TIMEOUT,
+            &cancel,
+        )
+        .unwrap_err();
+        let head = e.lines().next().unwrap();
+        assert!(head.starts_with("git fetch: "), "{e}");
+        assert!(head.contains("/argo/definitely/not/a/repo"), "{e}");
+        assert!(!head.contains("repository exists"), "{e}");
+    }
+
+    #[test]
+    fn a_finished_git_command_reports_its_output() {
+        let out = run(
+            command(&std::env::temp_dir(), &["--version"]),
+            "version",
+            LOCAL_TIMEOUT,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
     }
 }

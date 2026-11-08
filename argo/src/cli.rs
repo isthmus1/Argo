@@ -120,7 +120,8 @@ fn project(args: &Args, remote: bool) -> Result<(), String> {
     eprintln!("flags: {}", opened.flags.join(" "));
     for u in &opened.units {
         match &u.skipped {
-            None => eprintln!("  ok    {}", u.path),
+            None if u.flags.is_empty() => eprintln!("  ok    {}", u.path),
+            None => eprintln!("  ok    {} ({})", u.path, u.flags.join(" ")),
             Some(why) => eprintln!("  skip  {}: {why}", u.path),
         }
     }
