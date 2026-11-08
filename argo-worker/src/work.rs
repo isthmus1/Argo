@@ -9,7 +9,7 @@ use argo_db_client::RustChunk;
 use argo_db_client::bindings::claim_next;
 use tokio::time::sleep;
 
-use crate::attempt::Budget;
+use crate::agent::Budget;
 use crate::checkout::Checkout;
 use crate::db::{CallError, Db, WAIT};
 use crate::model::Model;

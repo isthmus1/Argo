@@ -1,19 +1,21 @@
-//! Working one claim: translate while heartbeating, then record the outcome.
+//! Working one claim: build the C program, run the agent while heartbeating, then record the
+//! outcome.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use argo_db_client::RustChunk;
 
 use super::Worker;
-use crate::attempt::{Outcome, translate};
+use crate::agent::{Outcome, Task, translate};
 use crate::claim::Claim;
 use crate::model::Model;
-use crate::prompt;
-use crate::validate::Validator;
+use crate::validate::{Ingest, Validator};
 
 impl<M: Model, V: Validator> Worker<M, V> {
-    /// Translate and record one claim. Errs only when the model endpoint stayed unavailable:
-    /// the claim is then left to lapse rather than failed, and the worker stops.
+    /// Translate and record one claim. Errs only when the model endpoint stayed unavailable or
+    /// the claim's session directory can't be made: the claim is then left to lapse rather than
+    /// failed, and the worker stops.
     pub(super) async fn work(&self, row: RustChunk, checkout: Option<&Path>) -> Result<(), String> {
         let claim = Claim {
             db: &self.db,
@@ -28,13 +30,43 @@ impl<M: Model, V: Validator> Worker<M, V> {
             let _ = claim.finish(Outcome::Failed { attempts: 0, log }).await;
             return Ok(());
         };
+        // The claim's own directory: the C program and every submission, never the clone.
+        // Removed with the claim.
+        let session = tempfile::Builder::new()
+            .prefix(&format!("argo-chunk-{id}-"))
+            .tempdir()
+            .map_err(|e| format!("cannot make a session directory for chunk {id}: {e}"))?;
         eprintln!(
-            "argo-worker: claimed chunk {id} `{}` (generation {})",
-            chunk.name, claim.generation
+            "argo-worker: claimed chunk {id} `{}` (generation {}, session {})",
+            chunk.name,
+            claim.generation,
+            session.path().display()
         );
+        let translated = async {
+            let origin = self.db.ingested().ok().flatten();
+            let ingest = origin
+                .as_ref()
+                .zip(checkout)
+                .map(|(origin, checkout)| Ingest { origin, checkout });
+            let dir = session.path().join("c-program");
+            let program = self
+                .validator
+                .prepare(&chunk, ingest, &dir)
+                .await
+                .map(Arc::new);
+            for note in program.iter().flat_map(|p| &p.notes) {
+                eprintln!("argo-worker: chunk {id}: {note}");
+            }
+            let task = Task {
+                chunk: &chunk,
+                checkout,
+                session: session.path(),
+                program,
+            };
+            translate(&self.model, &self.validator, &self.budget, &task).await
+        };
         let outcome = tokio::select! {
-            outcome = translate(&self.model, &self.validator, &self.budget, &chunk, checkout,
-                |feedback| prompt::build(&chunk, checkout, feedback)) => outcome,
+            outcome = translated => outcome,
             lost = claim.keep() => {
                 eprintln!("argo-worker: lost chunk {id}: {lost}");
                 return Ok(());
@@ -52,8 +84,8 @@ impl<M: Model, V: Validator> Worker<M, V> {
                 validation,
                 attempts,
                 ..
-            } => format!("done, {validation:?}, {attempts} attempts"),
-            Outcome::Failed { attempts, .. } => format!("failed after {attempts} attempts"),
+            } => format!("done, {validation:?}, {attempts} submission(s)"),
+            Outcome::Failed { attempts, .. } => format!("failed after {attempts} submission(s)"),
         };
         match claim.finish(outcome).await {
             Ok(()) => eprintln!("argo-worker: chunk {id} {summary}"),

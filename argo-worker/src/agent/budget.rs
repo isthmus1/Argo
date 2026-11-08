@@ -1,4 +1,5 @@
-//! What a chunk may spend: attempts, which model each uses, and the pauses through an outage.
+//! What a chunk may spend: rejected submissions, model turns, which model each turn uses, and
+//! the pauses through an outage.
 
 use std::time::Duration;
 
@@ -9,8 +10,10 @@ const MAX_PAUSE: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct Budget {
-    /// At least 1.
+    /// Rejected submissions (and failed requests) before the chunk fails; at least 1.
     pub max_attempts: u32,
+    /// Model turns before the chunk fails, however they were spent; at least 1.
+    pub max_turns: u32,
     pub model: String,
     pub escalation: Option<Escalation>,
     /// The pause after the first outage, doubling with each consecutive one up to a minute.
@@ -20,7 +23,7 @@ pub struct Budget {
 #[derive(Clone)]
 pub struct Escalation {
     pub model: String,
-    /// Failed attempts before switching.
+    /// Rejected submissions (and failed requests) before switching.
     pub after: u32,
 }
 

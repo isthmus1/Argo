@@ -84,17 +84,20 @@ terminal per process:
 # Server: starts SpacetimeDB on 127.0.0.1:3100, publishes argo-db, ingests the repository's C
 # chunks, and stops the database on Ctrl-C. `--fresh` replaces a different ingested commit.
 # With an OpenRouter key it also runs the model proxy on port 3101, on the free Nemotron 3.5
-# Lightning by default; for the demo, the paid one pinned to Fireworks (fast) as shown.
+# Lightning by default; for the demo, the paid one pinned to one provider as shown. The worker's
+# agent needs tool calling, which OpenRouter lists Fireworks' endpoint for it as lacking.
 export OPENROUTER_API_KEY=...
 cargo run --release -p argo-server -- ~/src/project            # or a git URL[#ref]; -D/-I flags
-#   [--model nvidia/nemotron-3.5-lightning --model-provider fireworks]
+#   [--model nvidia/nemotron-3.5-lightning --model-provider deepinfra]
 
-# Workers (any number): each clones the recorded commit, claims chunks and submits Rust. No key
+# Workers (any number): each clones the recorded commit, claims chunks, and runs a read-only
+# tool-using agent (read, grep, glob, submit_rewrite) that submits Rust once it compiles, links
+# into the C program and matches the C function's ABI; needs rustc and cc. No key
 # and no model: each attaches to the server's model proxy (the --db host, port + 1) for a key of
 # its own and the server's model. `--direct --model M` uses OPENROUTER_API_KEY instead (no proxy,
 # e.g. with --server; only then --escalation-model M --escalate-after 2).
 cargo run --release -p argo-worker -- --db ws://127.0.0.1:3100 --module argo \
-  [--jobs N] [--max-attempts 3] [--once]
+  [--jobs N] [--max-attempts 5] [--max-turns 40] [--once]
 
 # GUI: watches the rows live, read-only; it never clones or parses the repository. The database
 # is its only data source: without --db (or ARGO_DB) it prints its usage and exits.

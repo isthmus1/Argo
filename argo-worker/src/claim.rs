@@ -7,7 +7,7 @@ use argo_db_client::LEASE_MICROS;
 use argo_db_client::bindings::{RemoteReducers, fail_chunk, heartbeat, submit_rust};
 use tokio::time::{Instant, sleep};
 
-use crate::attempt::Outcome;
+use crate::agent::Outcome;
 use crate::db::{CallError, Db};
 use crate::log::{MAX_LOG_BYTES, tail};
 use crate::resend::deliver;

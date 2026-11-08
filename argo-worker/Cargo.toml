@@ -4,23 +4,29 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Claims C chunks from SpacetimeDB, asks nemotron for extern \"C\" Rust, submits it."
+description = "Claims C chunks from SpacetimeDB and runs a read-only tool-using agent (Nemotron) that submits extern \"C\" Rust for them."
 
 [dependencies]
-# The compile check: `argo_c::comp::compiles`.
+# The C program a candidate is linked into is built with the server's own Makefile reading
+# (`project::make`) and line-marker stripping (`project::lines`).
 argo-c = { package = "Argo", path = "../argo" }
 argo-db-client = { path = "../argo-db-client" }
-# Nemotron (OpenAI-compatible chat completions): `iterator::nemo::complete` and `getLines`.
+# `getLines`, for the original-source context in the task prompt.
 iterator = { path = "../iterator" }
-# `env`: the base model defaults to `OPENAI_MODEL`, as iterator's prompt code reads it.
-clap = { workspace = true, features = ["env"] }
-# Only to tell an unavailable endpoint from a rejected request in iterator's errors; the
-# version iterator uses.
-reqwest = { version = "0.13.5", default-features = false }
-# Attaching to argo-server's model proxy (`proxy`): the attach request and its reply.
+clap.workspace = true
+# The chat-completions client (tool calls); the version and TLS backend iterator uses.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+# The chat-completions wire format, and attaching to argo-server's model proxy (`proxy`).
 serde_json.workspace = true
 spacetimedb-sdk.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
+# The agent's read-only tools: `grep` and `glob` walk the clone as git would see it.
+globset = "0.4.21"
+ignore = "0.4.34"
+regex = "1.13.1"
+# The ABI check: symbols and debug info of the C and Rust objects a submission is built into.
+gimli = "0.34.0"
+object = "0.37"
+# Per-claim session directories (the C program, each submission and its logs).
 tempfile = "3.27"
+
