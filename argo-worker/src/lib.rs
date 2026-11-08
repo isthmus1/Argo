@@ -7,6 +7,7 @@ pub mod checkout;
 pub mod claim;
 pub mod db;
 pub mod log;
+pub mod mixed;
 pub mod model;
 pub mod piece;
 pub mod oracle;

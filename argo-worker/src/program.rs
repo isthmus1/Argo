@@ -208,6 +208,18 @@ impl Build {
     /// chunk's exact text is. A chunk whose file is a header (a `static
     /// inline` helper, or a template a unit includes with macros set) is placed in the first
     /// unit holding its text exactly once.
+    /// `chunk`'s unit (its path, relative to the clone), that unit's preprocessed text, and
+    /// where `chunk` starts in it: where `argo export --mixed` splices.
+    pub fn locate(
+        &self,
+        chunk: &CChunk,
+        root: &Path,
+        makefile: &make::Makefile,
+        tools: &Toolchain,
+    ) -> Result<(String, String, usize), String> {
+        self.place(chunk, root, makefile, tools).map(|(u, text, at)| (u.path.clone(), text, at))
+    }
+
     fn place(
         &self,
         chunk: &CChunk,
