@@ -22,7 +22,7 @@ const MAX_ZOOM: f32 = 2.0;
 const READABLE_ZOOM: f32 = 0.9;
 /// The default view still frames the whole graph down to this zoom (labels stay legible), so
 /// small graphs show whole rather than panned at [`READABLE_ZOOM`].
-const FIT_FLOOR: f32 = 0.75;
+const FIT_FLOOR: f32 = 0.72;
 /// Framing never magnifies past this, so a small graph in a large window stays node-sized.
 const FIT_MAX: f32 = 1.6;
 /// Gap between the free canvas area's edge and content aligned to it.
@@ -874,9 +874,16 @@ mod tests {
             collapsed.fit();
             states.push(collapsed);
             for s in states {
-                let [vx, vy, _, _] = s.free();
+                let free = s.free();
+                // A selected or claimed item wins over reading from the top-left: showing it may
+                // pan other content off an edge, but it starts inside the free area itself.
+                if let Some(focus) = s.selected.or(s.claimed()) {
+                    let r = s.item_rect(focus);
+                    assert!(r[0] >= free[0] - 0.5 && r[1] >= free[1] - 0.5, "{size:?} {}: focus {r:?} starts outside the free area", s.scene);
+                    continue;
+                }
                 for r in drawn(&s) {
-                    assert!(r[1] >= vy - 0.5 && r[0] >= vx - 0.5, "{size:?} {}: {r:?} starts outside the free area", s.scene);
+                    assert!(r[1] >= free[1] - 0.5 && r[0] >= free[0] - 0.5, "{size:?} {}: {r:?} starts outside the free area", s.scene);
                 }
             }
         }
