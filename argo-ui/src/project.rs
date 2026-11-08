@@ -343,6 +343,42 @@ pub fn error_parts(error: &str, cap: usize) -> (&str, Vec<&str>, usize) {
     (head, rest.into_iter().take(cap).collect(), more)
 }
 
+/// One error line as the dialog shows it: where (`path:line`, else the file) and why. The opener
+/// writes `file.c: reason (file.c:line)`; the location moves to the front so it survives a cut,
+/// and isn't repeated. A line with no `file: ` prefix is all reason.
+pub fn error_row(line: &str) -> (&str, &str) {
+    let Some((file, rest)) = line.split_once(": ") else {
+        return ("", line);
+    };
+    if file.is_empty() || file.contains(char::is_whitespace) {
+        return ("", line);
+    }
+    if let Some(open) = rest.rfind(" (")
+        && let Some(at) = rest[open + 2..].strip_suffix(')')
+        && at
+            .strip_prefix(file)
+            .and_then(|n| n.strip_prefix(':'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return (at, &rest[..open]);
+    }
+    (file, rest)
+}
+
+/// What a project with no function definitions holds, for the `project-empty` review scene.
+const SAMPLE_EMPTY: &str = "int verbose = 0;\nstruct options { int level; const char *name; };\nextern int limit;\n";
+
+/// Open a real project whose one file declares but defines no functions (written to a temporary
+/// folder), for the `project-empty` review scene.
+pub fn open_sample_empty(s: &mut State) -> Result<(), String> {
+    let dir = std::env::temp_dir()
+        .join(format!("argo-ui-empty-{}", std::process::id()))
+        .join("settings");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    std::fs::write(dir.join("config.c"), SAMPLE_EMPTY).map_err(|e| format!("{}: {e}", dir.display()))?;
+    open_now(s, &dir.display().to_string(), "", "")
+}
+
 /// Whether most of an error's file lines are a missing header or an undefined required macro:
 /// the kind of failure an `-I` or `-D` in the preprocessor flags fixes.
 pub fn needs_flags(error: &str) -> bool {
@@ -612,6 +648,50 @@ mod tests {
             error_parts("fetch: denied", 6),
             ("fetch: denied", vec![], 0)
         );
+    }
+
+    #[test]
+    fn an_error_row_leads_with_its_location() {
+        assert_eq!(
+            error_row("slirp/slirp.c: argo_absent/slirp_config.h: No such file or directory (slirp/slirp.c:1)"),
+            ("slirp/slirp.c:1", "argo_absent/slirp_config.h: No such file or directory")
+        );
+        assert_eq!(
+            error_row("riscv_cpu.c: #error MAX_XLEN must be defined (riscv_cpu.c:2)"),
+            ("riscv_cpu.c:2", "#error MAX_XLEN must be defined")
+        );
+        // A location in another file, or none, stays in the reason under the file's name.
+        assert_eq!(
+            error_row("a.c: x (b.h:3)"),
+            ("a.c", "x (b.h:3)")
+        );
+        assert_eq!(error_row("c.c: z"), ("c.c", "z"));
+        assert_eq!(error_row("git fetch: timed out"), ("", "git fetch: timed out"));
+        assert_eq!(error_row("plain words"), ("", "plain words"));
+        // Every line of the sample keeps its file.
+        let (_, files, _) = error_parts(SAMPLE_ERROR, usize::MAX);
+        for l in files {
+            let (at, why) = error_row(l);
+            assert!(l.starts_with(at.split(':').next().unwrap()) && !at.is_empty(), "{l}");
+            assert!(!why.ends_with(')'), "{l}");
+        }
+    }
+
+    #[test]
+    fn a_project_without_function_definitions_opens_empty() {
+        if !std::process::Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            return;
+        }
+        let mut s = State::load("fixture");
+        open_sample_empty(&mut s).expect("opens");
+        let p = s.project.as_ref().expect("project installed");
+        assert_eq!((p.included(), p.units.len(), p.function_count()), (1, 1, 0));
+        assert!(p.modules.is_empty());
+        assert_eq!(s.modal, None);
     }
 
     #[test]

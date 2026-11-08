@@ -14,6 +14,8 @@ const FIELD: TextStyle = TextStyle::new(12.5, 450.0);
 const DIALOG_W: f32 = 520.0;
 /// Rows the explorer lists at most while filtering.
 const FILTER_LIMIT: usize = 300;
+/// The explorer's one line for a project that parsed but defines no functions.
+const EMPTY_PROJECT: &str = "No function definitions found";
 
 /// Horizontal padding inside a text button.
 const BUTTON_PX: f32 = 14.0;
@@ -54,6 +56,13 @@ fn field(p: &Pal, input: El) -> El {
         .border(1.0, p.panel_border)
         .items_center()
         .child(input.grow(1.0))
+}
+
+/// A field's placeholder, led by an en space: Rune draws a focused empty field's caret at the
+/// placeholder's first glyph, which makes the field read as already filled. (A thin or word
+/// space still leaves the 1.5 pt caret touching the glyph.)
+fn hint(s: &str) -> String {
+    format!("\u{2002}{s}")
 }
 
 fn field_label(p: &Pal, s: &str) -> El {
@@ -133,7 +142,7 @@ pub fn explorer(p: &Pal, s: &State) -> El {
         p,
         text_input(&s.forms.filter, FIELD)
             .single_line()
-            .placeholder("Filter functions", p.faint)
+            .placeholder(hint("Filter functions"), p.faint)
             .on_edit(|s: &mut State| &mut s.forms.filter),
     );
 
@@ -177,6 +186,22 @@ pub fn explorer(p: &Pal, s: &State) -> El {
         }
         r.on_press(move |s: &mut State| project::open_function(s, id))
     };
+    if query.is_empty() && proj.modules.is_empty() {
+        // Parsed, but nothing defines a function: say so, and offer another project.
+        list = list.child(
+            col()
+                .gap(10.0)
+                .px(8.0)
+                .mt(6.0)
+                .items_start()
+                .child(label(EMPTY_PROJECT, p.faint).key("explorer-empty"))
+                .child(
+                    button(p, "Open another…", false)
+                        .key("explorer-open-another")
+                        .on_press(|s: &mut State| s.modal = Some(Modal::Open)),
+                ),
+        );
+    }
     if query.is_empty() {
         for m in &proj.modules {
             let open = s.forms.expanded == Some(m.id);
@@ -297,7 +322,10 @@ pub fn modal(p: &Pal, s: &State) -> El {
             s.modal = None;
         }
     };
+    // Centred in the band below the chrome bars, so a tall dialog never covers them.
     el().w_full().h_full()
+        .pt(TOP)
+        .pb(M)
         .fill(Color::BLACK.alpha(if p.dark { 0.5 } else { 0.25 }))
         .center()
         .child(
@@ -310,11 +338,16 @@ pub fn modal(p: &Pal, s: &State) -> El {
         )
 }
 
+/// A dialog's title, and a line under it unless `sub` is empty.
 fn heading(p: &Pal, title: &str, sub: &str) -> El {
-    col()
+    let c = col()
         .gap(6.0)
-        .child(text(title.to_string()).font(TITLE).color(p.text))
-        .child(text(sub.to_string()).font(BODY).color(p.muted).wrap())
+        .child(text(title.to_string()).font(TITLE).color(p.text));
+    if sub.is_empty() {
+        c
+    } else {
+        c.child(text(sub.to_string()).font(BODY).color(p.muted).wrap())
+    }
 }
 
 fn actions(left: El, right: Vec<El>) -> El {
@@ -327,24 +360,30 @@ fn actions(left: El, right: Vec<El>) -> El {
 
 fn open_dialog(p: &Pal, s: &State) -> El {
     let f = &s.forms;
+    // Once a load has failed the error says what matters; the explanation gives it the room.
+    let sub = if f.error.is_some() {
+        ""
+    } else {
+        "Clone a git repository into a temporary folder, or open a local directory. Every .c file is run through the C preprocessor and combined into one graph."
+    };
     let mut c = col().gap(16.0)
-        .child(heading(p, "Open a C project", "Clone a git repository into a temporary folder, or open a local directory. Every .c file is run through the C preprocessor and combined into one graph."))
+        .child(heading(p, "Open a C project", sub))
         .child(col().gap(6.0).child(field_label(p, "Repository"))
             .child(field(p, text_input(&f.url, FIELD).single_line()
-                .placeholder("https://github.com/user/project.git   or   ~/src/project", p.faint)
+                .placeholder(hint("https://github.com/user/project.git   or   ~/src/project"), p.faint)
                 .on_edit(|s: &mut State| &mut s.forms.url)
                 .on_submit(|s: &mut State, _| project::start(s)))))
         .child(col().gap(6.0).child(field_label(p, "Branch, tag or commit"))
             .child(field(p, text_input(&f.rev, FIELD).single_line()
-                .placeholder("default branch", p.faint)
+                .placeholder(hint("default branch"), p.faint)
                 .on_edit(|s: &mut State| &mut s.forms.rev)
                 .on_submit(|s: &mut State, _| project::start(s)))))
         .child(col().gap(6.0).child(field_label(p, "Preprocessor flags"))
             .child(field(p, text_input(&f.flags, FIELD).single_line()
-                .placeholder("-DNAME=value -Iinclude", p.faint)
+                .placeholder(hint("-DNAME=value -Iinclude"), p.faint)
                 .on_edit(|s: &mut State| &mut s.forms.flags)
-                .on_submit(|s: &mut State, _| project::start(s))))
-            .child(label("Added after any -D/-I flags found in the project's Makefile.", p.faint)));
+                .on_submit(|s: &mut State, _| project::start(s)))
+                .help("Added after any -D/-I flags found in the project's Makefile")));
     if let Some(e) = &f.error {
         c = c.child(error_box(p, e, f.error_open));
     }
@@ -359,30 +398,63 @@ fn open_dialog(p: &Pal, s: &State) -> El {
     ))
 }
 
-/// Lines of a load error shown before `Show all`.
+/// Lines of a load error shown before `Show all`, when the window has room for them.
 const ERROR_LINES: usize = 6;
+/// The fewest error lines shown: on a shorter window the list scrolls from here.
+const ERROR_LINES_MIN: usize = 2;
 /// Height of one error line, and the most the expanded list takes before it scrolls.
 const ERROR_LINE_H: f32 = 18.0;
 const ERROR_LIST_MAX_H: f32 = 200.0;
-/// The open dialog's height without its error lines (measured from a 1024x640 capture), so the
-/// expanded list never pushes the dialog past a short window.
-const OPEN_DIALOG_REST_H: f32 = 500.0;
+/// The open dialog's height with an error but without its file lines (measured from a 1440x900
+/// capture of `project-open-error`: 540 pt with six lines, plus its border), so the list never
+/// pushes the dialog over the chrome bars.
+const OPEN_DIALOG_REST_H: f32 = 434.0;
 
-/// How tall the expanded error list may grow before it scrolls: up to `ERROR_LIST_MAX_H`, as
-/// the window allows, and never shorter than the collapsed list.
+/// The band a dialog is centred in: below the chrome bars (`TOP`), `M` above the window's bottom.
+fn modal_band(window_h: f32) -> f32 {
+    window_h - TOP - M
+}
+
+/// How tall the error list may grow before it scrolls: whole lines, as many as the band below
+/// the chrome bars has room for, between `ERROR_LINES_MIN` lines and `ERROR_LIST_MAX_H`.
 fn error_list_room(window_h: f32) -> f32 {
-    (window_h - 2.0 * M - OPEN_DIALOG_REST_H)
-        .clamp(ERROR_LINES as f32 * ERROR_LINE_H, ERROR_LIST_MAX_H)
+    let fit = ((modal_band(window_h) - OPEN_DIALOG_REST_H) / ERROR_LINE_H).floor() * ERROR_LINE_H;
+    fit.clamp(ERROR_LINES_MIN as f32 * ERROR_LINE_H, ERROR_LIST_MAX_H)
+}
+
+/// Error lines listed before `Show all`: `ERROR_LINES`, or fewer when the window is short.
+fn error_lines_shown(window_h: f32) -> usize {
+    ERROR_LINES.min((error_list_room(window_h) / ERROR_LINE_H) as usize)
+}
+
+/// One file of a load error: its `path:line` in full, then the reason cut in the middle so its
+/// start and its end both show. The whole line is on hover.
+fn error_line(p: &Pal, line: &str) -> El {
+    let (at, why) = project::error_row(line);
+    let mut r = row().h(ERROR_LINE_H).gap(8.0).items_center().help(line.to_string());
+    if !at.is_empty() {
+        r = r.child(text(at.to_string()).font(MONO).color(p.muted).single_line());
+    }
+    r.child(
+        text(why.to_string())
+            .font(MONO)
+            .color(p.text)
+            .truncate_middle()
+            .grow(1.0)
+            .min_w(0.0),
+    )
 }
 
 /// A load error: its headline, then the first files with their reasons (one line each, the whole
 /// line on hover). `Show all` lists the rest in a scrolling list; `Copy diagnostics` puts the
 /// whole text on the clipboard.
 fn error_box(p: &Pal, e: &str, open: bool) -> El {
-    let (head, files, more) = project::error_parts(e, if open { usize::MAX } else { ERROR_LINES });
+    let window_h = viewport()[1];
+    let (head, files, more) =
+        project::error_parts(e, if open { usize::MAX } else { error_lines_shown(window_h) });
     let total = files.len() + more;
     let mut c = col()
-        .gap(4.0)
+        .gap(6.0)
         .padding(10.0)
         .radius(8.0)
         .fill(p.bad.alpha(0.12))
@@ -390,21 +462,11 @@ fn error_box(p: &Pal, e: &str, open: bool) -> El {
     if !files.is_empty() {
         let mut list = col();
         for line in &files {
-            list = list.child(
-                row().h(ERROR_LINE_H).items_center().help(line.to_string()).child(
-                    text(line.to_string())
-                        .font(MONO)
-                        .color(p.text)
-                        .single_line()
-                        .truncate()
-                        .grow(1.0)
-                        .min_w(0.0),
-                ),
-            );
+            list = list.child(error_line(p, line));
         }
         let list_h = files.len() as f32 * ERROR_LINE_H;
-        let room = error_list_room(viewport()[1]);
-        c = c.child(el().h(2.0)).child(if list_h > room {
+        let room = error_list_room(window_h);
+        c = c.child(if list_h > room {
             list.h(room)
                 .scroll(ScrollSpec {
                     stick_bottom: false,
@@ -423,7 +485,7 @@ fn error_box(p: &Pal, e: &str, open: bool) -> El {
         )
         .wrap());
     }
-    let toggle = if total > ERROR_LINES {
+    let toggle = if total > error_lines_shown(window_h) {
         let title = if open {
             "Show fewer".to_string()
         } else {
@@ -438,7 +500,7 @@ fn error_box(p: &Pal, e: &str, open: bool) -> El {
     } else {
         el()
     };
-    c.child(el().h(2.0)).child(actions(
+    c.child(actions(
         toggle,
         vec![
             button(p, "Copy diagnostics", false)
@@ -493,6 +555,7 @@ fn loading_dialog(p: &Pal, s: &State) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rune_ui::{Env, Runtime, TextEdit, accesskit};
 
     #[test]
     fn the_toolbar_only_opens_projects() {
@@ -510,5 +573,64 @@ mod tests {
         assert_eq!(error_list_room(640.0), collapsed);
         assert_eq!(error_list_room(900.0), ERROR_LIST_MAX_H);
         assert!(error_list_room(700.0) > collapsed && error_list_room(700.0) < ERROR_LIST_MAX_H);
+        // Centred in the band below the chrome bars, the tallest dialog's top stays at or
+        // under `TOP` (clear of the breadcrumb and toolbar) at 1024x640 and up.
+        for h in [640.0, 700.0, 900.0, 1440.0] {
+            let dialog_h = OPEN_DIALOG_REST_H + error_list_room(h);
+            let top = TOP + (modal_band(h) - dialog_h) / 2.0;
+            assert!(top >= TOP, "at {h} pt the dialog's top is {top}");
+        }
+        // A shorter window lists fewer lines before `Show all`, and scrolls from fewer still.
+        assert_eq!(error_lines_shown(640.0), ERROR_LINES);
+        assert!(error_lines_shown(540.0) < ERROR_LINES);
+        assert!(error_list_room(400.0) >= ERROR_LINES_MIN as f32 * ERROR_LINE_H);
+    }
+
+    fn render(s: State) -> Runtime<State> {
+        let mut rt = Runtime::new(s, crate::view, (1024.0, 640.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        rt
+    }
+
+    fn empty_project() -> project::Project {
+        project::Project {
+            name: "settings".into(),
+            source: "~/src/settings".into(),
+            root: "/tmp/settings".into(),
+            units: vec![argo_c::project::Unit {
+                path: "config.c".into(),
+                skipped: None,
+                flags: vec![],
+            }],
+            flags: vec![],
+            modules: vec![],
+        }
+    }
+
+    #[test]
+    fn a_project_without_functions_shows_the_empty_state() {
+        let mut s = State::load("fixture");
+        s.project = Some(empty_project());
+        let mut rt = render(s);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains(EMPTY_PROJECT), "{tree}");
+        assert!(tree.contains("Open another…"));
+        assert!(!tree.contains("No matching functions"));
+
+        // Its one action opens the open dialog.
+        assert!(rt.accessibility_action("explorer-open-another", accesskit::Action::Click, None));
+        rt.frame(2.0 / 60.0);
+        assert_eq!(rt.state.modal, Some(Modal::Open));
+
+        // A filter with no match is the other empty state, not this one.
+        rt.update(|s, _| {
+            s.modal = None;
+            s.forms.filter = TextEdit::new("x");
+        });
+        rt.frame(3.0 / 60.0);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains("No matching functions"));
+        assert!(!tree.contains(EMPTY_PROJECT));
     }
 }

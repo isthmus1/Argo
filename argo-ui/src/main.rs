@@ -183,7 +183,13 @@ fn main() {
                 s.forms.error_open = true;
                 s.modal = Some(project::Modal::Open);
             }),
-            ("project-loading", |s| project::show_loading(s, "Fetching https://github.com/fernandotcl/TinyEMU.git @ HEAD")),
+            // A project that parsed but defines no functions: the explorer's empty state.
+            ("project-empty", |s| {
+                if let Err(e) = project::open_sample_empty(s) {
+                    eprintln!("argo-ui: {e}");
+                }
+            }),
+            ("project-loading", |s|project::show_loading(s, "Fetching https://github.com/fernandotcl/TinyEMU.git @ HEAD")),
             ("project-filter", |s| {
                 s.forms.filter = rune_ui::TextEdit::new(std::env::var("ARGO_FILTER").unwrap_or_else(|_| "read".into()));
             }),
