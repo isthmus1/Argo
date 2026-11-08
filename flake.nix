@@ -20,12 +20,17 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
+        gl = pkgs.writeShellScriptBin "gl" ''
+          exec nix run --impure github:nix-community/nixGL -- "$@"
+        '';
       in {
         devShells.default = with pkgs;
           mkShell {
             buildInputs = [
               openssl
+              gl
               clang
+              libxkbcommon
               pkg-config
               eza
               fd

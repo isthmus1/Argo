@@ -1,14 +1,8 @@
 use serde_json::Value;
 const CONTEXT_LINES: u32 = 10;
-const testCode: &str = include_str!("../examples/internet_example.c");
+//const testCode: &str = include_str!("../examples/internet_example.c");
 
-fn main() {
-    if let Err(err) = sendPrompt(testCode, 1, 65) {
-        eprintln!("error: {err}");
-    }
-}
-
-fn getLines(code: &str, startLine: u32, endLine: u32) -> String {
+pub fn getLines(code: &str, startLine: u32, endLine: u32) -> String {
     if startLine == 0 || endLine < startLine {
         return String::new();
     }
