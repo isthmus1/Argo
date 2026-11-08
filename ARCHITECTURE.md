@@ -77,7 +77,7 @@ Current implementation split: this workstream takes **W, the worker client**; th
 
 Proposed layout (not created yet):
 
-- `crates/argo-protocol/`: shared Rust DTOs, IDs, schema version, fixture messages. Part S maintains it; both clients review changes. This is a shared boundary, not a fourth product subsystem.
+- `crates/argo-protocol/`: shared Rust DTOs, IDs, schema version, fixture messages. Part S maintains it; both clients review changes. This is a shared boundary, not a fourth product subsystem. **Created:** graph structure (nodes, pins, edges, layouts, provenance) kept apart from live status (claims, candidates, reports), freeze validation, canonical hash, a level view for the GUI, and the §5.6 fixture with a live transcript. Its crate docs own the pin-key conventions.
 - `crates/argo-server/`: Rust SpacetimeDB module and server-side transition rules.
 - `crates/argo-harness/`: S-owned native support library/runner for reproducible baselines, layout assertions, test execution, traces and captures. W invokes it locally; it is not a fourth deployed subsystem.
 - `crates/argo-worker/`: Rust native worker, transport/model adapters, claimed task execution, generation/linking, harness invocation, modernization and export.
