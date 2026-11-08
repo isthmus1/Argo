@@ -1,4 +1,3 @@
-
 ## Inspiration
 AI continues and will continue to become increasingly smarter and cheaper, and thus finding complex vulnerabilities will become cheaper and faster. In this new age of cybersecurity, memory safety will become more important than ever before, and we will need tools to modernize and patch codebases as fast as new tools uncover vulnerabilities. Rust makes it a priority for your code to be memory safe {add here}.
 
