@@ -132,7 +132,7 @@ impl Exporter<'_> {
             (GraphNodeKind::Scope, _) if n.name.as_deref() == Some("else") => "else".into(),
             (GraphNodeKind::Scope, _) => "{ … }".into(),
             (GraphNodeKind::Sequence | GraphNodeKind::Opaque, _) => {
-                collapse(&self.text(n.span.lo, n.span.hi)).trim_end_matches(';').to_string()
+                collapse(&self.text(n.span.lo, n.span.hi))
             }
             _ => n.name.clone().unwrap_or_else(|| n.template.clone()),
         };

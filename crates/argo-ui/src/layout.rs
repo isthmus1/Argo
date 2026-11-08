@@ -160,18 +160,41 @@ fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge]) -> (Vec
     }
     let row_at = |x: f32| breaks.iter().rposition(|&b| x >= b).unwrap_or(0);
     let mut row: Vec<usize> = pos.iter().map(|p| row_at(p[0])).collect();
-    // A dead end fed by one node (an exit's Output) stays beside that node rather than starting
-    // the next row behind a long wire.
+    // A dead end fed by one node — an exit path such as `return -1` → Output — stays beside that
+    // node rather than starting the next row behind a long wire.
+    let preds = |u: usize| -> Vec<usize> {
+        let mut p: Vec<usize> = edges.iter().filter(|e| e.to == u).map(|e| e.from).collect();
+        p.dedup();
+        p
+    };
+    let succs = |u: usize| -> Vec<usize> {
+        let mut s: Vec<usize> = edges.iter().filter(|e| e.from == u).map(|e| e.to).collect();
+        s.dedup();
+        s
+    };
     for u in 0..pos.len() {
-        let preds: Vec<usize> = edges.iter().filter(|e| e.to == u).map(|e| e.from).collect();
-        let sink = !edges.iter().any(|e| e.from == u);
-        if let [p, rest @ ..] = preds.as_slice()
-            && sink
-            && rest.iter().all(|r| r == p)
-            && row[*p] < row[u]
-        {
-            row[u] = row[*p];
-            pos[u] = [pos[*p][0] + sizes[*p][0] + COL_GAP / 2.0, pos[*p][1]];
+        let [p] = preds(u)[..] else { continue };
+        if row[p] >= row[u] {
+            continue;
+        }
+        // Follow the single path from `u`; it must end without rejoining anything.
+        let mut chain = vec![u];
+        let ok = loop {
+            let last = *chain.last().expect("non-empty");
+            match succs(last)[..] {
+                [] => break true,
+                [n] if preds(n) == [last] && !chain.contains(&n) && chain.len() < 8 => chain.push(n),
+                _ => break false,
+            }
+        };
+        if !ok {
+            continue;
+        }
+        let mut x = pos[p][0] + sizes[p][0] + COL_GAP / 2.0;
+        for &c in &chain {
+            row[c] = row[p];
+            pos[c] = [x, pos[p][1]];
+            x += sizes[c][0] + COL_GAP / 2.0;
         }
     }
     let n_rows = breaks.len();

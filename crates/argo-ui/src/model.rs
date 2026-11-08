@@ -263,7 +263,9 @@ pub fn size(n: &Node) -> [f32; 2] {
         Lang::Rust => 26.0 + 7.0,
     };
     let count = if n.kind == Kind::Group { 34.0 + 7.0 } else { 0.0 };
-    let title = 10.0 + 16.0 + 7.0 + text_w(&n.title, 6.9) + chip + count + 10.0;
+    // Code headers are monospace (wider per character) — see `graph::header_font`.
+    let per = if matches!(n.kind, Kind::GroupIn | Kind::GroupOut) { 6.9 } else { 7.7 };
+    let title = 10.0 + 16.0 + 7.0 + text_w(&n.title, per) + chip + count + 10.0;
     let pins = rows(n)
         .iter()
         .map(|&(o, i)| {
