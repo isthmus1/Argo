@@ -336,6 +336,12 @@ pub fn rows(n: &Node) -> Vec<(Option<usize>, Option<usize>)> {
     rows
 }
 
+/// Width of `s` in ems of the UI face at semibold: capitals and digits run wider than the
+/// lowercase average, so all-caps constants (`MAGIC`, `-EPROTO`) are budgeted their real width.
+pub fn ui_ems(s: &str) -> f32 {
+    s.chars().map(|c| if c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_' { 0.72 } else { 0.6 }).sum()
+}
+
 fn text_w(s: &str, per: f32) -> f32 {
     s.chars().count() as f32 * per
 }
@@ -344,7 +350,7 @@ fn text_w(s: &str, per: f32) -> f32 {
 pub fn size(n: &Node) -> [f32; 2] {
     if n.ins.is_empty() && n.outs.len() == 1 && n.outs[0].label.is_empty() {
         // Constants and getters: a compact pill-sized node.
-        let w = ((text_w(&n.title, 6.9) + 44.0).max(56.0) / 10.0).ceil() * 10.0;
+        let w = ((ui_ems(&n.title) * 11.5 + 44.0).max(56.0) / 10.0).ceil() * 10.0;
         return [w, HEADER + 2.0];
     }
     // Header: padding, family glyph, title, then the language chip (and a collapsed group's

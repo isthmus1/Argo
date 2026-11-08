@@ -1263,7 +1263,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         let card = row().size(w, h).px(10.0).gap(7.0).items_center().fill(fill).radius(h / 2.0)
             .border(edge.0, edge.1)
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.0, 600.0)).color(fg.alpha(0.7)))
-            .child(text(n.title.clone()).font(TextStyle::new(fit_title(look.title, &n.title, w - 39.0, UI_EM), 600.0)).color(fg).single_line().truncate().grow(1.0).min_w(0.0))
+            .child(text(n.title.clone()).font(TextStyle::new(fit_title(look.title, &n.title, w - 39.0, model::ui_ems(&n.title) / n.title.chars().count().max(1) as f32), 600.0)).color(fg).single_line().truncate().grow(1.0).min_w(0.0))
             .child(socket(p, n.outs[0].ty, model::socket_local(n, w, true, 0)));
         return interact(decorate(p, emphasis(p, card, look), [w, h], h / 2.0, n.evidence, n.claim, look));
     }
@@ -1750,6 +1750,13 @@ mod tests {
         // ...and never shrinks below its rest size, however tight (truncation takes over).
         assert_eq!(fit_title(floor, long, 10.0, MONO_EM), TITLE_SIZE);
         assert_eq!(fit_title(TITLE_SIZE, "", 0.0, UI_EM), TITLE_SIZE);
+    }
+
+    #[test]
+    fn capital_constants_get_their_real_width() {
+        // Capitals are wider than the lowercase average, so a constant pill budgets more.
+        assert!(model::ui_ems("MAGIC") > model::ui_ems("magic"));
+        assert!((model::ui_ems("-EPROTO") - (0.6 + 6.0 * 0.72)).abs() < 1e-4);
     }
 
     #[test]
