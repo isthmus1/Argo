@@ -4,7 +4,7 @@
 
 Argo is a Rust-first legacy-modernization project built around SpacetimeDB, agent-assisted understanding, and incremental C/Rust interoperability.
 
-> **Status: architecture and planning only.** There is no implemented application, executable workspace, successful migration, or recorded boot yet. See [ARCHITECTURE.md](ARCHITECTURE.md) for the detailed design, interfaces, milestones, and independent reviewer opinions.
+> **Status: parser/template prototype.** A standalone Rust CLI builds an owned C syntax tree and matches keyword templates. The application, executable graph, migrations, and golden boot remain unimplemented. See [ARCHITECTURE.md](ARCHITECTURE.md) for the broader design and acceptance gates.
 
 ## The idea
 
@@ -72,4 +72,36 @@ The golden target is ambitious; an incomplete golden gate must be reported as in
 - **Nemotron:** the intended understanding/planning/implementation workflow, beyond a chatbot.
 - **Legacy modernization:** a natural fit for the 8090 challenge alongside SpacetimeDB and NVIDIA.
 
-No setup commands are published yet because the workspace does not exist. Implementation starts from the contracts and acceptance gates in [ARCHITECTURE.md](ARCHITECTURE.md).
+## Parser prototype
+
+Run `cargo run -- tests/fixture.c` (or supply another C file). The CLI prints the
+owned syntax tree, a template-match summary, and rucc's C pretty-print. Fatal
+lexer, conversion, or parser errors exit unsuccessfully without emitting a tree;
+diagnostics go to stderr.
+
+- `src/lexer.rs`: reusable `Lexer`, defaulting to C11 + GNU on x86_64 Linux.
+- `src/parser.rs`: reusable `Parser` and an owned `ParseResult`.
+- `src/ast.rs`, `src/c_node.rs`: `Ast` owns a forest of `CNode` values, each with a
+  `CNodeType`, name, original-source byte span, and owned children. These are
+  syntax nodes, **not** UI or executable graph nodes.
+- `src/lowering/`: converts rucc arenas into that tree, including declarator
+  shapes, expressions, initializers, and control statements. Unsupported forms
+  remain source-located opaque nodes rather than guessed structures. Some
+  synthesized type/initializer nodes use enclosing declaration spans.
+- `src/templates/`: one recognizer per supported keyword/construct, all
+  re-exported from the module. `templates::all()` supplies the ordered built-ins.
+
+`Ast::match_templates(Vec<impl Template>)` visits the tree in preorder, choosing
+the first matching template per node. Concrete homogeneous lists and mixed
+`Vec<Box<dyn Template>>` lists both work. Results borrow the owned syntax, not the
+template list. The built-ins end with an opaque fallback; caller-supplied lists
+may leave nodes unmatched without removing them from the AST.
+
+Source modules stay below 100 lines; simple keyword recognizers are intentionally
+shorter. Focused checks: `cargo fmt --all --check`, `cargo test --locked --lib
+--tests`, and `cargo clippy --locked --all-targets -- -D warnings`.
+
+This is a syntax/matching foundation, not graph emission: preprocessing, name/type
+resolution, safe region grouping, interfaces/pins, and migration are still future
+work. Implementation must continue to respect the contracts and acceptance gates
+in [ARCHITECTURE.md](ARCHITECTURE.md).
