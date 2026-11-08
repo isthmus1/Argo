@@ -1,0 +1,20 @@
+[package]
+name = "argo-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "`argo`: one command line for the server, workers, GUI, replays and export, on one machine."
+
+[[bin]]
+name = "argo"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+# Signals the children (SIGINT to stop them together).
+libc = "0.2"
+dialoguer = { version = "0.12.0", features = ["fuzzy-select"] }
+# The host's database names (`/v1/database/<id>/names`) when listing recorded runs.
+serde_json.workspace = true

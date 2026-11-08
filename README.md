@@ -74,6 +74,27 @@ The golden target is ambitious; an incomplete golden gate must be reported as in
 
 ## Run it
 
+The `argo` command (crate `argo-cli`) starts everything on this machine. It runs the server,
+workers and GUI below as child processes, starts the workers and GUI once the database is
+ready, and stops them all together. It asks for anything left out when you run it in a
+terminal.
+
+```sh
+cargo build --release && alias argo=./target/release/argo
+export OPENROUTER_API_KEY=...
+argo run ~/src/project -j 8          # server + 8 workers + GUI (repository and workers asked if left out)
+argo demo                            # pick a recorded run (arrows, type to filter, Enter) and replay it in the GUI
+argo runs                            # list the recorded runs
+argo serve <repo> | argo work -j 4 | argo ui | argo export --out DIR   # one part each
+```
+
+`argo <command> --help` lists the options. They match the part binaries' flags (`--model`,
+`--model-provider`, `--fresh`, `-D`/`-I`, `--port`, `--module`, `--max-turns`, `--speed`, ...).
+Inside this workspace it runs `cargo build` on the parts first (`--no-build` skips that).
+
+### The parts, one at a time
+
+
 Needs the `spacetime` CLI (2.0.x, matching `spacetimedb-sdk`), git, a C preprocessor, and the
 `wasm32-unknown-unknown` Rust target. `argo-server` is Unix-only (Linux, macOS): it manages its
 children through process groups and signals. Only on Linux are they also killed if the server
