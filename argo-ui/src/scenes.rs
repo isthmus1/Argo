@@ -24,7 +24,7 @@ impl B {
         label_unnamed(kind, &mut ins, &mut outs);
         self.g.nodes.push(Node {
             kind, title: title.into(), lang, evidence: Evidence::None, claim: None,
-            ins, outs, group: self.group, members: 0,
+            ins, outs, group: self.group, members: 0, effects: None, rejection: None,
         });
         self.g.nodes.len() - 1
     }
@@ -34,7 +34,7 @@ impl B {
     }
 
     fn begin_group(&mut self, title: &str, lang: Lang, evidence: Evidence, claim: Option<Claim>) -> usize {
-        self.g.groups.push(Group { title: title.into(), lang, evidence, claim });
+        self.g.groups.push(Group { title: title.into(), lang, evidence, claim, effects: None, rejection: None });
         self.group = Some(self.g.groups.len() - 1);
         self.g.groups.len() - 1
     }
