@@ -179,6 +179,20 @@ fn main() {
                     hover(s, &name);
                 }
             }),
+            ("hover", |s| {
+                // Hover-card placement checks: `ARGO_SCENE` (a mock scene or `protocol`) with
+                // `ARGO_HOVER` naming the node; `ARGO_TILE`/`ARGO_ZOOM` move the camera.
+                let scene = std::env::var("ARGO_SCENE").unwrap_or_default();
+                *s = match SCENES.iter().find(|n| **n == scene) {
+                    Some(n) => State::load(n),
+                    None => {
+                        let mut s = State::protocol_fixture();
+                        s.replay(usize::MAX);
+                        s
+                    }
+                };
+                hover(s, &std::env::var("ARGO_HOVER").unwrap_or_default());
+            }),
             ("interp-collapsed", |s| {
                 *s = State::load("interp");
                 s.toggle_group(0);

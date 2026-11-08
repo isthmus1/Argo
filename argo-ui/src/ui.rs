@@ -3,7 +3,7 @@
 //! requesting a rewrite live in `dialogs`.
 
 use crate::app::{Item, MARGIN, State};
-use crate::describe::{self, Card};
+use crate::describe;
 use crate::graph::{self, RADIUS};
 use crate::model::{Category, Evidence, Ty};
 use crate::palette::Pal;
@@ -114,10 +114,13 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         root = root.child(info(p, s, item, true).0.w(detail_w()).absolute(w - M - detail_w(), TOP));
     }
     if let Some(item) = s.hovered.filter(|h| Some(*h) != s.selected) {
-        let (card, h) = info(p, s, item, false);
+        let (card, estimate) = info(p, s, item, false);
         let w = hover_w(s, item);
-        let [x, y] = hover_anchor(s, item, w, h);
-        root = root.child(card.w(w).absolute(x, y));
+        let [x, y] = hover_anchor(s, item, w, hover_h(item, w, estimate));
+        // Keyed per item so a newly hovered card always reports its own first layout.
+        root = root.child(card.w(w).key(format!("hover-{item:?}"))
+            .on_layout(move |_: &mut State, r| HOVER_SIZE.with(|c| c.set(Some((item, [r[2], r[3]])))))
+            .absolute(x, y));
     }
     if s.modal.is_some() {
         root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
@@ -241,37 +244,83 @@ fn hover_w(s: &State, item: Item) -> f32 {
     title.max(kicker).clamp(160.0, HOVER_W)
 }
 
-/// Hover-card position: try right, left, below and above the item; keep inside the free
-/// canvas, never over the item, and prefer the side covering the fewest nodes (direct
-/// neighbours count triple).
+/// Hover-card position for `item`: its screen rect, header height and the other nodes on the
+/// canvas (direct neighbours weigh triple) feed [`place_card`].
 fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> [f32; 2] {
-    let [x, y, w, h] = item_rect(s, item);
-    let gap = 14.0;
-    let [fx, fy, fw, fh] = free_area(s.selected.is_some(), s.project.is_some());
-    let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - card_w).max(fx)), cy.clamp(fy, (fy + fh - card_h).max(fy))];
+    let rect = item_rect(s, item);
+    let head = match item {
+        Item::Node(_) => crate::model::HEADER,
+        Item::Group(_) => FRAME_HEAD,
+    } * s.cam.zoom;
+    let me = match item {
+        Item::Node(i) => Some(i),
+        Item::Group(_) => None,
+    };
+    let neighbour = |i: usize| s.view.wires.iter().any(|wi| Some(wi.from.0) == me && wi.to.0 == i || Some(wi.to.0) == me && wi.from.0 == i);
+    let others: Vec<([f32; 4], f32)> = (0..s.view.nodes.len()).filter(|i| Some(*i) != me)
+        .map(|i| (s.screen_rect(i), if neighbour(i) { 3.0 } else { 1.0 }))
+        .collect();
+    place_card(rect, head, [card_w, card_h], free_area(s.selected.is_some(), s.project.is_some()), &others)
+}
+
+/// Height of a frame's title row in world units (as `graph::frame` draws it).
+const FRAME_HEAD: f32 = 32.0;
+/// Space between a hover card and the item it describes.
+const CARD_GAP: f32 = 14.0;
+
+/// Where a floating card of size `card` goes beside an item at `item` (`[x, y, w, h]`, window
+/// points) whose header row is `head` tall, inside the `free` canvas rect. Candidates sit right,
+/// left, below and above the item (each also aligned to the item's far edge), clamped into the
+/// free area. Clamping can push a candidate back over the item, so the ranking is: candidates
+/// clear of the item first; failing that, ones that leave its header row (its name) visible;
+/// then the rest. Within a rank the card covers the least area, of the item plus the weighted
+/// area of `others` (rect, weight); ties keep the earlier candidate (right, left, below, above).
+pub(crate) fn place_card(item: [f32; 4], head: f32, card: [f32; 2], free: [f32; 4], others: &[([f32; 4], f32)]) -> [f32; 2] {
+    let [x, y, w, h] = item;
+    let [cw, ch] = card;
+    let [fx, fy, fw, fh] = free;
+    let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - cw).max(fx)), cy.clamp(fy, (fy + fh - ch).max(fy))];
+    let gap = CARD_GAP;
     let candidates = [
         clamp(x + w + gap, y),
-        clamp(x - gap - card_w, y),
+        clamp(x - gap - cw, y),
         clamp(x, y + h + gap),
-        clamp(x, y - gap - card_h),
+        clamp(x, y - gap - ch),
+        clamp(x + w + gap, y + h - ch),
+        clamp(x - gap - cw, y + h - ch),
+        clamp(x + w - cw, y + h + gap),
+        clamp(x + w - cw, y - gap - ch),
+        // Last resort for an item too big to sit beside: over its body, under its header.
+        clamp(x + w - cw, y + head + gap),
+        clamp(x, y + head + gap),
     ];
-    let neighbours: Vec<usize> = match item {
-        Item::Node(i) => s.view.wires.iter().filter_map(|wi| {
-            if wi.from.0 == i { Some(wi.to.0) } else if wi.to.0 == i { Some(wi.from.0) } else { None }
-        }).collect(),
-        Item::Group(_) => vec![],
+    let header = [x, y, w, head.min(h)];
+    let rank = |c: [f32; 2]| {
+        let r = [c[0], c[1], cw, ch];
+        let on_item = overlap(r, item);
+        let tier = if on_item <= 0.0 { 0 } else if overlap(r, header) <= 0.0 { 1 } else { 2 };
+        let covered: f32 = others.iter().map(|(o, wt)| overlap(r, *o) * wt).sum();
+        (tier, on_item + covered)
     };
-    let me = [x, y, w, h];
-    let cost = |c: [f32; 2]| {
-        let r = [c[0], c[1], card_w, card_h];
-        let mut cost = overlap(r, me) * 100.0;
-        for i in 0..s.view.nodes.len() {
-            let o = overlap(r, s.screen_rect(i));
-            cost += if neighbours.contains(&i) { 3.0 * o } else { o };
-        }
-        cost
-    };
-    candidates.into_iter().min_by(|a, b| cost(*a).total_cmp(&cost(*b))).unwrap_or([fx, fy])
+    candidates.into_iter().min_by(|a, b| {
+        let (a, b) = (rank(*a), rank(*b));
+        a.0.cmp(&b.0).then(a.1.total_cmp(&b.1))
+    }).unwrap_or([fx, fy])
+}
+
+thread_local! {
+    /// The hover card's laid-out size, with the item it described: the next frame places the
+    /// card by its real size rather than the estimate.
+    static HOVER_SIZE: std::cell::Cell<Option<(Item, [f32; 2])>> = const { std::cell::Cell::new(None) };
+}
+
+/// Hover card height for `item` at width `w`: as last laid out when that was this card at this
+/// width, else `estimate`.
+fn hover_h(item: Item, w: f32, estimate: f32) -> f32 {
+    match HOVER_SIZE.with(|c| c.get()) {
+        Some((i, [mw, mh])) if i == item && (mw - w).abs() < 0.5 && mh > 0.0 => mh,
+        _ => estimate,
+    }
 }
 
 /// Hover rows shown per port list before summarising.
@@ -340,10 +389,44 @@ fn divider(p: &Pal) -> El {
     el().h(1.0).w_full().fill(p.panel_border)
 }
 
-/// Rough card height for placement (the card itself sizes to its content).
-fn estimate_h(c: &Card, claimed: bool, rejected: bool) -> f32 {
-    let ports = c.inputs.len().min(HOVER_PORTS + 1) + c.outputs.len().min(HOVER_PORTS + 1);
-    28.0 + 30.0 + ports as f32 * 24.0 + if claimed { 30.0 } else { 0.0 } + if rejected { 32.0 } else { 0.0 }
+/// Line heights of the `LABEL` and `UI` text styles: Rune lays a line out 1.25 font sizes tall.
+const LABEL_LINE: f32 = 10.0 * 1.25;
+const UI_LINE: f32 = 11.5 * 1.25;
+
+/// Height of a list of `n` 22-point rows 2 points apart, cut at `limit` with a "+N more" line.
+fn rows_h(n: usize, limit: usize) -> f32 {
+    let shown = n.min(limit);
+    let mut h = shown as f32 * 22.0 + shown.saturating_sub(1) as f32 * 2.0;
+    if n > limit {
+        h += 2.0 + UI_LINE;
+    }
+    h
+}
+
+/// Hover card height before it is laid out, following `info` and `shell` piece by piece: the
+/// padding (the border draws inside it), kicker over header, then each section 12 points down.
+fn estimate_h(sections: &[f32]) -> f32 {
+    let head = LABEL_LINE + 4.0 + 28.0;
+    2.0 * 14.0 + head + sections.iter().map(|s| 12.0 + s).sum::<f32>()
+}
+
+/// Height of the activity section (claim row, failed-checks row), if any.
+fn activity_h(claimed: bool, rejected: bool) -> Option<f32> {
+    match (claimed, rejected) {
+        (false, false) => None,
+        (true, false) => Some(22.0),
+        (false, true) => Some(24.0),
+        (true, true) => Some(22.0 + 6.0 + 24.0),
+    }
+}
+
+/// Height of the hover card's port section, if the node has ports.
+fn ports_h(inputs: usize, outputs: usize) -> Option<f32> {
+    match (inputs, outputs) {
+        (0, 0) => None,
+        (n, 0) | (0, n) => Some(rows_h(n, HOVER_PORTS)),
+        (i, o) => Some(rows_h(i, HOVER_PORTS) + 6.0 + 1.0 + 6.0 + rows_h(o, HOVER_PORTS)),
+    }
 }
 
 /// IDE-style card for a node or group. Docked as a full-height sidebar for the selection
@@ -387,8 +470,9 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                     .child(text("EFFECT").font(LABEL).color(p.faint).w(50.0))
                     .child(label(&c.effects.join(" · "), p.text)));
             }
-            let h = estimate_h(&c, n.claim.is_some(), n.evidence == Evidence::Rejected);
-            (shell(p, body, docked, p.header(n.kind.category())), h)
+            let sections: Vec<f32> = [activity_h(n.claim.is_some(), n.evidence == Evidence::Rejected), ports_h(c.inputs.len(), c.outputs.len())]
+                .into_iter().flatten().collect();
+            (shell(p, body, docked, p.header(n.kind.category())), estimate_h(&sections))
         }
         Item::Group(g) => {
             let grp = &s.view.groups[g];
@@ -418,7 +502,9 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 }
                 body = body.child(code);
             }
-            (shell(p, body, docked, p.header(Category::Function)), 80.0 + members.len().min(6) as f32 * 24.0)
+            let sections: Vec<f32> = [activity_h(grp.claim.is_some(), grp.evidence == Evidence::Rejected), Some(rows_h(members.len(), 5))]
+                .into_iter().flatten().collect();
+            (shell(p, body, docked, p.header(Category::Function)), estimate_h(&sections))
         }
     }
 }
@@ -462,5 +548,136 @@ fn shell(p: &Pal, body: El, docked: bool, family: Color) -> El {
     } else {
         col().fill(p.panel).radius(RADIUS).border(1.0, family.alpha(0.45)).padding(14.0).child(body)
             .shadow(8.0, 24.0, p.shadow.alpha(if p.dark { 0.6 } else { 0.18 }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FREE: [f32; 4] = [16.0, 72.0, 1000.0, 800.0];
+    const CARD: [f32; 2] = [340.0, 166.0];
+
+    fn place(item: [f32; 4], others: &[([f32; 4], f32)]) -> [f32; 4] {
+        let [x, y] = place_card(item, 30.0, CARD, FREE, others);
+        [x, y, CARD[0], CARD[1]]
+    }
+
+    fn inside(r: [f32; 4], f: [f32; 4]) -> bool {
+        r[0] >= f[0] && r[1] >= f[1] && r[0] + r[2] <= f[0] + f[2] + 0.01 && r[1] + r[3] <= f[1] + f[3] + 0.01
+    }
+
+    #[test]
+    fn open_canvas_puts_the_card_right_of_the_item() {
+        let item = [400.0, 400.0, 140.0, 90.0];
+        let r = place(item, &[]);
+        assert_eq!([r[0], r[1]], [400.0 + 140.0 + CARD_GAP, 400.0]);
+    }
+
+    #[test]
+    fn the_side_covering_fewest_nodes_wins() {
+        let item = [400.0, 400.0, 140.0, 90.0];
+        // A neighbour to the right: the card goes left instead.
+        let right = ([560.0, 380.0, 140.0, 120.0], 3.0);
+        let r = place(item, &[right]);
+        assert_eq!([r[0], r[1]], [400.0 - CARD_GAP - CARD[0], 400.0]);
+        assert_eq!(overlap(r, right.0), 0.0);
+    }
+
+    #[test]
+    fn a_clamped_candidate_over_the_item_loses_to_any_clear_one() {
+        // The reported case: an item near the top of the canvas with busy sides. "Above" only
+        // fits once clamped down onto the item's header (one point of it here), where it covers
+        // no other node; the clear candidates beside and below all cover nodes, yet one of them
+        // must win. (Weighing item overlap as just another cost picked "above".)
+        let item = [400.0, 237.0, 140.0, 90.0];
+        let others = [
+            ([560.0, 240.0, 300.0, 300.0], 3.0),
+            ([80.0, 240.0, 300.0, 300.0], 3.0),
+            ([380.0, 340.0, 400.0, 200.0], 1.0),
+        ];
+        let r = place(item, &others);
+        assert_eq!(overlap(r, item), 0.0, "card {r:?} covers the item");
+        assert!(inside(r, FREE));
+    }
+
+    #[test]
+    fn near_the_right_edge_the_card_flips_left() {
+        let item = [860.0, 300.0, 140.0, 90.0];
+        let r = place(item, &[]);
+        assert_eq!(overlap(r, item), 0.0);
+        assert_eq!(r[0], 860.0 - CARD_GAP - CARD[0]);
+    }
+
+    #[test]
+    fn near_each_corner_the_card_stays_clear_and_inside() {
+        for item in [[16.0, 72.0, 140.0, 90.0], [16.0, 782.0, 140.0, 90.0], [876.0, 72.0, 140.0, 90.0], [876.0, 782.0, 140.0, 90.0]] {
+            let r = place(item, &[]);
+            assert_eq!(overlap(r, item), 0.0, "item {item:?} card {r:?}");
+            assert!(inside(r, FREE), "item {item:?} card {r:?}");
+        }
+    }
+
+    #[test]
+    fn with_no_clear_spot_the_items_header_stays_visible() {
+        // A frame filling the canvas: the card has to sit on it, but not on its title row.
+        let item = [10.0, 60.0, 1020.0, 820.0];
+        let head = 32.0;
+        let [x, y] = place_card(item, head, CARD, FREE, &[]);
+        let r = [x, y, CARD[0], CARD[1]];
+        assert_eq!(overlap(r, [item[0], item[1], item[2], head]), 0.0, "card {r:?} covers the title");
+        assert!(inside(r, FREE));
+    }
+
+    #[test]
+    fn with_no_clear_spot_the_card_avoids_other_nodes_below_the_header() {
+        let item = [10.0, 60.0, 1020.0, 820.0];
+        // Nodes along the top-left under the header; the right side is free.
+        let others = [([16.0, 110.0, 600.0, 200.0], 1.0)];
+        let [x, y] = place_card(item, 32.0, CARD, FREE, &others);
+        assert_eq!(overlap([x, y, CARD[0], CARD[1]], others[0].0), 0.0);
+    }
+
+    #[test]
+    fn over_a_zoomed_frame_the_card_prefers_empty_frame_to_member_nodes() {
+        // A frame at zoom 3 filling a 1024x640 window past its right edge. The card has to sit
+        // on the frame; a spot hanging off its left edge covers less frame but a member node,
+        // and must lose to an empty stretch of frame under the title.
+        let free = [16.0, 72.0, 992.0, 552.0];
+        let item = [104.0, 110.0, 1200.0, 700.0];
+        let card = [340.0, 234.0];
+        let head = 96.0;
+        let others = [([157.0, 207.0, 388.0, 310.0], 1.0), ([786.0, 537.0, 300.0, 100.0], 1.0), ([157.0, 603.0, 360.0, 100.0], 1.0)];
+        let [x, y] = place_card(item, head, card, free, &others);
+        let r = [x, y, card[0], card[1]];
+        assert_eq!(overlap(r, [item[0], item[1], item[2], head]), 0.0, "card {r:?} covers the title");
+        for (o, _) in others {
+            assert_eq!(overlap(r, o), 0.0, "card {r:?} covers {o:?}");
+        }
+    }
+
+    #[test]
+    fn estimate_matches_measured_cards() {
+        // Heights measured from headless captures of the real cards.
+        // `acc = 0`: one output.
+        assert_eq!(estimate_h(&[ports_h(0, 1).unwrap()]), 106.5);
+        // `acc + i`: two inputs, one output.
+        assert_eq!(estimate_h(&[ports_h(2, 1).unwrap()]), 165.5);
+        // `report`: claimed, failed checks, one data input.
+        assert_eq!(estimate_h(&[activity_h(true, true).unwrap(), ports_h(1, 0).unwrap()]), 170.5);
+        // Cut lists add a "+N more" line (14.375 points measured, plus the row gap).
+        assert_eq!(rows_h(7, 5), rows_h(5, 5) + 2.0 + 14.375);
+        assert_eq!(ports_h(0, 0), None);
+        assert_eq!(activity_h(false, false), None);
+    }
+
+    #[test]
+    fn measured_size_is_used_only_for_the_same_card() {
+        HOVER_SIZE.with(|c| c.set(Some((Item::Node(3), [340.0, 200.0]))));
+        assert_eq!(hover_h(Item::Node(3), 340.0, 150.0), 200.0);
+        assert_eq!(hover_h(Item::Node(4), 340.0, 150.0), 150.0);
+        assert_eq!(hover_h(Item::Node(3), 220.0, 150.0), 150.0);
+        HOVER_SIZE.with(|c| c.set(None));
+        assert_eq!(hover_h(Item::Node(3), 340.0, 150.0), 150.0);
     }
 }
