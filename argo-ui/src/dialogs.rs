@@ -2,8 +2,8 @@
 //! These open projects and navigate them; nothing here edits the graph or starts work.
 
 use rune_ui::{
-    Color, Cursor, El, FileDialogOptions, LoopSpec, ScrollSpec, TextEdit, TextStyle, Tx, col, el, row, text,
-    text_input,
+    Color, Cursor, El, FileDialogOptions, LoopSpec, ScrollSpec, Span, TextEdit, TextStyle, Tx, col, el, row,
+    text, text_input,
 };
 
 use crate::app::State;
@@ -15,10 +15,10 @@ const TITLE: TextStyle = TextStyle::new(17.0, 650.0);
 const BODY: TextStyle = TextStyle::new(12.5, 450.0);
 const FIELD: TextStyle = TextStyle::new(12.5, 450.0);
 const DIALOG_W: f32 = 520.0;
+/// Padding inside a dialog's card.
+const DIALOG_PAD: f32 = 22.0;
 /// Rows the explorer lists at most while filtering.
 const FILTER_LIMIT: usize = 300;
-/// The explorer's one line for a project that parsed but defines no functions.
-const EMPTY_PROJECT: &str = "No function definitions found";
 
 /// Horizontal padding inside a text button.
 const BUTTON_PX: f32 = 14.0;
@@ -130,8 +130,14 @@ pub fn explorer(p: &Pal, s: &State) -> El {
                         .color(p.muted),
                 ),
         );
+    // No function bodies: nothing to filter, and the list's one line says what there is.
+    let empty = proj.modules.is_empty();
     let sub = label(
-        &format!("{} functions · {}", proj.function_count(), proj.source),
+        &if empty {
+            proj.source.clone()
+        } else {
+            format!("{} functions · {}", proj.function_count(), proj.source)
+        },
         p.faint,
     )
     .single_line()
@@ -150,7 +156,8 @@ pub fn explorer(p: &Pal, s: &State) -> El {
     );
 
     let mut list = col().gap(1.0);
-    let query = s.forms.filter.text.trim().to_lowercase();
+    // A filter typed for an earlier project is ignored while this one has nothing to filter.
+    let query = if empty { String::new() } else { s.forms.filter.text.trim().to_lowercase() };
     let fn_row = |name: &str, id, indent: f32, module: Option<&str>| {
         let on = Some(id) == current;
         let mut r = row()
@@ -189,15 +196,14 @@ pub fn explorer(p: &Pal, s: &State) -> El {
         }
         r.on_press(move |s: &mut State| project::open_function(s, id))
     };
-    if query.is_empty() && proj.modules.is_empty() {
-        // Parsed, but nothing defines a function: say so, and offer another project.
+    if empty {
+        // Parsed, but nothing defines a function: say what it holds (the canvas shows those
+        // declarations), and offer another project.
         list = list.child(
             col()
                 .gap(10.0)
-                .px(8.0)
-                .mt(6.0)
                 .items_start()
-                .child(label(EMPTY_PROJECT, p.faint).key("explorer-empty"))
+                .child(label(&proj.empty_note(), p.muted).wrap().key("explorer-empty"))
                 .child(
                     button(p, "Open another…", false)
                         .key("explorer-open-another")
@@ -291,22 +297,25 @@ pub fn explorer(p: &Pal, s: &State) -> El {
             list = list.child(label("No matching functions", p.faint).ml(8.0).mt(6.0));
         }
     }
-    card(p)
+    let full_h = viewport()[1] - TOP - M;
+    let panel = card(p)
         .w(explorer_w())
-        .h(viewport()[1] - TOP - M)
         .padding(12.0)
         .gap(10.0)
-        .child(col().gap(3.0).child(header).child(sub))
-        .child(filter)
-        .child(
-            el().grow(1.0).min_h(0.0).child(
-                list.scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .grow(1.0)
-                .min_h(0.0),
-            ),
-        )
+        .child(col().gap(3.0).child(header).child(sub));
+    if empty {
+        // As tall as what it says, up to the window's room for it.
+        return panel.max_h(full_h).clip_soft(0.0).child(list);
+    }
+    panel.h(full_h).child(filter).child(
+        el().grow(1.0).min_h(0.0).child(
+            list.scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .grow(1.0)
+            .min_h(0.0),
+        ),
+    )
 }
 
 /// The open dialog, or a load's progress, over a dimmed canvas.
@@ -334,7 +343,7 @@ pub fn modal(p: &Pal, s: &State) -> El {
         .child(
             card(p)
                 .w(DIALOG_W.min(viewport()[0] - 2.0 * M))
-                .padding(22.0)
+                .padding(DIALOG_PAD)
                 .gap(16.0)
                 .child(dialog)
                 .modal(which != Modal::Loading, dismiss),
@@ -476,52 +485,90 @@ fn error_lines_shown(window_h: f32) -> usize {
     ERROR_LINES.min((error_list_room(window_h) / ERROR_LINE_H) as usize)
 }
 
-/// One file of a load error: its `path:line` in full, then the reason. A reason's subject (the
-/// header before `: No such file or directory`) is cut in the middle when the line runs out of
-/// room; its message is always shown whole. The whole line is on hover.
-fn error_line(p: &Pal, line: &str) -> El {
+/// Padding inside the error panel.
+const ERROR_PAD: f32 = 10.0;
+/// Gap between an error line's location and its reason.
+const ERROR_GAP: f32 = 8.0;
+
+/// The width an error line's reason wraps at in a `window_w` window: the dialog's inner width
+/// less the panel's padding, its location and the gap after it. A point short of it on each side
+/// for the card's border, so a line never wraps more than measured.
+fn error_reason_w(window_w: f32, at: &str) -> f32 {
+    let inner = DIALOG_W.min(window_w - 2.0 * M) - 2.0 * DIALOG_PAD - 2.0 * ERROR_PAD - 2.0;
+    let at_w = if at.is_empty() {
+        0.0
+    } else {
+        rune_ui::text::measure(at, &[], MONO, None).0 + ERROR_GAP
+    };
+    (inner - at_w).max(1.0)
+}
+
+/// The height of one line of error text.
+fn error_text_line_h() -> f32 {
+    rune_ui::text::measure("x", &[], MONO, None).1
+}
+
+/// How many `ERROR_LINE_H` rows an error line takes in a `window_w` window, its reason wrapped
+/// as [`error_line`] wraps it.
+fn error_line_rows(window_w: f32, line: &str) -> usize {
     let (at, why) = project::error_row(line);
-    let (subject, message) = project::reason_parts(why);
-    let mut r = row().h(ERROR_LINE_H).gap(8.0).items_center().help(line.to_string());
+    let wrap = rune_ui::text::RichLayoutOptions::new().wrap_anywhere();
+    let h = rune_ui::text::measure_with(why, &[], MONO, Some(error_reason_w(window_w, at)), wrap).1;
+    ((h / error_text_line_h()).round() as usize).max(1)
+}
+
+/// How many of the leading lines (`rows` each) fit `room_rows`: at least one, at most `cap`.
+fn lines_that_fit(rows: &[usize], room_rows: usize, cap: usize) -> usize {
+    let mut used = 0;
+    let n = rows
+        .iter()
+        .take_while(|&&r| {
+            used += r;
+            used <= room_rows
+        })
+        .count();
+    n.clamp(1, cap.max(1)).min(rows.len())
+}
+
+/// One file of a load error: its `path:line`, then the reason, wrapped (at a space or after a
+/// `/`, inside a word only when it can't fit a line) so a long header path shows whole. `rows`
+/// rows tall, the location beside the first; the whole line is on hover.
+fn error_line(p: &Pal, line: &str, rows: usize) -> El {
+    let (at, why) = project::error_row(line);
+    let mut r = row()
+        .h(rows as f32 * ERROR_LINE_H)
+        .pt(((ERROR_LINE_H - error_text_line_h()) / 2.0).max(0.0))
+        .gap(ERROR_GAP)
+        .items_start()
+        .help(line.to_string());
     if !at.is_empty() {
         r = r.child(text(at.to_string()).font(MONO).color(p.muted).single_line());
     }
-    let cut = |s: String| text(s).font(MONO).color(p.text).truncate_middle().min_w(0.0);
-    let Some(message) = message else {
-        return r.child(cut(why.to_string()).grow(1.0));
-    };
-    // The subject carries the colon: a cut keeps both ends, and the room it leaves short of a
-    // whole glyph then falls after `:`, not before it. The message never shrinks.
-    r.child(
-        row()
-            .grow(1.0)
-            .min_w(0.0)
-            .items_center()
-            .child(cut(format!("{subject}:")).shrink())
-            .child(text(format!(" {message}")).font(MONO).color(p.text).single_line()),
-    )
+    r.child(text(why.to_string()).font(MONO).color(p.text).wrap_anywhere().grow(1.0).min_w(0.0))
 }
 
-/// A load error: its headline, then the first files with their reasons (one line each, the whole
-/// line on hover). `Show all` lists the rest in a scrolling list; `Copy diagnostics` puts the
-/// whole text on the clipboard.
+/// A load error: its headline, then the first files with their reasons (wrapped, the whole line
+/// on hover). `Show all` lists the rest in a scrolling list; `Copy diagnostics` puts the whole
+/// text on the clipboard.
 fn error_box(p: &Pal, e: &str, open: bool) -> El {
-    let window_h = viewport()[1];
-    let (head, files, more) =
-        project::error_parts(e, if open { usize::MAX } else { error_lines_shown(window_h) });
-    let total = files.len() + more;
+    let [window_w, window_h] = viewport();
+    let (head, all, _) = project::error_parts(e, usize::MAX);
+    let rows: Vec<usize> = all.iter().map(|l| error_line_rows(window_w, l)).collect();
+    let collapsed = lines_that_fit(&rows, error_lines_shown(window_h), ERROR_LINES);
+    let shown = if open { all.len() } else { collapsed };
+    let total = all.len();
     let mut c = col()
         .gap(6.0)
-        .padding(10.0)
+        .padding(ERROR_PAD)
         .radius(8.0)
         .fill(p.bad.alpha(0.12))
         .child(text(head.to_string()).font(BODY).color(p.bad).wrap());
-    if !files.is_empty() {
+    if !all.is_empty() {
         let mut list = col();
-        for line in &files {
-            list = list.child(error_line(p, line));
+        for (line, &n) in all.iter().zip(&rows).take(shown) {
+            list = list.child(error_line(p, line, n));
         }
-        let list_h = files.len() as f32 * ERROR_LINE_H;
+        let list_h = rows[..shown].iter().sum::<usize>() as f32 * ERROR_LINE_H;
         let room = error_list_room(window_h);
         c = c.child(if list_h > room {
             list.h(room)
@@ -542,17 +589,20 @@ fn error_box(p: &Pal, e: &str, open: bool) -> El {
         )
         .wrap());
     }
-    let toggle = if total > error_lines_shown(window_h) {
+    let toggle = if total > collapsed {
         let title = if open {
             "Show fewer".to_string()
         } else {
             format!("Show all {total}")
         };
+        // The panel's text colour, underlined: the accent is too faint on the error's red.
+        let link = vec![Span::new(0, title.len()).underline(p.text)];
         row()
             .h(CONTROL_H)
             .items_center()
             .cursor(Cursor::Pointer)
-            .child(text(title).font(UI_STRONG).color(p.accent))
+            .key("error-toggle")
+            .child(text(title).font(UI_STRONG).color(p.text).spans(link))
             .on_press(|s: &mut State| s.forms.error_open = !s.forms.error_open)
     } else {
         el()
@@ -662,6 +712,7 @@ mod tests {
             }],
             flags: vec![],
             modules: vec![],
+            declarations: 2,
         }
     }
 
@@ -718,23 +769,81 @@ mod tests {
         s.project = Some(empty_project());
         let mut rt = render(s);
         let tree = rt.accessibility_json().to_string();
-        assert!(tree.contains(EMPTY_PROJECT), "{tree}");
+        // It says what the project does hold, and there is nothing to filter.
+        assert!(tree.contains("2 declarations, no function bodies"), "{tree}");
         assert!(tree.contains("Open another…"));
-        assert!(!tree.contains("No matching functions"));
+        assert!(!tree.contains("0 functions") && !tree.contains("Filter functions"), "{tree}");
 
         // Its one action opens the open dialog.
         assert!(rt.accessibility_action("explorer-open-another", accesskit::Action::Click, None));
         rt.frame(2.0 / 60.0);
         assert_eq!(rt.state.modal, Some(Modal::Open));
 
-        // A filter with no match is the other empty state, not this one.
+        // A filter typed for an earlier project doesn't hide what this one holds.
         rt.update(|s, _| {
             s.modal = None;
             s.forms.filter = TextEdit::new("x");
         });
         rt.frame(3.0 / 60.0);
         let tree = rt.accessibility_json().to_string();
-        assert!(tree.contains("No matching functions"));
-        assert!(!tree.contains(EMPTY_PROJECT));
+        assert!(tree.contains("2 declarations, no function bodies"), "{tree}");
+        assert!(!tree.contains("No matching functions"));
+    }
+
+    #[test]
+    fn the_empty_note_counts_what_was_parsed() {
+        let mut p = empty_project();
+        assert_eq!(p.empty_note(), "2 declarations, no function bodies");
+        p.declarations = 1;
+        assert_eq!(p.empty_note(), "1 declaration, no function bodies");
+        p.declarations = 0;
+        assert_eq!(p.empty_note(), "Nothing declared");
+    }
+
+    #[test]
+    fn collapsed_error_lines_fill_whole_rows() {
+        // Six one-row lines fit six rows; a two-row line that would overrun waits for `Show all`.
+        assert_eq!(lines_that_fit(&[1; 9], 6, ERROR_LINES), 6);
+        assert_eq!(lines_that_fit(&[1, 1, 1, 1, 1, 2, 1, 1, 1], 6, ERROR_LINES), 5);
+        assert_eq!(lines_that_fit(&[1, 2, 1, 1, 1, 1], 6, ERROR_LINES), 5);
+        // Never more than the cap or the lines there are, and at least one even if it scrolls.
+        assert_eq!(lines_that_fit(&[1; 9], 20, ERROR_LINES), ERROR_LINES);
+        assert_eq!(lines_that_fit(&[1, 1], 6, ERROR_LINES), 2);
+        assert_eq!(lines_that_fit(&[8, 1], 6, ERROR_LINES), 1);
+        assert_eq!(lines_that_fit(&[], 6, ERROR_LINES), 0);
+    }
+
+    #[test]
+    fn a_missing_header_s_path_wraps_after_a_slash_instead_of_being_cut() {
+        // A header path with no spaces still has somewhere to break: after each `/`, so it wraps
+        // within the reason's width rather than running past it.
+        let path = "argo_absent/deeply/nested/include/directory/slirp_config.h";
+        let w = 200.0;
+        let one = error_text_line_h();
+        let (pw, ph) = rune_ui::text::measure(path, &[], MONO, Some(w));
+        assert!(pw <= w && ph > 1.5 * one, "{pw} x {ph}");
+        // It is the slashes: the same name without them has nowhere to break.
+        let flat = path.replace('/', "_");
+        assert!(rune_ui::text::measure(&flat, &[], MONO, Some(w)).0 > w);
+        // In the sample at 1024x640, the slirp line takes two rows with its path whole on them.
+        let (_, files, _) = project::error_parts(project::SAMPLE_ERROR, usize::MAX);
+        let slirp = files.iter().find(|l| l.starts_with("slirp/")).unwrap();
+        assert_eq!(error_line_rows(1024.0, slirp), 2);
+        assert_eq!(error_line_rows(1024.0, "jsemu.c: emscripten.h: No such file or directory (jsemu.c:1)"), 1);
+    }
+
+    #[test]
+    fn the_error_toggle_lists_every_line_and_back() {
+        let mut s = State::load("fixture");
+        s.modal = Some(Modal::Open);
+        s.forms.error = Some(project::SAMPLE_ERROR.into());
+        let mut rt = render(s);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains("Show all 9"), "{tree}");
+        assert!(rt.accessibility_action("error-toggle", accesskit::Action::Click, None));
+        rt.frame(2.0 / 60.0);
+        assert!(rt.state.forms.error_open);
+        let tree = rt.accessibility_json().to_string();
+        assert!(tree.contains("Show fewer"), "{tree}");
     }
 }
