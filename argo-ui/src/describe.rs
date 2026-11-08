@@ -16,8 +16,8 @@ pub struct Port {
     pub full: String,
 }
 
-/// The effect badge: filled dot (has effects), hollow dot (pure), dotted ring (unknown, or only
-/// inferred from the node's shape).
+/// The effect badge: filled dot (has effects), hollow dot (pure), ring with a `?` (unknown, or
+/// only inferred from the node's shape).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
     Effects,
@@ -155,7 +155,7 @@ fn signature(g: &Graph, n: &Node) -> String {
             let arms: Vec<_> = n.outs.iter().filter(|p| p.ty == Ty::Exec).map(|p| p.label.as_str()).collect();
             format!("switch value {{ {} }}", arms.join(", "))
         }
-        Kind::Set => format!("{} = value", n.title.trim_end_matches(" = …")),
+        Kind::Set => format!("{} = value", set_var(&n.title)),
         Kind::Local => {
             let ty = n.outs.first().map_or_else(|| "u32".to_string(), rs_of);
             match n.title.split_once(" = ") {
@@ -175,6 +175,11 @@ fn signature(g: &Graph, n: &Node) -> String {
         Kind::Region | Kind::Case => n.title.clone(),
         Kind::Type => format!("type {}", n.title),
     }
+}
+
+/// The variable an assignment's title names: `acc =` (or an older `acc = …`) → `acc`.
+fn set_var(title: &str) -> &str {
+    title.trim_end_matches('…').trim_end().trim_end_matches('=').trim_end()
 }
 
 /// Titles up to this many characters name a node as they are; longer ones are shortened.
@@ -243,10 +248,10 @@ fn endpoint(g: &Graph, node: usize, label: &str) -> (String, String) {
 }
 
 /// Endpoint text (`node.pin`, maybe `+N more` after it) cut to at most `max` characters while
-/// keeping the pin: the producer part is shortened instead, holding on to a disambiguating
-/// `(arg)` when there is room (`read_reg(rs1).value` → `read…(rs1).value` or `…(rs1).value`,
-/// else `read_reg….value`).
-/// Text without a pin, or whose pin alone doesn't fit, keeps its end (`…ng_pin_name`).
+/// keeping the pin. A producer with a disambiguating `(arg)` loses its name and keeps the
+/// argument (`read_reg(rs1).value` → `…(rs1).value`); one without, or whose argument doesn't
+/// fit, keeps its start (`read_reg….value`). Text without a pin, or whose pin alone doesn't
+/// fit, keeps its end (`…ng_pin_name`). Every cut is one `…`.
 pub fn fit_end(text: &str, max: usize) -> String {
     let n = text.chars().count();
     if n <= max {
@@ -262,15 +267,14 @@ pub fn fit_end(text: &str, max: usize) -> String {
     let Some(dot) = text.rfind('.').filter(|&d| d > 0 && !text[d..].contains(')')) else { return head_cut() };
     let (producer, pin) = text.split_at(dot);
     let pin_n = pin.chars().count();
-    // Room for at least one producer character and the ellipsis.
-    let Some(room) = max.checked_sub(pin_n + 1).filter(|r| *r >= 1) else { return head_cut() };
-    if let Some(open) = producer.rfind('(').filter(|_| producer.ends_with(')')) {
-        let (callee, arg) = producer.split_at(open);
-        let arg_n = arg.chars().count();
-        if arg_n <= room && !callee.is_empty() {
-            return format!("{}…{arg}{pin}", take(callee, room - arg_n).trim_end());
+    if let Some(open) = producer.rfind('(').filter(|&o| o > 0 && producer.ends_with(')')) {
+        let arg = &producer[open..];
+        if 1 + arg.chars().count() + pin_n <= max {
+            return format!("…{arg}{pin}");
         }
     }
+    // Room for at least one producer character and the ellipsis.
+    let Some(room) = max.checked_sub(pin_n + 1).filter(|r| *r >= 1) else { return head_cut() };
     format!("{}…{pin}", take(producer, room).trim_end())
 }
 
@@ -408,7 +412,10 @@ mod tests {
         assert_eq!(fit_end("acc.value", 16), "acc.value");
         assert_eq!(fit_end("unconnected", 16), "unconnected");
         // The producer is cut, keeping its disambiguating argument while it fits.
-        assert_eq!(fit_end("read_reg(rs1).value", 16), "read…(rs1).value");
+        // The producer's name goes; its disambiguating argument and the pin stay.
+        assert_eq!(fit_end("read_reg(rs1).value", 16), "…(rs1).value");
+        assert_eq!(fit_end("write_reg(alu).value", 19), "…(alu).value");
+        assert_eq!(fit_end("read_reg(rs1).value", 19), "read_reg(rs1).value");
         assert_eq!(fit_end("acc(normalize).acc", 16), "…(normalize).acc");
         assert_eq!(fit_end("acc(step ∘ normalize).value", 16), "acc(step….value");
         assert_eq!(fit_end("x_really_long_name.result", 14), "x_real….result");
@@ -419,9 +426,25 @@ mod tests {
         assert_eq!(fit_end("f.an_extremely_long_pin_name", 10), "…_pin_name");
         // A dot inside the producer's parentheses is not a pin.
         assert_eq!(fit_end("call(a.b, c, d, e)", 8), "…, d, e)");
+        for t in ["read_reg(rs1).value", "acc(step ∘ normalize).value", "x_really_long_name.acc +2 more", "a_long_name"] {
+            for max in 1..30 {
+                assert!(fit_end(t, max).matches('…').count() <= 1, "{t} {max}: one ellipsis at most");
+            }
+        }
         for (t, max) in [("read_reg(rs1).value", 16), ("acc(normalize).acc", 12), ("a_long_name_without_pin", 10), ("x.y", 1)] {
             assert!(fit_end(t, max).chars().count() <= max.max(1), "{t} {max}");
         }
+    }
+
+    #[test]
+    fn assignments_read_as_their_variable() {
+        assert_eq!(set_var("acc ="), "acc");
+        assert_eq!(set_var("acc = …"), "acc");
+        let s = State::load("fixture");
+        let set = s.view.nodes.iter().position(|n| n.kind == Kind::Set).unwrap();
+        assert_eq!(s.view.nodes[set].title, "acc =");
+        assert_eq!(card(&s.view, set).signature, "acc = value");
+        assert_eq!(short(&s.view.nodes[set]), "acc");
     }
 
     #[test]

@@ -104,7 +104,7 @@ pub fn scene(name: &str) -> Graph {
 }
 
 /// Headers say what construct a node is, in C terms: `if (cond)` with the condition's source,
-/// `switch (opcode)`, `for (…)`, `return`, `x = …`.
+/// `switch (opcode)`, `for (…)`, `return`, `x =` (the value arrives on its pin).
 fn code_headers(g: &mut Graph) {
     let source = |g: &Graph, node: usize, pin: usize| {
         g.wires.iter().find(|w| w.to == (node, pin)).map(|w| g.nodes[w.from.0].title.clone())
@@ -125,7 +125,7 @@ fn code_headers(g: &mut Graph) {
             },
             Kind::GroupOut if n.title == "Return" => "return".into(),
             Kind::Set => match n.title.strip_prefix("Set ") {
-                Some(var) => format!("{var} = …"),
+                Some(var) => format!("{var} ="),
                 None => continue,
             },
             Kind::Loop if n.title == "for i in 0..n" => "for (i = 0; i < n; i++)".into(),
