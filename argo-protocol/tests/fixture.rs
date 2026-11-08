@@ -118,7 +118,7 @@ fn snapshot_round_trips_through_json() {
 fn golden_snapshot_json() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../fixtures/compute/snapshot.json"
+        "/../fixtures/compute/snapshot.json"
     );
     let json = serde_json::to_string_pretty(&fixture::snapshot()).unwrap() + "\n";
     if std::env::var_os("ARGO_BLESS").is_some() {

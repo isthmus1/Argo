@@ -1,0 +1,30 @@
+[package]
+name = "Argo"
+version = "0.1.0"
+edition = "2024"
+
+# The parser's library and binary keep the `main` crate name its tests and CLI
+# were written against; the package was renamed to `Argo` afterwards.
+[lib]
+name = "main"
+path = "src/lib.rs"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+# The C front end is rucc's, pinned exactly. rucc's AST and parser crates are
+# tier 3: their Rust API is documented as changing without a major version bump,
+# so a caret range would break this crate on a patch release. The graph records
+# are the stable thing here; the parser is an implementation detail behind them.
+[dependencies]
+argo-protocol = { path = "../argo-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+rucc-ast = "=0.30.15"
+rucc-base = "=0.30.15"
+rucc-diag = "=0.30.15"
+rucc-lex = "=0.30.15"
+rucc-parse = "=0.30.15"
+rucc-session = "=0.30.15"
+rucc-target = "=0.30.15"

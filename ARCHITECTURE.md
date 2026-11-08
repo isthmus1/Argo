@@ -75,15 +75,15 @@ Current implementation split: this workstream takes **W, the worker client**; th
 | **W — Worker client** | Claimed repository import/decomposition, task discovery proposals, model/tool loop, graph/ABI generation, mixed linking, harness invocation, bounded modernization and export | Authoritative global scheduling/acceptance, duplicate baseline/capture/comparison machinery, GUI state | Source → C graph → mixed graph → Rust checkpoint → tested modernization using a fake or real server adapter |
 | **U — GUI control-plane client** | Blueprint-like scene/hit testing, hierarchy/navigation, source/plan/evidence inspectors, subscription projection, controls, captures and reconnect UX | Repository ingestion/parsing, agent prompts, compilation, acceptance decisions | Faithful seeded scene plus real live deltas, controls, counterexample and boot-evidence inspection |
 
-Proposed layout (not created yet):
+Workspace layout: one top-level directory per crate (no `crates/` folder). Created so far: `argo/` (the C parser, syntax graph, protocol export and project preprocessing; package `Argo`, library `main`), `argo-protocol/`, `argo-ui/` and `iterator/`. The rest is proposed:
 
-- `crates/argo-protocol/`: shared Rust DTOs, IDs, schema version, fixture messages. Part S maintains it; both clients review changes. This is a shared boundary, not a fourth product subsystem. **Created:** graph structure (nodes, pins, edges, layouts, provenance) kept apart from live status (claims, candidates, reports), freeze validation, canonical hash, a level view for the GUI, and the §5.6 fixture with a live transcript. Its crate docs own the pin-key conventions.
-- `crates/argo-server/`: Rust SpacetimeDB module and server-side transition rules.
-- `crates/argo-harness/`: S-owned native support library/runner for reproducible baselines, layout assertions, test execution, traces and captures. W invokes it locally; it is not a fourth deployed subsystem.
-- `crates/argo-worker/`: Rust native worker, transport/model adapters, claimed task execution, generation/linking, harness invocation, modernization and export.
-- `crates/blocks/`: Clang-free lossless source inventory specified in [Appendix A](#appendix-a-source-inventory-block-generator-specification). W integrates its records into the shared protocol; this is not a separate authoritative job system.
-- `crates/argo-graphgen/`: W-owned configured AST, `Template` registry, interface derivation and outlining (sections 5.2–5.6).
-- `crates/argo-ui/`: selected Rust UI toolkit, graph scene, inspectors, subscription adapter.
+- `argo-protocol/`: shared Rust DTOs, IDs, schema version, fixture messages. Part S maintains it; both clients review changes. This is a shared boundary, not a fourth product subsystem. **Created:** graph structure (nodes, pins, edges, layouts, provenance) kept apart from live status (claims, candidates, reports), freeze validation, canonical hash, a level view for the GUI, and the §5.6 fixture with a live transcript. Its crate docs own the pin-key conventions.
+- `argo-server/`: Rust SpacetimeDB module and server-side transition rules.
+- `argo-harness/`: S-owned native support library/runner for reproducible baselines, layout assertions, test execution, traces and captures. W invokes it locally; it is not a fourth deployed subsystem.
+- `argo-worker/`: Rust native worker, transport/model adapters, claimed task execution, generation/linking, harness invocation, modernization and export.
+- `blocks/`: Clang-free lossless source inventory specified in [Appendix A](#appendix-a-source-inventory-block-generator-specification). W integrates its records into the shared protocol; this is not a separate authoritative job system.
+- `argo-graphgen/`: W-owned configured AST, `Template` registry, interface derivation and outlining (sections 5.2–5.6).
+- `argo-ui/`: selected Rust UI toolkit, graph scene, inspectors, subscription adapter.
 - `fixtures/`: small C inputs, fixed test domain, expected graph/protocol snapshots, and deliberately failing candidates.
 
 Keep toolkit-specific types out of protocol/domain records. Freeze protocol v1 before independent implementations commit to incompatible meanings. W can begin against a fake server sink and shared transcript without waiting for a completed backend; the protocol and S-owned harness invocation/result contract are the early prerequisites.
@@ -180,8 +180,8 @@ This section owns how C source becomes graph nodes, and how those nodes move fro
 
 | Step | Stage | Runs in | Output |
 | --- | --- | --- | --- |
-| 0 | Source inventory | W (`crates/blocks`) | Lossless files, segments, top-level blocks, template instantiations and edit points (Appendix A) |
-| 1 | Parse | W (`crates/argo-graphgen`) | Configured C AST per translation unit, mapped back to block ranges (5.2) |
+| 0 | Source inventory | W (`blocks`) | Lossless files, segments, top-level blocks, template instantiations and edit points (Appendix A) |
+| 1 | Parse | W (`argo-graphgen`) | Configured C AST per translation unit, mapped back to block ranges (5.2) |
 | 2 | Template matching | W | One node per recognized construct, recursively; anything unrecognized becomes an opaque node (5.3) |
 | 3 | Interface derivation | W | Pins: from the signature for boundary nodes, from live-in/live-out/exit analysis for region nodes (5.4) |
 | 4 | Hierarchical graph | W publishes, S freezes | Graph revision with a containment hierarchy plus call, data, type, state and control-exit edges (5.5) |
@@ -196,8 +196,8 @@ Steps 0–4 build the graph once per source snapshot. Steps 5–7 repeat until t
 
 Two layers with separate jobs:
 
-- **Lossless inventory** (`crates/blocks`, Appendix A): a Clang-free lexical scanner over the unpreprocessed text. It owns exact bytes, top-level blocks, template and fragment file roles, instantiations, function-head edit points and byte-exact rebuild. Every source edit Argo makes, including outlining (5.6), lands as a segment replacement here.
-- **Configured AST** (`crates/argo-graphgen`): parses each configured translation unit (one `.c` file plus its defines from the manifest in A.5) into a statement-level AST with resolved declarations and types. Every AST node maps to a block and a range within it. Code produced by a macro expansion maps to its macro call site. Code inside a template or fragment file maps to that file plus the instantiation that produced it.
+- **Lossless inventory** (`blocks`, Appendix A): a Clang-free lexical scanner over the unpreprocessed text. It owns exact bytes, top-level blocks, template and fragment file roles, instantiations, function-head edit points and byte-exact rebuild. Every source edit Argo makes, including outlining (5.6), lands as a segment replacement here.
+- **Configured AST** (`argo-graphgen`): parses each configured translation unit (one `.c` file plus its defines from the manifest in A.5) into a statement-level AST with resolved declarations and types. Every AST node maps to a block and a range within it. Code produced by a macro expansion maps to its macro call site. Code inside a template or fragment file maps to that file plus the instantiation that produced it.
 
 Neither layer is enough alone. The inventory can't see inside function bodies, and it can't tell a local from a global or a macro constant. The AST can't drive edits, because preprocessing loses the exact source text.
 
@@ -521,7 +521,7 @@ Current implementation: `src/split.rs` (`swapctl split`), which covers sections 
 - **Identity:** a block ID (A.6.10) is unique within one source snapshot. Persistent node identity is project + snapshot + configured instance + block ID, with provenance carried across edits (section 4).
 - **Storage:** the tables in A.7 are the storage form of the `SourceFile`, `SourceBlock` and `ConfiguredInstance` records in section 4, not a separate schema.
 - **Large functions:** question 2 in A.12 is answered by the template layer (5.3–5.6). Large functions are split by statement templates with derived interfaces and control exits, not by cutting text at `case` labels.
-- **Clang:** the no-Clang rule applies to `crates/blocks`. The configured AST (5.2) is a separate stage in the worker.
+- **Clang:** the no-Clang rule applies to `blocks`. The configured AST (5.2) is a separate stage in the worker.
 - **References:** lexical references (A.6.9) are context for models and the UI. Node pins and edges come from the configured AST's resolved declarations.
 
 ### A.1 Purpose
@@ -864,7 +864,7 @@ Each diagnostic records its code, file, range, block ID if any, and a message.
 ### A.9 Code layout
 
 ```text
-crates/blocks/src/
+blocks/src/
   lib.rs           # generate(root, manifest) -> Project
   model.rs         # section 4
   lex.rs           # 6.2 (from split.rs)
@@ -923,7 +923,7 @@ Variadic functions are skipped and counted. Files are processed in batches, so a
 
 | # | Work | Done when |
 |---|---|---|
-| BM1 | Move `split.rs` into `crates/blocks` with the section A.4 model, IDs, diagnostics and condition tracking | Current tests pass, BT3 criteria 1 and 6 pass |
+| BM1 | Move `split.rs` into `blocks` with the section A.4 model, IDs, diagnostics and condition tracking | Current tests pass, BT3 criteria 1 and 6 pass |
 | BM2 | Macro table, self-terminating macro calls, paste-macro and alias names | BT3 criteria 2 and 5 pass |
 | BM3 | File roles and instantiations | BT3 criteria 3 and 4 pass |
 | BM4 | Function heads and the identity swap | BT5 passes |

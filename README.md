@@ -74,26 +74,27 @@ The golden target is ambitious; an incomplete golden gate must be reported as in
 
 ## Parser and graph prototype
 
-Run `cargo run -- tests/fixture.c` (or supply another C file). The CLI prints the
+The parser lives in `argo/` (package `Argo`, library and binary `main`). Run
+`cargo run -p Argo -- argo/tests/fixture.c` (or supply another C file). The CLI prints the
 owned syntax tree, a template-match summary, and rucc's C pretty-print. Fatal
 lexer, conversion, or parser errors exit unsuccessfully without emitting a tree;
 diagnostics go to stderr.
 
-- `src/lexer.rs`: reusable `Lexer`, defaulting to C11 + GNU on x86_64 Linux.
-- `src/parser.rs`: reusable `Parser` and an owned `ParseResult`.
-- `src/ast.rs`, `src/c_node.rs`: `Ast` owns a forest of `CNode` values, each with a
+- `argo/src/lexer.rs`: reusable `Lexer`, defaulting to C11 + GNU on x86_64 Linux.
+- `argo/src/parser.rs`: reusable `Parser` and an owned `ParseResult`.
+- `argo/src/ast.rs`, `argo/src/c_node.rs`: `Ast` owns a forest of `CNode` values, each with a
   `CNodeType`, name, original-source byte span, and owned children. These are
   syntax nodes, **not** UI or executable graph nodes.
-- `src/lowering/`: converts rucc arenas into that tree, including declarator
+- `argo/src/lowering/`: converts rucc arenas into that tree, including declarator
   shapes, expressions, initializers, and control statements. Unsupported forms
   remain source-located opaque nodes rather than guessed structures. Some
   synthesized type/initializer nodes use enclosing declaration spans.
-- `src/templates/`: one template per supported keyword/construct, all re-exported
+- `argo/src/templates/`: one template per supported keyword/construct, all re-exported
   from the module. `templates::all()` supplies the ordered built-ins.
-- `src/c_node_role.rs`: explicit child roles distinguish loop init/condition/step,
+- `argo/src/c_node_role.rs`: explicit child roles distinguish loop init/condition/step,
   function signatures, branch arms, switch selectors, and case values. Omitted
   clauses never shift positional meanings.
-- `src/graph/`: independent `Graph`, `GraphNode`, and `GraphEdge` records, expansion
+- `argo/src/graph/`: independent `Graph`, `GraphNode`, and `GraphEdge` records, expansion
   contracts, recursive driver, source-range validation, and JSON serialization.
 
 `Ast::match_templates(Vec<impl Template>)` visits the tree in preorder, choosing
@@ -103,18 +104,18 @@ template list. The built-ins end with an opaque fallback; caller-supplied lists
 may leave nodes unmatched without removing them from the AST.
 
 Source modules stay below 100 lines; simple keyword recognizers are intentionally
-shorter. Focused checks: `cargo fmt --all --check`, `cargo test --locked --lib
---tests`, and `cargo clippy --locked --all-targets -- -D warnings`.
+shorter. Focused checks: `cargo fmt -p Argo --check`, `cargo test --locked -p Argo
+--lib --tests`, and `cargo clippy --locked -p Argo --all-targets -- -D warnings`.
 
 ### Open a whole C project
 
 ```sh
 # A git reference (cloned into a temporary folder) or a local directory:
 cargo run --release -p argo-ui -- https://example.com/project.git#v1.0 -DNAME=value
-cargo run --release -- --protocol-json ~/src/project > target/project.json
+cargo run --release -p Argo -- --protocol-json ~/src/project > target/project.json
 ```
 
-The parser reads plain C, so `src/project/` runs the system preprocessor (`cc -E`, or
+The parser reads plain C, so `argo/src/project/` runs the system preprocessor (`cc -E`, or
 `$CC`) first: includes are pasted in and macros expanded. Each `.c` file is checked on
 its own; the ones that preprocess and parse are combined into one translation unit, and
 line markers put every function back under its original file. Files that fail (missing
@@ -125,7 +126,7 @@ then from the command line or the app's Open dialog (Ctrl+O).
 ### Export a syntax graph
 
 ```sh
-cargo run --locked -- --graph-json tests/fixture.c > target/fixture.graph.json
+cargo run --locked -p Argo -- --graph-json argo/tests/fixture.c > target/fixture.graph.json
 ```
 
 Graph mode writes only JSON to stdout; frontend diagnostics stay on stderr and
@@ -154,7 +155,7 @@ JSON schema version 1 declares `analysis: "syntax_only"`. It retains the complet
 original source as an array of unsigned bytes (including non-UTF-8 bytes), with
 half-open byte ranges on nodes, header parts, and lexical exits. IDs are stable
 for repeated expansion of the same input, not persistent identities across edits.
-`tests/fixtures/regions.c` and its hierarchy snapshot exercise the region model.
+`argo/tests/fixtures/regions.c` and its hierarchy snapshot exercise the region model.
 
 This graph is **provenance/navigation, not an execution schedule or a safe
 replacement boundary**. Only containment edges exist. Preprocessing, configured

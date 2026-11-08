@@ -16,7 +16,7 @@ fn export(path: &str) -> argo_protocol::Graph {
 #[test]
 fn exported_graphs_pass_freeze_checks() {
     for path in [
-        "fixtures/compute/compute.c",
+        "../fixtures/compute/compute.c",
         "tests/fixture.c",
         "tests/fixtures/regions.c",
     ] {
@@ -112,7 +112,7 @@ fn exits_escape_to_their_targets() {
 
 #[test]
 fn syntax_only_export_claims_no_data_flow() {
-    let graph = export("fixtures/compute/compute.c");
+    let graph = export("../fixtures/compute/compute.c");
     assert!(
         graph
             .edges

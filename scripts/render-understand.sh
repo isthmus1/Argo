@@ -9,8 +9,8 @@ zoom=${ZOOM:-1.0}
 mkdir -p "$out"
 cargo build -q -p Argo -p argo-ui --release
 ui=target/release/argo-ui
-target/release/main --protocol-json tests/fixtures/regions.c > "$out/walk.json"
-target/release/main --protocol-json tests/fixture.c > "$out/ram.json"
+target/release/main --protocol-json argo/tests/fixtures/regions.c > "$out/walk.json"
+target/release/main --protocol-json argo/tests/fixture.c > "$out/ram.json"
 
 # tiles NAME SCENE [ENV...]: capture every tile of one graph.
 tiles() {

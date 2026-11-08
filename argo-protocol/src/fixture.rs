@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-pub const SOURCE: &str = include_str!("../../../fixtures/compute/compute.c");
+pub const SOURCE: &str = include_str!("../../fixtures/compute/compute.c");
 pub const PATH: &str = "fixtures/compute/compute.c";
 const FILE: FileId = FileId(1);
 
