@@ -65,13 +65,19 @@ pub fn layout(g: &Graph) -> Placed {
     layout_lanes(g).0
 }
 
-/// [`layout`], with the lanes its long edges reserve and the units' rects, both in the outer
-/// layered layout's space before rows wrap (see [`layered_lanes`]).
-fn layout_lanes(g: &Graph) -> (Placed, Vec<[f32; 4]>, Vec<[f32; 4]>) {
+/// The outer layout's input: every free node and every expanded group as one unit, and the
+/// wires between units as weighted edges.
+struct Outer {
+    size: Vec<[f32; 2]>,
+    units: Vec<Unit>,
+    unit_of: Vec<usize>,
+    edges: Vec<Edge>,
+    pure: Vec<bool>,
+}
+
+fn outer(g: &Graph) -> Outer {
     let n = g.nodes.len();
     let size: Vec<[f32; 2]> = g.nodes.iter().map(drawn_size).collect();
-    let mut pos = vec![[0.0, 0.0]; n];
-    let mut frames = Vec::new();
 
     // Lay out each group's members on their own.
     let mut units: Vec<Unit> = Vec::new();
@@ -96,7 +102,6 @@ fn layout_lanes(g: &Graph) -> (Placed, Vec<[f32; 4]>, Vec<[f32; 4]>) {
         }
     }
 
-    // Outer layout over units.
     let mut offset_in_unit = vec![[0.0, 0.0]; n];
     for u in &units {
         for &(m, o) in &u.members {
@@ -115,40 +120,126 @@ fn layout_lanes(g: &Graph) -> (Placed, Vec<[f32; 4]>, Vec<[f32; 4]>) {
         let nd = &g.nodes[m];
         !nd.ins.iter().chain(&nd.outs).any(|p| p.ty == Ty::Exec)
     })).collect();
-    let sizes: Vec<[f32; 2]> = units.iter().map(|u| u.size).collect();
-    let (upos, _, _, lanes) = layered_lanes(&sizes, &edges, &pure);
-    let unit_rects: Vec<[f32; 4]> = upos.iter().zip(&sizes).map(|(p, s)| [p[0], p[1], s[0], s[1]]).collect();
-    let (upos, row_gaps) = wrap_rows(upos, &sizes, &edges, &pure);
+    Outer { size, units, unit_of, edges, pure }
+}
 
-    for (ui, u) in units.iter().enumerate() {
+/// Everything's extent, given each unit's position and size.
+fn bounds(upos: &[[f32; 2]], sizes: &[[f32; 2]]) -> [f32; 4] {
+    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    for (p, s) in upos.iter().zip(sizes) {
+        b = [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0] + s[0]), b[3].max(p[1] + s[1])];
+    }
+    [b[0], b[1], b[2] - b[0], b[3] - b[1]]
+}
+
+/// [`layout`], with the lanes its long edges reserve and the units' rects, both in the outer
+/// layered layout's space before rows wrap (see [`layered_lanes`]). A view with collapsed groups
+/// is laid out [`in_place`] (and reports no lanes).
+fn layout_lanes(g: &Graph) -> (Placed, Vec<[f32; 4]>, Vec<[f32; 4]>) {
+    if let Some(p) = g.expanded.as_deref().and_then(|e| in_place(g, e)) {
+        return (p, vec![], vec![]);
+    }
+    let n = g.nodes.len();
+    let o = outer(g);
+    let sizes: Vec<[f32; 2]> = o.units.iter().map(|u| u.size).collect();
+    let (upos, _, _, lanes) = layered_lanes(&sizes, &o.edges, &o.pure);
+    let unit_rects: Vec<[f32; 4]> = upos.iter().zip(&sizes).map(|(p, s)| [p[0], p[1], s[0], s[1]]).collect();
+    let (upos, row_gaps) = wrap_rows(upos, &sizes, &o.edges, &o.pure, None);
+
+    let mut pos = vec![[0.0, 0.0]; n];
+    for (ui, u) in o.units.iter().enumerate() {
         let [ux, uy] = upos[ui];
         for &(m, [ox, oy]) in &u.members {
             pos[m] = [ux + ox, uy + oy];
         }
     }
-    for gi in 0..g.groups.len() {
-        let Some(first) = (0..n).find(|&i| g.nodes[i].group == Some(gi)) else {
-            frames.push([0.0; 4]);
-            continue;
-        };
-        let ui = unit_of[first];
-        frames.push([upos[ui][0], upos[ui][1], units[ui].size[0], units[ui].size[1]]);
-    }
+    let frames = (0..g.groups.len()).map(|gi| match (0..n).find(|&i| g.nodes[i].group == Some(gi)) {
+        Some(first) => {
+            let ui = o.unit_of[first];
+            [upos[ui][0], upos[ui][1], sizes[ui][0], sizes[ui][1]]
+        }
+        None => [0.0; 4],
+    }).collect();
+    (Placed { pos, size: o.size, frames, bounds: bounds(&upos, &sizes), row_gaps }, lanes, unit_rects)
+}
 
-    let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for (ui, u) in units.iter().enumerate() {
-        b[0] = b[0].min(upos[ui][0]);
-        b[1] = b[1].min(upos[ui][1]);
-        b[2] = b[2].max(upos[ui][0] + u.size[0]);
-        b[3] = b[3].max(upos[ui][1] + u.size[1]);
+/// How far a collapsed group's stacked plates reach past its node (see `graph::node`).
+const STACK: f32 = 12.0;
+
+/// The layout of `view`, which collapses some groups of `expanded`, as a view change rather
+/// than a new layout: `expanded` is laid out, each collapsed group's node takes its frame's
+/// place, and columns only narrow to fit, so nothing else changes row or column and the graph
+/// wraps no more than `expanded` does. `None` if `view` is not a collapse of `expanded`.
+fn in_place(view: &Graph, expanded: &Graph) -> Option<Placed> {
+    let e = expanded;
+    let folded: Vec<bool> = (0..e.groups.len())
+        .map(|gi| e.nodes.iter().any(|n| n.group == Some(gi)) && !view.nodes.iter().any(|n| n.group == Some(gi)))
+        .collect();
+    // Each expanded node's view node, numbered as `Graph::collapse` numbers them: in order, a
+    // collapsed group's node where its first member was.
+    let mut vi_of = vec![0; e.nodes.len()];
+    let mut group_vi: Vec<Option<usize>> = vec![None; e.groups.len()];
+    let mut next = 0;
+    for (i, nd) in e.nodes.iter().enumerate() {
+        let fresh = next;
+        vi_of[i] = match nd.group {
+            Some(gi) if folded[gi] => *group_vi[gi].get_or_insert(fresh),
+            _ => fresh,
+        };
+        if vi_of[i] == fresh {
+            next += 1;
+        }
     }
-    (Placed { pos, size, frames, bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], row_gaps }, lanes, unit_rects)
+    if next != view.nodes.len() || group_vi.iter().flatten().any(|&v| view.nodes[v].kind != Kind::Group) {
+        return None;
+    }
+    let o = outer(e);
+    let open: Vec<[f32; 2]> = o.units.iter().map(|u| u.size).collect();
+    let (upos, _, _, _) = layered_lanes(&open, &o.edges, &o.pure);
+    let rows = wrap_rows(upos.clone(), &open, &o.edges, &o.pure, None).1.len() + 1;
+
+    // Each collapsed group's frame shrinks to its node, stacked plates included.
+    let mut sizes = open.clone();
+    for (gi, v) in group_vi.iter().enumerate() {
+        let (Some(v), Some(first)) = (*v, e.nodes.iter().position(|n| n.group == Some(gi))) else { continue };
+        let [w, h] = drawn_size(&view.nodes[v]);
+        sizes[o.unit_of[first]] = [w + STACK, h + STACK];
+    }
+    // Columns narrow to their widest unit now; every later column shifts left by as much.
+    let mut cols: Vec<f32> = upos.iter().map(|p| p[0]).collect();
+    cols.sort_by(f32::total_cmp);
+    cols.dedup();
+    let widest = |ss: &[[f32; 2]], x: f32| (0..ss.len()).filter(|&u| upos[u][0] == x).map(|u| ss[u][0]).fold(0.0, f32::max);
+    let mut shift = vec![0.0f32; cols.len()];
+    for k in 1..cols.len() {
+        shift[k] = shift[k - 1] + widest(&open, cols[k - 1]) - widest(&sizes, cols[k - 1]);
+    }
+    let col = |x: f32| cols.iter().position(|&c| c == x).expect("a column");
+    let upos: Vec<[f32; 2]> = upos.iter().map(|p| [p[0] - shift[col(p[0])], p[1]]).collect();
+    let (upos, row_gaps) = wrap_rows(upos, &sizes, &o.edges, &o.pure, Some(rows));
+
+    let mut pos = vec![[0.0, 0.0]; view.nodes.len()];
+    for (ui, u) in o.units.iter().enumerate() {
+        for &(m, [ox, oy]) in &u.members {
+            let member = e.nodes[m].group.is_some_and(|gi| folded[gi]);
+            pos[vi_of[m]] = if member { upos[ui] } else { [upos[ui][0] + ox, upos[ui][1] + oy] };
+        }
+    }
+    let frames = (0..view.groups.len()).map(|gi| match e.nodes.iter().position(|n| n.group == Some(gi)) {
+        Some(first) if !folded[gi] => {
+            let ui = o.unit_of[first];
+            [upos[ui][0], upos[ui][1], sizes[ui][0], sizes[ui][1]]
+        }
+        _ => [0.0; 4],
+    }).collect();
+    let size = view.nodes.iter().map(drawn_size).collect();
+    Some(Placed { pos, size, frames, bounds: bounds(&upos, &sizes), row_gaps })
 }
 
 /// A long left-to-right chain shrinks to unreadable when framed. Cut it into rows at column
 /// boundaries so the whole graph keeps roughly the canvas's shape, reading order intact: each row
-/// continues where the previous one ended, like lines of text.
-fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool]) -> (Vec<[f32; 2]>, Vec<f32>) {
+/// continues where the previous one ended, like lines of text. At most `max_rows`, if given.
+fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool], max_rows: Option<usize>) -> (Vec<[f32; 2]>, Vec<f32>) {
     if pos.is_empty() {
         return (pos, vec![]);
     }
@@ -157,7 +248,7 @@ fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge], pure: &
     let y0 = pos.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
     let y1 = pos.iter().zip(sizes).map(|(p, s)| p[1] + s[1]).fold(f32::MIN, f32::max);
     let (w, h) = (x1 - x0, (y1 - y0).max(1.0));
-    let rows = ((w / (h * VIEW_ASPECT)).sqrt().round() as usize).max(1);
+    let rows = ((w / (h * VIEW_ASPECT)).sqrt().round() as usize).clamp(1, max_rows.unwrap_or(usize::MAX).max(1));
     if rows == 1 {
         return (pos, vec![]);
     }
@@ -844,6 +935,43 @@ mod tests {
             let between = (0..g.nodes.len()).filter(|&j| row(j) == row(lp) && pl.pos[j][0] > pl.pos[i][0] && pl.pos[j][0] < pl.pos[lp][0]).count();
             assert_eq!(between, 0, "{t}: the loop is the next column");
             assert_eq!(row(i), row(lp), "{t} is in the loop's row");
+        }
+    }
+
+    #[test]
+    fn collapsing_a_group_never_wraps_the_graph_into_a_new_row() {
+        let g = with_getters(crate::scenes::scene("fixture"));
+        let gi = g.groups.iter().position(|grp| grp.title == "step ∘ normalize").expect("the fixture's group");
+        let mut collapsed = vec![false; g.groups.len()];
+        let open = layout(&g.collapse(&collapsed).0);
+        collapsed[gi] = true;
+        let view = g.collapse(&collapsed).0;
+        let shut = layout(&view);
+        assert_eq!(shut.row_gaps.len(), open.row_gaps.len());
+        // `report` stays level with the loop rather than starting a row under it.
+        let at = |t: &str| shut.pos[view.nodes.iter().position(|n| n.title == t).unwrap_or_else(|| panic!("{t}"))];
+        let lp = view.nodes.iter().position(|n| n.kind == Kind::Loop).expect("the loop");
+        assert!(at("report")[1] < shut.pos[lp][1] + shut.size[lp][1], "report wrapped under the loop");
+    }
+
+    #[test]
+    fn a_collapsed_group_takes_its_frames_place_and_nothing_else_moves_but_left() {
+        for (scene, title) in [("fixture", "step ∘ normalize"), ("interp", "alu")] {
+            let g = with_getters(crate::scenes::scene(scene));
+            let gi = g.groups.iter().position(|grp| grp.title == title).expect("the group");
+            let mut collapsed = vec![false; g.groups.len()];
+            let open = layout(&g.collapse(&collapsed).0);
+            collapsed[gi] = true;
+            let (view, origin) = g.collapse(&collapsed);
+            let shut = layout(&view);
+            for (v, o) in origin.iter().enumerate() {
+                let (was, now) = match *o {
+                    model::Origin::Node(i) => (open.pos[i], shut.pos[v]),
+                    model::Origin::Group(_) => ([open.frames[gi][0], open.frames[gi][1]], shut.pos[v]),
+                };
+                // Same height; columns only close up.
+                assert!((was[1] - now[1]).abs() < 1e-3 && now[0] <= was[0] + 1e-3, "{scene}: {} moved {was:?} -> {now:?}", view.nodes[v].title);
+            }
         }
     }
 

@@ -211,6 +211,9 @@ pub struct Graph {
     pub wires: Vec<Wire>,
     pub groups: Vec<Group>,
     pub selected_group: Option<usize>,
+    /// For a view with collapsed groups: the graph it was projected from (all groups expanded),
+    /// so layout can keep that graph's row wrapping. `None` for semantic graphs.
+    pub expanded: Option<Box<Graph>>,
 }
 
 impl Graph {
@@ -219,7 +222,9 @@ impl Graph {
     pub fn collapse(&self, collapsed: &[bool]) -> (Graph, Vec<Origin>) {
         let n = self.nodes.len();
         let mut map: Vec<Option<usize>> = vec![None; n];
-        let mut out = Graph { crumbs: self.crumbs.clone(), nodes: vec![], wires: vec![], groups: self.groups.clone(), selected_group: self.selected_group };
+        let folds = self.nodes.iter().any(|n| n.group.is_some_and(|g| collapsed.get(g).copied().unwrap_or(false)));
+        let expanded = folds.then(|| Box::new(Graph { expanded: None, ..self.clone() }));
+        let mut out = Graph { crumbs: self.crumbs.clone(), nodes: vec![], wires: vec![], groups: self.groups.clone(), selected_group: self.selected_group, expanded };
         // view index -> original node or collapsed group
         let mut origin = vec![];
         let mut group_node = vec![None; self.groups.len()];
@@ -279,7 +284,11 @@ impl Graph {
             } else {
                 (b, w.to.1)
             };
-            out.wires.push(Wire { from, to, back: w.back });
+            // Several members reading one value share a pin, and a member's value read outside
+            // shares one too: draw that view wire once, however many semantic wires it stands for.
+            if !out.wires.iter().any(|v| v.from == from && v.to == to) {
+                out.wires.push(Wire { from, to, back: w.back });
+            }
         }
         // Exec pins first on collapsed nodes, keeping wire indices consistent.
         for (vi, node) in out.nodes.iter_mut().enumerate() {
@@ -310,6 +319,8 @@ pub const ROW: f32 = 22.0;
 pub const BODY_PAD: f32 = 4.0;
 /// The expand/collapse button in a group's node header or frame title.
 pub const GROUP_BUTTON: f32 = 18.0;
+/// That button as drawn (and hit-tested) at rest: a header budgets this much room for it.
+pub const GROUP_HIT: f32 = 22.0;
 
 /// Body rows as (output index, input index). A leading exec input and exec output share the
 /// first row (UE's exec-on-top); remaining rows follow Blender: outputs, then inputs.
@@ -343,7 +354,7 @@ pub fn size(n: &Node) -> [f32; 2] {
         Lang::C => 16.0 + 7.0,
         Lang::Rust => 26.0 + 7.0,
     };
-    let count = if n.kind == Kind::Group { 34.0 + 7.0 + GROUP_BUTTON + 7.0 } else { 0.0 };
+    let count = if n.kind == Kind::Group { 34.0 + 7.0 + GROUP_HIT + 7.0 } else { 0.0 };
     // Code headers are monospace (wider per character) — see `graph::header_font`.
     let per = if matches!(n.kind, Kind::GroupIn | Kind::GroupOut) { 6.9 } else { 7.7 };
     let title = 10.0 + 16.0 + 7.0 + text_w(&n.title, per) + chip + count + 10.0;
@@ -369,4 +380,28 @@ pub fn socket_local(n: &Node, w: f32, output: bool, idx: usize) -> [f32; 2] {
         .position(|&(o, i)| if output { o == Some(idx) } else { i == Some(idx) })
         .expect("pin is laid out");
     [if output { w } else { 0.0 }, HEADER + BODY_PAD + row as f32 * ROW + ROW / 2.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_collapsed_group_draws_one_wire_per_pin_pair() {
+        let g = crate::layout::with_getters(crate::scenes::scene("interp"));
+        let mut collapsed = vec![false; g.groups.len()];
+        collapsed[0] = true;
+        let view = g.collapse(&collapsed).0;
+        let mut seen = std::collections::HashSet::new();
+        for w in &view.wires {
+            assert!(seen.insert((w.from, w.to)), "duplicate view wire {:?} -> {:?}", w.from, w.to);
+        }
+        // The collapsed node still has one input per external value its members read, each wired.
+        let gi = view.nodes.iter().position(|n| n.kind == Kind::Group).expect("collapsed node");
+        let fed: std::collections::HashSet<usize> = view.wires.iter().filter(|w| w.to.0 == gi).map(|w| w.to.1).collect();
+        assert_eq!(fed.len(), view.nodes[gi].ins.len());
+        // The semantic graph is untouched: expanded again, every wire is back.
+        assert_eq!(g.collapse(&vec![false; g.groups.len()]).0.wires.len(), g.wires.len());
+        assert!(view.expanded.as_ref().is_some_and(|e| e.nodes.len() == g.nodes.len()));
+    }
 }

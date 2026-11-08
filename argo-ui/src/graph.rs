@@ -177,11 +177,18 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
     // Trailing controls sit in the frame's corner: equal top and right insets, concentric radii;
     // an evidence badge on that corner pushes the button clear of it.
     let pr = FRAME_CHIP_INSET + if f.evidence == Evidence::None { 0.0 } else { BADGE_CLEAR };
-    let title = row().h(FRAME_TITLE_H).w(w).pl(14.0).pr(pr).gap(8.0).items_center()
+    // The title itself, behind an open chevron, is the frame's toggle too (a view change, like
+    // the button): a click there collapses the frame to its node.
+    let toggle = row().h(FRAME_TITLE_H).gap(8.0).items_center().grow(1.0).min_w(0.0).cursor(Cursor::Pointer)
+        .child(canvas(chevron(p.frame_text.alpha(0.8))).size(CHEVRON, CHEVRON))
         .child(text("▣").font(TextStyle::new(12.0, 650.0)).color(p.frame_text.alpha(0.7)))
         .child(text(f.title.clone()).font(TextStyle::new(13.0, 650.0)).color(p.frame_text).single_line().truncate().grow(1.0).min_w(0.0))
+        .help("Collapse to node")
+        .on_press(move |s: &mut State| if !s.cam.take_panned() { s.collapse_group(gi) });
+    let title = row().h(FRAME_TITLE_H).w(w).pl(12.0).pr(pr).gap(8.0).items_center()
+        .child(toggle)
         .child(lang_chip(p, f.lang).radius(concentric(FRAME_RADIUS, FRAME_CHIP_INSET, CHIP_H)))
-        .child(collapse);
+        .child(el().size(GROUP_HIT * look.badge_scale, model::GROUP_BUTTON).center().child(collapse));
     let border = if look.selected { (2.0, p.accent) } else if look.hovered { (1.5, p.muted) } else { (1.5, p.frame_text.alpha(0.22)) };
     let fr = el().size(w, h).fill(p.frame_fill).radius(FRAME_RADIUS)
         .border(border.0, border.1)
@@ -193,8 +200,17 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
     decorate(p, fr, [w, h], FRAME_RADIUS, f.evidence, f.claim, look)
 }
 
+/// A frame title's open chevron: its box, in world points.
+const CHEVRON: f32 = 10.0;
+
+/// An open (pointing down) chevron filling a `CHEVRON` square.
+fn chevron(c: Color) -> Shape {
+    let (m, s) = (CHEVRON / 2.0, 1.7);
+    Shape::new().stroke_path(&Path::new().move_to([1.5, m - 2.0]).line_to([m, m + 2.5]).line_to([CHEVRON - 1.5, m - 2.0]), s, LineCap::Round, c)
+}
+
 /// The collapse/expand button's hit target is at least this many screen points across.
-const GROUP_HIT: f32 = 22.0;
+const GROUP_HIT: f32 = model::GROUP_HIT;
 /// The collapse/expand glyph's span inside that target, in the same points.
 const GROUP_GLYPH: f32 = 13.0;
 /// The drawn button's corner radius, in the same points.
@@ -242,7 +258,7 @@ fn socket_world(g: &Graph, pl: &crate::layout::Placed, i: usize, output: bool, i
 }
 
 /// A wire's shape, decided before anything is drawn so wires can make room for each other.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Curve {
     /// A forward S-curve: `[from, handle, handle, to]`.
     Cubic([[f32; 2]; 4]),
@@ -253,12 +269,26 @@ enum Curve {
     /// (swinging `bend` either side of it), then straight into `b`: a forward wire that would
     /// otherwise cut through the nodes between its ends.
     Gutter { a: [f32; 2], b: [f32; 2], x: f32, bend: f32 },
+    /// From `a`, straight runs and curves in turn: a long wire threading the gaps between
+    /// columns, or a loop backedge tucked under its loop.
+    Chain { a: [f32; 2], pieces: Vec<Piece> },
+}
+
+/// One stretch of a [`Curve::Chain`], from wherever the previous one ended.
+#[derive(Clone, Copy, Debug)]
+enum Piece {
+    Line([f32; 2]),
+    Cubic([f32; 2], [f32; 2], [f32; 2]),
 }
 
 impl Curve {
-    fn path(self) -> Path {
-        match self {
+    fn path(&self) -> Path {
+        match *self {
             Curve::Cubic([a, c1, c2, b]) => Path::new().move_to(a).cubic_to(c1, c2, b),
+            Curve::Chain { a, ref pieces } => pieces.iter().fold(Path::new().move_to(a), |p, pc| match *pc {
+                Piece::Line(q) => p.line_to(q),
+                Piece::Cubic(c1, c2, q) => p.cubic_to(c1, c2, q),
+            }),
             Curve::Gutter { a, b, x, bend } => Path::new()
                 .move_to(a)
                 .line_to([x - bend, a[1]])
@@ -273,11 +303,26 @@ impl Curve {
     }
 
     /// The same curve as a polyline, so it can be dashed and measured.
-    fn points(self) -> Vec<[f32; 2]> {
-        match self {
+    fn points(&self) -> Vec<[f32; 2]> {
+        match *self {
             Curve::Cubic([a, c1, c2, b]) => {
                 let mut pts = vec![];
                 cubic_points(a, c1, c2, b, &mut pts);
+                pts
+            }
+            Curve::Chain { a, ref pieces } => {
+                let mut pts = vec![a];
+                for pc in pieces {
+                    let at = *pts.last().expect("starts at a");
+                    match *pc {
+                        Piece::Line(q) => pts.push(q),
+                        Piece::Cubic(c1, c2, q) => {
+                            cubic_points(at, c1, c2, q, &mut pts);
+                            // Its first sample repeats where the previous piece ended.
+                            pts.remove(pts.len() - 17);
+                        }
+                    }
+                }
                 pts
             }
             Curve::Routed { a, b, below, reach } => back_points(a, b, below, reach),
@@ -407,6 +452,191 @@ fn gutter_route(a: [f32; 2], b: [f32; 2], from: (usize, usize), others: &[[f32; 
     None
 }
 
+/// The narrowest gap a wire bends from one height to another in.
+const BEND_MIN: f32 = 16.0;
+
+/// The S-bend from `p` to `q` across a gap, its handles level with each end.
+fn bend(p: [f32; 2], q: [f32; 2]) -> Piece {
+    let mx = (p[0] + q[0]) / 2.0;
+    Piece::Cubic([mx, p[1]], [mx, q[1]], q)
+}
+
+/// A forward wire from `a` to `b` past several columns of `obstacles` (within the wrapped row
+/// `rows`, as a band of heights), routed as the layered layout's long edges are: straight
+/// through each column at the free height nearest where it already runs, bending only in the
+/// gaps between columns, so it never runs behind a node or through a frame. `None` when a column
+/// has no free height or a needed bend has no gap to turn in.
+fn column_route(a: [f32; 2], b: [f32; 2], obstacles: &[[f32; 4]], (top, bottom): (f32, f32)) -> Option<Curve> {
+    if b[0] <= a[0] {
+        return None;
+    }
+    let obs: Vec<[f32; 4]> = obstacles.iter()
+        .filter(|r| r[2] > a[0] && r[0] < b[0] && r[3] > top && r[1] < bottom)
+        .map(|&r| pad(r, NODE_CLEAR))
+        .collect();
+    // Columns: the x spans the obstacles cover, merged where they overlap.
+    let mut spans: Vec<(f32, f32)> = obs.iter().map(|r| (r[0], r[2])).collect();
+    spans.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut cols: Vec<(f32, f32)> = vec![];
+    for (l, r) in spans {
+        match cols.last_mut() {
+            Some(c) if l <= c.1 => c.1 = c.1.max(r),
+            _ => cols.push((l, r)),
+        }
+    }
+    if cols.is_empty() {
+        return None;
+    }
+    let (mut x, mut y) = (a[0], a[1]);
+    let mut pieces = vec![];
+    for (l, r) in cols {
+        let blocks: Vec<(f32, f32)> = obs.iter().filter(|o| o[2] > l && o[0] < r).map(|o| (o[1], o[3])).collect();
+        let free = |v: f32| v > top && v < bottom && blocks.iter().all(|&(t, u)| v <= t || v >= u);
+        // Where it runs now, where it is going, or just past a node's edge: the cheapest free
+        // height, favouring staying level.
+        let cands = [y, b[1]].into_iter().chain(blocks.iter().flat_map(|&(t, u)| [t - 2.0, u + 2.0]));
+        let cost = |v: f32| (v - y).abs() + 0.5 * (v - b[1]).abs();
+        let ny = cands.filter(|&v| free(v)).min_by(|p, q| cost(*p).total_cmp(&cost(*q)))?;
+        if (ny - y).abs() > 0.5 {
+            if l - x < BEND_MIN {
+                return None;
+            }
+            pieces.push(bend([x, y], [l, ny]));
+        } else if l > x {
+            pieces.push(Piece::Line([l, ny]));
+        }
+        pieces.push(Piece::Line([r, ny]));
+        (x, y) = (r, ny);
+    }
+    if (b[1] - y).abs() > 0.5 {
+        if b[0] - x < BEND_MIN {
+            return None;
+        }
+        pieces.push(bend([x, y], b));
+    } else {
+        pieces.push(Piece::Line(b));
+    }
+    let route = Curve::Chain { a, pieces };
+    (!crosses(&route.points(), obstacles)).then_some(route)
+}
+
+/// Do two polylines cross (or touch)?
+fn polylines_meet(p: &[[f32; 2]], q: &[[f32; 2]]) -> bool {
+    let side = |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    let (bp, bq) = (bbox(p), bbox(q));
+    if bp[0] > bq[2] || bq[0] > bp[2] || bp[1] > bq[3] || bq[1] > bp[3] {
+        return false;
+    }
+    p.windows(2).any(|s| q.windows(2).any(|t| {
+        let (d1, d2) = (side(s[0], s[1], t[0]), side(s[0], s[1], t[1]));
+        let (d3, d4) = (side(t[0], t[1], s[0]), side(t[0], t[1], s[1]));
+        d1 * d2 <= 0.0 && d3 * d4 <= 0.0 && (d1 != 0.0 || d2 != 0.0)
+    }))
+}
+
+/// A loop backedge tucked under its loop: out of `a` and straight down under its own node to
+/// `under`, back along there to the gutter at `x` left of that node's column, down the gutter to
+/// `below` and back under the loop, then up into `b`. It never swings out past the source's
+/// column, so it stays clear of the wires leaving it (the way out to the function's return).
+fn tucked(a: [f32; 2], b: [f32; 2], under: f32, x: f32, below: f32, reach: f32) -> Curve {
+    // Quarter-circle corners of radius `c`, as cubics.
+    let c = 10.0f32.min((below - under) / 2.0).max(0.0);
+    let k = 1.0 - 0.552;
+    Curve::Chain {
+        a,
+        pieces: vec![
+            Piece::Cubic([a[0] + reach, a[1]], [a[0] + reach, under], [a[0], under]),
+            Piece::Line([x + c, under]),
+            Piece::Cubic([x + c * k, under], [x, under + c * k], [x, under + c]),
+            Piece::Line([x, below - c]),
+            Piece::Cubic([x, below - c * k], [x - c * k, below], [x - c, below]),
+            Piece::Line([b[0], below]),
+            Piece::Cubic([b[0] - reach, below], [b[0] - reach, b[1]], b),
+        ],
+    }
+}
+
+/// Per source node of [`tucked`] backedges: the free band of heights under it, the gutter span
+/// left of its column, and its backedges (indices into the backedge list).
+type Tuck = ((f32, f32), (f32, f32), Vec<usize>);
+
+/// Every wire's curve: `forward`'s, with each loop backedge (its `None`s) routed in. A backedge
+/// whose usual route would swing out past its source and cross the wires leaving that column
+/// (the exit to the function's return, say) is [`tucked`] under its loop instead, when there
+/// is room under the source and a gutter left of it; backedges leaving one node tuck together,
+/// nested so they never cross.
+fn back_routes(g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], ends: &[([f32; 2], [f32; 2])], rects: &[[f32; 4]], forward: Vec<Option<Curve>>, row: impl Fn(f32) -> (f32, f32)) -> Vec<Curve> {
+    let backs: Vec<usize> = (0..g.wires.len()).filter(|&i| g.wires[i].back).collect();
+    let natural: Vec<f32> = backs.iter().map(|&i| back_below(pl, o, &g.wires[i], ends[i].0, ends[i].1)).collect();
+    let fwd: Vec<(usize, Vec<[f32; 2]>)> = forward.iter().enumerate().filter_map(|(i, c)| c.as_ref().map(|c| (i, c.points()))).collect();
+    let mut tucks: std::collections::BTreeMap<usize, Option<Tuck>> = Default::default();
+    let mut from: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+    for (k, &i) in backs.iter().enumerate() {
+        from.entry(g.wires[i].from.0).or_default().push(k);
+    }
+    for (s, members) in from {
+        let src = rects[s];
+        // Does the usual route's leg past the source cross a wire leaving its column?
+        let crossing = members.iter().any(|&k| {
+            let (a, _) = ends[backs[k]];
+            let mut leg = vec![];
+            cubic_points(a, [a[0] + BACK_REACH, a[1]], [a[0] + BACK_REACH, natural[k]], [a[0], natural[k]], &mut leg);
+            fwd.iter().any(|(j, pts)| ends[*j].0[0] >= src[0] - 1.0 && polylines_meet(&leg, pts))
+        });
+        let n = members.len() as f32;
+        let left = members.iter().map(|&k| ends[backs[k]].1[0]).fold(f32::MAX, f32::min);
+        // The gutter left of the source's column, from under the source down to under the loop.
+        let deep = members.iter().map(|&k| natural[k]).fold(src[3], f32::max);
+        let others: Vec<[f32; 4]> = rects.iter().enumerate().filter(|&(j, _)| j != s).map(|(_, r)| *r).collect();
+        let gutter = gutters([left, src[3]], [src[0], deep], &others).last().copied()
+            .filter(|&(l, r)| src[0] - r < 2.0 * NODE_CLEAR && r - l >= 20.0 + (n - 1.0) * BACK_LANE);
+        // The free band under the source, as wide as the route runs along it.
+        let plan = gutter.and_then(|(gl, gr)| {
+            let next = rects.iter().enumerate()
+                .filter(|&(j, r)| j != s && r[1] >= src[3] - 1.0 && r[2] > gl && r[0] < src[2] + BACK_REACH)
+                .map(|(_, r)| r[1])
+                .fold(row(src[1]).1, f32::min);
+            let band = (src[3], next);
+            ((band.1 - band.0) / (n + 1.0) >= 6.0).then_some((band, (gl, gr), members))
+        });
+        tucks.insert(s, plan.filter(|_| crossing));
+    }
+    // Lanes: each run's own depth (and, nested with others, a deeper one and wider legs).
+    let runs: Vec<BackRun> = backs.iter().enumerate().map(|(k, &i)| {
+        let (a, b) = ends[i];
+        match &tucks[&g.wires[i].from.0] {
+            Some((band, (_, r), _)) => BackRun {
+                socket_y: a[1],
+                lo: b[0] - BACK_REACH,
+                hi: *r,
+                below: clear_below(pl, o, b[0] - BACK_REACH, *r, rects[g.wires[i].to.0][3].max(band.1) + 22.0, row(a[1]).1),
+            },
+            None => BackRun { socket_y: a[1], lo: a[0].min(b[0]) - BACK_REACH, hi: a[0].max(b[0]) + BACK_REACH, below: natural[k] },
+        }
+    }).collect();
+    let lanes = back_lanes(&runs);
+    let mut curves: Vec<Option<Curve>> = forward;
+    for (k, &i) in backs.iter().enumerate() {
+        let (a, b) = ends[i];
+        let (below, reach) = lanes[k];
+        curves[i] = Some(match &tucks[&g.wires[i].from.0] {
+            Some((band, (_, r), members)) => {
+                // Inner (the lower source socket, as in `back_lanes`) runs highest under the
+                // source and leftmost in the gutter; outer ones step down and right of it.
+                let mut order = members.clone();
+                order.sort_by(|&p, &q| ends[backs[q]].0[1].total_cmp(&ends[backs[p]].0[1]).then(p.cmp(&q)));
+                let nth = order.iter().position(|&m| m == k).expect("a member") as f32;
+                let n = order.len() as f32;
+                let under = band.0 + (band.1 - band.0) * (nth + 1.0) / (n + 1.0);
+                let x = r - 10.0 - (n - 1.0 - nth) * BACK_LANE;
+                tucked(a, b, under, x, below, reach)
+            }
+            None => Curve::Routed { a, b, below, reach },
+        });
+    }
+    curves.into_iter().map(|c| c.expect("every wire routed")).collect()
+}
+
 /// Total length of a polyline.
 fn polyline_len(pts: &[[f32; 2]]) -> f32 {
     pts.windows(2).map(|s| (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1])).sum()
@@ -461,27 +691,24 @@ fn sub_polyline(pts: &[[f32; 2]], s0: f32, s1: f32) -> Vec<[f32; 2]> {
     out
 }
 
-fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
-    let mut s = Shape::new();
-    let touches = |w: &model::Wire| match focus {
-        Some(Item::Node(i)) => w.from.0 == i || w.to.0 == i,
-        Some(Item::Group(gi)) => g.nodes[w.from.0].group == Some(gi) || g.nodes[w.to.0].group == Some(gi),
-        None => true,
-    };
+/// Every wire's route, in canvas space (the world offset by `o`), with what was routed around.
+struct Routing {
+    /// Node bodies as drawn (a collapsed group's stacked plates included).
+    rects: Vec<[f32; 4]>,
+    /// Expanded frames.
+    frames: Vec<[f32; 4]>,
+    /// Each forward wire's place among wires between the same two nodes.
+    lanes: Vec<Option<Lane>>,
+    curves: Vec<Curve>,
+}
+
+fn route(g: &Graph, pl: &crate::layout::Placed, o: [f32; 2]) -> Routing {
     let ends: Vec<([f32; 2], [f32; 2])> = g.wires.iter().map(|w| {
         let a = socket_world(g, pl, w.from.0, true, w.from.1);
         let b = socket_world(g, pl, w.to.0, false, w.to.1);
         ([a[0] + o[0], a[1] + o[1]], [b[0] + o[0], b[1] + o[1]])
     }).collect();
 
-    // Route every wire first, in a fixed order, so lanes don't jump as the focus changes.
-    let backs = back_lanes(&g.wires.iter().zip(&ends).filter(|(w, _)| w.back).map(|(w, &(a, b))| BackRun {
-        socket_y: a[1],
-        lo: a[0].min(b[0]) - BACK_REACH,
-        hi: a[0].max(b[0]) + BACK_REACH,
-        below: back_below(pl, o, w, a, b),
-    }).collect::<Vec<_>>());
-    let mut backs = backs.into_iter();
     let mut gap_lanes = std::collections::HashMap::<usize, usize>::new();
     // Node bodies as drawn (a collapsed group's stacked plates included), in canvas space.
     let rects: Vec<[f32; 4]> = (0..g.nodes.len()).map(|i| {
@@ -493,14 +720,27 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
     let others = |w: &model::Wire| -> Vec<[f32; 4]> {
         rects.iter().enumerate().filter(|&(j, _)| j != w.from.0 && j != w.to.0).map(|(_, &r)| r).collect()
     };
+    // Expanded frames, in canvas space: a wire that doesn't end inside one keeps out of it.
+    let frames: Vec<[f32; 4]> = pl.frames.iter().filter(|f| f[2] > 0.0).map(|f| [f[0] + o[0], f[1] + o[1], f[0] + f[2] + o[0], f[1] + f[3] + o[1]]).collect();
+    let within = |r: &[f32; 4], p: [f32; 2]| p[0] > r[0] && p[0] < r[2] && p[1] > r[1] && p[1] < r[3];
+    // What a forward wire is routed around: those nodes, and the frames it doesn't end inside.
+    let obstacles = |w: &model::Wire, a: [f32; 2], b: [f32; 2]| -> Vec<[f32; 4]> {
+        let mut v = others(w);
+        v.extend(frames.iter().filter(|f| !within(f, a) && !within(f, b)));
+        v
+    };
+    // The wrapped row holding height `y`, as a band of heights (unbounded for a single row).
+    let row = |y: f32| -> (f32, f32) {
+        let gaps = pl.row_gaps.iter().map(|g| g + o[1]);
+        (gaps.clone().filter(|&g| g < y).fold(f32::MIN, f32::max), gaps.filter(|&g| g > y).fold(f32::MAX, f32::min))
+    };
     let mut gutter_lanes = GutterLanes::new();
     // Forward wires between the same two nodes run as translated copies of each other, which
     // merge wherever they turn steep: each takes its own lane.
     let lanes = parallel_lanes(&g.wires.iter().zip(&ends).map(|(w, &(a, b))| (!w.back).then_some(((w.from.0, w.to.0), a, b))).collect::<Vec<_>>());
-    let curves: Vec<Curve> = g.wires.iter().zip(&ends).enumerate().map(|(i, (w, &(a, b)))| {
+    let forward: Vec<Option<Curve>> = g.wires.iter().zip(&ends).enumerate().map(|(i, (w, &(a, b)))| {
         if w.back {
-            let (below, reach) = backs.next().expect("one lane per backedge");
-            return Curve::Routed { a, b, below, reach };
+            return None;
         }
         // Wrapped rows: a wire into a later row runs back through the gap between the rows.
         let wrap_gap = (b[0] < a[0])
@@ -511,25 +751,44 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
             let lane = gap_lanes.entry(gi).or_insert(0usize);
             let below = pl.row_gaps[gi] + o[1] + (*lane as f32 - 1.0) * 12.0;
             *lane += 1;
-            return Curve::Routed { a, b, below, reach: BACK_REACH };
+            return Some(Curve::Routed { a, b, below, reach: BACK_REACH });
         }
         let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
         // Both handles shift by the lane offset, moving the curve's middle `0.75 ×` as far.
         let shift = lanes[i].map_or(0.0, |l| l.shift);
         let cubic = Curve::Cubic([a, [a[0] + dx + shift, a[1]], [b[0] - dx + shift, b[1]], b]);
-        // An S-curve that would cut through other nodes drops down a gutter instead.
-        let obstacles = others(w);
-        if crosses(&cubic.points(), &obstacles)
-            && let Some(c) = gutter_route(a, b, w.from, &obstacles, &mut gutter_lanes)
-        {
-            return c;
+        // An S-curve that would cut through other nodes (or a frame it doesn't end in) drops
+        // down a gutter instead or, past several columns, threads the gaps between them.
+        let obstacles = obstacles(w, a, b);
+        if crosses(&cubic.points(), &obstacles) {
+            if let Some(c) = gutter_route(a, b, w.from, &obstacles, &mut gutter_lanes) {
+                return Some(c);
+            }
+            if let Some(c) = column_route(a, b, &obstacles, row(a[1])) {
+                return Some(c);
+            }
         }
-        cubic
+        Some(cubic)
     }).collect();
+    let curves = back_routes(g, pl, o, &ends, &rects, forward, row);
+    Routing { rects, frames, lanes, curves }
+}
+
+fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Option<Item>) -> Shape {
+    let mut s = Shape::new();
+    let touches = |w: &model::Wire| match focus {
+        Some(Item::Node(i)) => w.from.0 == i || w.to.0 == i,
+        Some(Item::Group(gi)) => g.nodes[w.from.0].group == Some(gi) || g.nodes[w.to.0].group == Some(gi),
+        None => true,
+    };
+    // Route every wire first, in a fixed order, so lanes don't jump as the focus changes.
+    let Routing { rects, frames, lanes, curves } = route(g, pl, o);
+    let others = |w: &model::Wire| -> Vec<[f32; 4]> {
+        rects.iter().enumerate().filter(|&(j, _)| j != w.from.0 && j != w.to.0).map(|(_, &r)| r).collect()
+    };
     let routes: Vec<Vec<[f32; 2]>> = curves.iter().map(|c| c.points()).collect();
     let boxes: Vec<[f32; 4]> = routes.iter().map(|r| bbox(r)).collect();
     // What shows behind a wire: the canvas, or an expanded frame's fill over it.
-    let frames: Vec<[f32; 4]> = pl.frames.iter().filter(|f| f[2] > 0.0).map(|f| [f[0] + o[0], f[1] + o[1], f[0] + f[2] + o[0], f[1] + f[3] + o[1]]).collect();
     let framed = p.framed();
     let backdrop = |pt: [f32; 2]| {
         if frames.iter().any(|f| pt[0] > f[0] && pt[0] < f[2] && pt[1] > f[1] && pt[1] < f[3]) { framed } else { p.canvas }
@@ -546,18 +805,14 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         let emphasised = focus.is_some() && lit;
         // Faded wires are thinner as well as quieter: their colour keeps 3:1 against what is
         // behind them (see `Pal::dim_wire`), so the stroke carries the rest of the fade.
-        let width = match (exec, lit) {
-            (true, true) => 2.8,
-            (true, false) => 2.0,
-            (false, true) => 1.8,
-            (false, false) => 1.3,
-        } + if emphasised { 0.8 } else { 0.0 };
+        let width = wire_width(exec, lit) + if emphasised { 0.8 } else { 0.0 };
         let core = if lit { p.ty(ty) } else { p.dim_wire(p.ty(ty)) };
-        // The outline under the core, if any: exec wires' casing; lit data wires' dark halo.
-        // Mixed toward the canvas (opaque), never by alpha: translucent polylines double-blend
-        // at their joints and read as dotted.
+        // The outline under the core, if any: lit data wires' dark halo. Mixed toward the canvas
+        // (opaque), never by alpha: translucent polylines double-blend at their joints and read
+        // as dotted. Exec wires are one solid stroke: a casing under a thin core reads as a
+        // striped ladder at 1x.
         let under = if exec {
-            Some((1.0, if lit { p.exec_casing } else { p.exec_casing.mix(p.canvas, 0.6) }))
+            None
         } else if p.dark && lit && !w.back {
             Some((0.8, p.canvas.mix(Color::BLACK, 0.4)))
         } else {
@@ -571,6 +826,15 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
                 }
                 s = s.stroke(dash, width, core);
             }
+        } else if let Curve::Cubic([a, _, _, b]) = curves[i]
+            && (a[1] - b[1]).abs() < 0.5
+        {
+            // A level wire is one straight stroke: flattened into many short pieces, the curve's
+            // joints blend twice and read as a striped ladder at 1x.
+            if let Some((out, c)) = under {
+                s = s.line(a, b, width + 2.0 * out, LineCap::Round, c);
+            }
+            s = s.line(a, b, width, LineCap::Round, core);
         } else {
             let path = curves[i].path();
             if let Some((out, c)) = under {
@@ -607,6 +871,17 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
     s
 }
 
+/// A wire's stroke width at rest: exec wires a solid stroke a little heavier than data wires.
+/// Faded wires are thinner as well as quieter.
+fn wire_width(exec: bool, lit: bool) -> f32 {
+    match (exec, lit) {
+        (true, true) => 2.6,
+        (true, false) => 1.8,
+        (false, true) => 1.8,
+        (false, false) => 1.3,
+    }
+}
+
 /// How far a routed (backedge or wrapped-row) wire swings out of and into its sockets.
 const BACK_REACH: f32 = 26.0 * 1.4;
 /// Spacing between the runs of nested loop backedges.
@@ -625,9 +900,14 @@ const ARROW_BASE: f32 = 3.0;
 /// would cross, but above the next wrapped row.
 fn back_below(pl: &crate::layout::Placed, o: [f32; 2], w: &model::Wire, a: [f32; 2], b: [f32; 2]) -> f32 {
     let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
-    let (lo, hi) = (a[0].min(b[0]) - 40.0, a[0].max(b[0]) + 40.0);
     let limit = pl.row_gaps.iter().map(|g| g + o[1]).find(|&g| g > a[1]).unwrap_or(f32::MAX);
-    let mut below = bottom(w.from.0).max(bottom(w.to.0)) + 22.0;
+    clear_below(pl, o, a[0].min(b[0]) - 40.0, a[0].max(b[0]) + 40.0, bottom(w.from.0).max(bottom(w.to.0)) + 22.0, limit)
+}
+
+/// From `below`, deeper until a run there clears every node between `lo` and `hi` by 22, but
+/// not as deep as `limit` (the next wrapped row).
+fn clear_below(pl: &crate::layout::Placed, o: [f32; 2], lo: f32, hi: f32, mut below: f32, limit: f32) -> f32 {
+    let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
     loop {
         let deeper = (0..pl.pos.len())
             .filter(|&i| {
@@ -817,11 +1097,10 @@ fn unit(v: [f32; 2], fallback: [f32; 2]) -> [f32; 2] {
 }
 
 /// A direction arrow centred on `mid`, pointing along its unit tangent, growing with the stroke:
-/// `[tip, left base, right base]`. An exec arrow's core is barely larger than a data one's; its
-/// casing makes the drawn exec arrow about 1.5 times a data arrow's area, so neither swamps the
-/// wires around it.
+/// `[tip, left base, right base]`. A drawn exec arrow is about 1.5 times a data arrow's area, so
+/// it reads as the heavier wire's without swamping the wires around it.
 fn arrow((c, d): ([f32; 2], [f32; 2]), width: f32, exec: bool) -> [[f32; 2]; 3] {
-    let len = width * 1.5 + if exec { 3.9 } else { 6.3 };
+    let len = width * 1.5 + if exec { 7.1 } else { 6.3 };
     let half = len * 0.62;
     let n = [-d[1], d[0]];
     // Centre the triangle's centroid on the route, so it sits balanced on the curve.
@@ -1003,8 +1282,11 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     let bottom = if pinless { RADIUS } else { 0.0 };
     // The title's room: the header less its padding, glyph slot and trailing chips with their
     // gaps (the widths `model::size` budgets).
+    // The expand button takes a slot as wide as it is drawn at this zoom, so it keeps the
+    // header's gap to the chips beside it instead of spilling over them.
+    let slot = model::GROUP_HIT * look.badge_scale;
     let trailing = if n.kind == Kind::Group { 7.0 + 34.0 } else { 0.0 }
-        + if expandable { 7.0 + model::GROUP_BUTTON } else { 0.0 }
+        + if expandable { 7.0 + slot } else { 0.0 }
         + match n.lang {
             Lang::None => 0.0,
             Lang::C => 7.0 + 16.0,
@@ -1024,9 +1306,9 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         header = header.child(lang_chip(p, n.lang).radius(chip_r));
     }
     if expandable {
-        header = header.child(group_button(Color::WHITE, Color::WHITE.alpha(0.16), Color::WHITE.alpha(0.16), true, look.badge_scale)
+        header = header.child(el().size(slot, model::GROUP_BUTTON).center().child(group_button(Color::WHITE, Color::WHITE.alpha(0.16), Color::WHITE.alpha(0.16), true, look.badge_scale)
             .key(format!("expand-group-{i}"))
-            .on_press(move |s: &mut State| s.expand_node(i)));
+            .on_press(move |s: &mut State| s.expand_node(i))));
     }
 
     let mut body = col().py(model::BODY_PAD);
@@ -1060,17 +1342,19 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         return interact(card);
     }
     // A collapsed group is a stack of cards, as in UE's collapsed graphs: plates step down and
-    // right behind its body, each a shade deeper, edged and topped in its header colour. The
-    // first step clears the hover/selection ring around the body.
+    // right behind its body, each a shade deeper, edged and topped in its header colour (a
+    // darker shade of it, never washed toward the canvas: beside the header that reads as a grey
+    // strip). The first step clears the hover/selection ring around the body.
     let mut stack = el().size(w, h);
     // A header-only plate (no pins) is rounded all round, as the header-only card is.
     let plate_bottom = if h <= model::HEADER { RADIUS } else { 0.0 };
     for k in (1..=STACK_PLATES).rev() {
         let d = STACK_STEP * k as f32;
         let t = k as f32 / (STACK_PLATES as f32 + 1.0);
+        let shade = head.mix(Color::BLACK, 0.12 + 0.18 * t);
         let mut plate = el().size(w, h).absolute(d, d).radius(RADIUS)
-            .fill(p.node_body.mix(p.canvas, t * 0.6)).border(1.5, head.mix(p.canvas, 0.15 + 0.3 * t))
-            .child(el().size(w, model::HEADER.min(h)).corners([RADIUS, RADIUS, plate_bottom, plate_bottom]).fill(head.mix(p.canvas, 0.25 + 0.25 * t)));
+            .fill(p.node_body.mix(p.canvas, t * 0.6)).border(1.5, shade)
+            .child(el().size(w, model::HEADER.min(h)).corners([RADIUS, RADIUS, plate_bottom, plate_bottom]).fill(shade));
         if k == STACK_PLATES {
             plate = plate.shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
         }
@@ -1305,12 +1589,12 @@ mod tests {
             t[0] - l[0]
         };
         assert!(size(2.6, false) > size(1.8, false));
-        // Drawn, an exec arrow (core plus its 1 pt casing) is about 1.5 times a data arrow's
-        // area, at rest and emphasised: larger, not a blot over the wires around it.
+        // Drawn, an exec arrow is about 1.5 times a data arrow's area, at rest and emphasised:
+        // larger, not a blot over the wires around it.
         let area = |t: [[f32; 2]; 3]| ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs() / 2.0;
         for extra in [0.0, 0.8] {
-            let exec = area(grow_triangle(arrow(([0.0, 0.0], [1.0, 0.0]), 2.8 + extra, true), 1.0));
-            let data = area(arrow(([0.0, 0.0], [1.0, 0.0]), 1.8 + extra, false));
+            let exec = area(arrow(([0.0, 0.0], [1.0, 0.0]), wire_width(true, true) + extra, true));
+            let data = area(arrow(([0.0, 0.0], [1.0, 0.0]), wire_width(false, true) + extra, false));
             assert!((1.3..=1.7).contains(&(exec / data)), "exec:data {}", exec / data);
         }
     }
@@ -1347,6 +1631,70 @@ mod tests {
         // With the gutters walled in too, there is no clear route.
         let walls = [middle, [120.0, 0.0, 180.0, 400.0], [280.0, 0.0, 340.0, 400.0]];
         assert!(gutter_route(a, b, (0, 0), &walls, &mut GutterLanes::new()).is_none());
+    }
+
+    #[test]
+    fn a_long_wire_threads_the_gaps_between_columns() {
+        // Two columns between the ends, each with a node across the straight line.
+        let (a, b) = ([0.0, 100.0], [500.0, 120.0]);
+        let obs = [[100.0, 60.0, 200.0, 160.0], [100.0, 180.0, 200.0, 260.0], [300.0, 40.0, 400.0, 140.0]];
+        let route = column_route(a, b, &obs, (f32::MIN, f32::MAX)).expect("a route");
+        let pts = route.points();
+        assert!(close(pts[0], a) && close(*pts.last().unwrap(), b));
+        assert!(!crosses(&pts, &obs), "{pts:?}");
+        // Through each column it runs level; it only changes height in the gaps.
+        for s in pts.windows(2) {
+            let inside = |x: f32| (100.0..=200.0).contains(&x) || (300.0..=400.0).contains(&x);
+            if inside((s[0][0] + s[1][0]) / 2.0) {
+                assert!((s[0][1] - s[1][1]).abs() < 1e-3, "bends inside a column: {s:?}");
+            }
+        }
+        // A column with no free height in the row has no route.
+        assert!(column_route(a, b, &[[100.0, 0.0, 200.0, 300.0]], (0.0, 300.0)).is_none());
+    }
+
+    #[test]
+    fn loop_backedges_tuck_under_the_loop_clear_of_the_exit() {
+        let s = crate::app::State::protocol_fixture();
+        let (g, pl) = (&s.view, &s.placed);
+        let r = route(g, pl, [0.0, 0.0]);
+        let backs: Vec<usize> = (0..g.wires.len()).filter(|&i| g.wires[i].back).collect();
+        assert!(!backs.is_empty(), "the fixture's loop has backedges");
+        for &i in &backs {
+            let src = r.rects[g.wires[i].from.0];
+            let pts = r.curves[i].points();
+            assert!(matches!(r.curves[i], Curve::Chain { .. }), "{}: not tucked", g.nodes[g.wires[i].from.0].title);
+            // Never out to the next column (where the exit lane runs) ...
+            let next = r.rects.iter().map(|q| q[0]).filter(|&x| x > src[2]).fold(f32::MAX, f32::min);
+            assert!(bbox(&pts)[2] < next - 2.0 * NODE_CLEAR, "swings out to {} (next column at {next})", bbox(&pts)[2]);
+            // ... and crossing no wire that leaves it or a later column.
+            for j in (0..g.wires.len()).filter(|&j| !g.wires[j].back && r.rects[g.wires[j].from.0][0] >= src[0] - 1.0) {
+                assert!(!polylines_meet(&pts, &r.curves[j].points()), "crosses {} -> {}", g.nodes[g.wires[j].from.0].title, g.nodes[g.wires[j].to.0].title);
+            }
+        }
+        // Nested backedges from one node never cross each other.
+        for (k, &i) in backs.iter().enumerate() {
+            for &j in &backs[k + 1..] {
+                assert!(!polylines_meet(&r.curves[i].points(), &r.curves[j].points()));
+            }
+        }
+    }
+
+    #[test]
+    fn wires_keep_out_of_frames_they_do_not_end_in() {
+        for scene in ["dataflow", "fixture", "interp"] {
+            let s = crate::app::State::load(scene);
+            let (g, pl) = (&s.view, &s.placed);
+            let r = route(g, pl, [0.0, 0.0]);
+            for (i, w) in g.wires.iter().enumerate().filter(|(_, w)| !w.back) {
+                let pts = r.curves[i].points();
+                let (a, b) = (pts[0], *pts.last().unwrap());
+                let inside = |f: &[f32; 4], p: [f32; 2]| p[0] > f[0] && p[0] < f[2] && p[1] > f[1] && p[1] < f[3];
+                for f in r.frames.iter().filter(|f| !inside(f, a) && !inside(f, b)) {
+                    assert!(!crosses(&pts, &[*f]), "{scene}: {} -> {} crosses a frame", g.nodes[w.from.0].title, g.nodes[w.to.0].title);
+                }
+            }
+        }
     }
 
     #[test]
