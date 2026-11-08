@@ -135,7 +135,8 @@ pub fn view(p: &Pal, s: &State, inset: f32) -> El {
         let (card, estimate) = info(p, s, item, false);
         let w = hover_w(s, item);
         // No card for an item hidden under the floating panels.
-        if let Some([x, y]) = hover_anchor(s, item, w, hover_h(item, w, estimate)) {
+        let h = hover_h(item, w, estimate);
+        if let Some([x, y]) = hover_anchor(s, item, w, h) {
             // Keyed per item so a newly hovered card always reports its own first layout.
             root = root.child(card.w(w).key(format!("hover-{item:?}"))
                 .on_layout(move |_: &mut State, r| HOVER_SIZE.with(|c| c.set(Some((item, [r[2], r[3]])))))
@@ -205,15 +206,20 @@ fn breadcrumb(p: &Pal, s: &State) -> El {
 }
 
 /// Where the graph comes from, as a passive chip after the crumbs: a small muted glyph and one
-/// word. Not a control: no hover fill, no accent; the details are in its tooltip.
+/// word. Not a control: no border, no hover fill, no accent; the details are in its tooltip.
 fn source_chip(p: &Pal, src: &Source) -> El {
-    row().key("source").h(20.0).px(7.0).gap(5.0).radius(6.0).border(1.0, p.panel_border).items_center().help(src.tip())
+    row().key("source").h(20.0).px(4.0).gap(5.0).items_center().help(src.tip())
         .child(canvas(source_glyph(p, src)).size(10.0, 10.0))
         .child(text(src.label()).font(TextStyle::new(10.5, 550.0)).color(p.muted).single_line())
 }
 
 fn icon_button(p: &Pal, content: El, help: &str) -> El {
-    el().size(CONTROL_H, CONTROL_H).radius(CONTROL_R).center().hover(p.code_bg).cursor(Cursor::Pointer).help(help).child(content)
+    sized_icon_button(p, content, help, CONTROL_H, CONTROL_R)
+}
+
+/// [`icon_button`] at another size, for controls outside the bars.
+fn sized_icon_button(p: &Pal, content: El, help: &str, d: f32, r: f32) -> El {
+    el().size(d, d).min_w(d).radius(r).center().hover(p.code_bg).cursor(Cursor::Pointer).help(help).child(content)
 }
 
 /// Where the graph on screen comes from. Nothing here is a live backend connection.
@@ -340,7 +346,7 @@ fn status(p: &Pal, s: &State) -> El {
     let workers = workers(s);
     let any_worker = !workers.is_empty();
     for (k, (worker, active, title, item)) in workers.into_iter().enumerate() {
-        let a = graph::avatar(p, worker, true, 22.0).child(state_glyph(p, active).absolute(12.0, 12.0));
+        let a = graph::avatar(p, worker, true, AVATAR).child(state_glyph(p, active).absolute(BADGE_AT, BADGE_AT));
         let tip = format!("worker {worker} · {} {title}", if active { "translating" } else { "queued for" });
         r = r.child(icon_button(p, a, &tip).key(format!("worker-{k}")).on_press(move |s: &mut State| reveal(s, item)));
     }
@@ -402,19 +408,35 @@ fn crescent(c0: [f32; 2], r0: f32, c1: [f32; 2], r1: f32) -> Vec<[f32; 2]> {
     pts
 }
 
-/// A small spinner arc (translating) or pause bars (queued) on the avatar's corner.
+/// The toolbar's worker avatar diameter.
+const AVATAR: f32 = 22.0;
+/// The avatar's state badge: its dot, and the ring in the bar's colour around it.
+const BADGE_DOT: f32 = 8.0;
+const BADGE_RING: f32 = 1.5;
+/// Where the badge's box sits in the avatar: its centre 10 points right of and below the
+/// avatar's (on the rim's bottom-right, 14 out along the diagonal), so the dot stays clear of
+/// the digit in the avatar's middle.
+const BADGE_AT: f32 = AVATAR / 2.0 + 10.0 - (BADGE_DOT / 2.0 + BADGE_RING);
+
+/// A small spinner arc (translating) or pause bars (queued) on the avatar's bottom-right,
+/// ringed in the bar's colour so it reads as separate from the avatar.
 fn state_glyph(p: &Pal, active: bool) -> El {
+    let d = BADGE_DOT;
+    let c = d / 2.0;
     let mut sh = Shape::new();
     if active {
         let pts: Vec<[f32; 2]> = (0..=12).map(|i| {
             let a = 0.4 + i as f32 * 0.42;
-            [6.0 + 3.2 * a.cos(), 6.0 + 3.2 * a.sin()]
+            [c + 2.2 * a.cos(), c + 2.2 * a.sin()]
         }).collect();
-        sh = sh.stroke(pts, 1.5, Color::WHITE);
+        sh = sh.stroke(pts, 1.2, Color::WHITE);
     } else {
-        sh = sh.line([4.5, 3.5], [4.5, 8.5], 1.5, LineCap::Round, Color::WHITE).line([7.5, 3.5], [7.5, 8.5], 1.5, LineCap::Round, Color::WHITE);
+        sh = sh.line([c - 1.3, c - 1.8], [c - 1.3, c + 1.8], 1.2, LineCap::Round, Color::WHITE)
+            .line([c + 1.3, c - 1.8], [c + 1.3, c + 1.8], 1.2, LineCap::Round, Color::WHITE);
     }
-    el().size(12.0, 12.0).radius(6.0).fill(if active { p.ok } else { p.faint }).border(2.0, p.panel).child(canvas(sh).size(12.0, 12.0))
+    let dot = el().size(d, d).radius(c).fill(if active { p.ok } else { p.faint }).child(canvas(sh).size(d, d));
+    let o = d + 2.0 * BADGE_RING;
+    el().size(o, o).radius(o / 2.0).fill(p.panel).center().child(dot)
 }
 
 fn fit_icon(p: &Pal) -> Shape {
@@ -460,7 +482,7 @@ fn hover_w(s: &State, item: Item) -> f32 {
     if c.badge() {
         title += 9.0 + 20.0;
     }
-    if n.evidence != Evidence::None {
+    if n.evidence == Evidence::Accepted {
         title += 9.0 + 20.0;
     }
     if n.lang != crate::model::Lang::None {
@@ -494,9 +516,9 @@ fn visible_part(rect: [f32; 4], head: f32, free: [f32; 4]) -> Option<([f32; 4], 
 const TITLE_WEIGHT: f32 = 4.0;
 
 /// Hover-card position for `item`, or `None` when the item is hidden under the floating panels.
-/// Its visible rect, header height and what else is on the canvas feed [`place_card`]: other
-/// nodes (direct neighbours weigh triple), plus every on-screen node's header band and every
-/// other frame's title row, weighted by [`TITLE_WEIGHT`] on top.
+/// Its visible rect, header height and what else is on the canvas feed [`place_card`]: other nodes (direct neighbours weigh triple), every on-screen
+/// node's header band and every other frame's title row, weighted by [`TITLE_WEIGHT`] on top,
+/// and wire ends (see [`wire_end`]).
 fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<[f32; 2]> {
     let free = free_area(s.selected.is_some(), s.project.is_some());
     let z = s.cam.zoom;
@@ -531,7 +553,54 @@ fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<[f32;
             others.push(([r[0], r[1], r[2], (FRAME_HEAD * z).min(r[3])], TITLE_WEIGHT));
         }
     }
+    // Wire ends: each socket and the first stretch of its wire, so a card doesn't cut where
+    // wires join nodes. The hovered item's own wires are what its card describes: their ends,
+    // and the pin names at their far ends, weigh most.
+    let inside = |n: usize| match item {
+        Item::Node(i) => n == i,
+        Item::Group(g) => s.view.nodes[n].group == Some(g),
+    };
+    for w in &s.view.wires {
+        let hot = inside(w.from.0) || inside(w.to.0);
+        for (n, output, idx) in [(w.from.0, true, w.from.1), (w.to.0, false, w.to.1)] {
+            let r = s.screen_rect(n);
+            if !on_screen(r) {
+                continue;
+            }
+            let node = &s.view.nodes[n];
+            let [lx, ly] = crate::model::socket_local(node, s.placed.size[n][0], output, idx);
+            let at = [r[0] + lx * z, r[1] + ly * z];
+            others.push((wire_end(at, output), if hot { HOT_WEIGHT } else { WIRE_WEIGHT }));
+            if hot && !inside(n) {
+                let pin = if output { &node.outs[idx].label } else { &node.ins[idx].label };
+                others.push((pin_label(at, output, pin.chars().count(), z), HOT_WEIGHT));
+            }
+        }
+    }
     Some(place_card(rect, head, [card_w, card_h], free, &others))
+}
+
+/// Weight of a socket and the start of its wire in [`place_card`], and of the hovered item's
+/// own wire ends and the pins they reach.
+const WIRE_WEIGHT: f32 = 2.0;
+const HOT_WEIGHT: f32 = 10.0;
+/// How far along its wire a socket's end region reaches, in window points.
+const WIRE_STUB: f32 = 40.0;
+
+/// A socket at `at` and the first [`WIRE_STUB`] points of its wire, which leaves an output to
+/// the right and enters an input from the left.
+fn wire_end(at: [f32; 2], output: bool) -> [f32; 4] {
+    let (pad, h) = (8.0, 14.0);
+    let x = if output { at[0] - pad } else { at[0] - WIRE_STUB };
+    [x, at[1] - h / 2.0, WIRE_STUB + pad, h]
+}
+
+/// A socket's pin name inside its node (`chars` long at zoom `z`): left of an output's socket,
+/// right of an input's.
+fn pin_label(at: [f32; 2], output: bool, chars: usize, z: f32) -> [f32; 4] {
+    let w = (chars as f32 * 6.5 + 16.0) * z;
+    let h = crate::model::ROW * z;
+    [if output { at[0] - w } else { at[0] }, at[1] - h / 2.0, w, h]
 }
 
 /// Height of a frame's title row in world units (as `graph::frame` draws it).
@@ -539,20 +608,36 @@ const FRAME_HEAD: f32 = 32.0;
 /// Space between a hover card and the item it describes.
 const CARD_GAP: f32 = 14.0;
 
+/// Cost, in covered area, of each point a card sits farther from its item than [`CARD_GAP`]:
+/// moving 100 points away is worth it to keep about a quarter of a node, or a few wire ends,
+/// in view.
+const DISTANCE_COST: f32 = 40.0;
+/// Roughly how many spots of the free canvas [`place_card`] tries besides the item's sides.
+const SCAN_SPOTS: f32 = 600.0;
+
+/// Gap between two rects (0 when they touch or overlap).
+fn rect_gap(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let dx = (b[0] - (a[0] + a[2])).max(a[0] - (b[0] + b[2])).max(0.0);
+    let dy = (b[1] - (a[1] + a[3])).max(a[1] - (b[1] + b[3])).max(0.0);
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// Where a floating card of size `card` goes beside an item at `item` (`[x, y, w, h]`, window
 /// points) whose header row is `head` tall, inside the `free` canvas rect. Candidates sit right,
 /// left, below and above the item (each also aligned to the item's far edge), clamped into the
-/// free area. Clamping can push a candidate back over the item, so the ranking is: candidates
-/// clear of the item first; failing that, ones that leave its header row (its name) visible;
-/// then the rest. Within a rank the card covers the least area, of the item plus the weighted
-/// area of `others` (rect, weight); ties keep the earlier candidate (right, left, below, above).
+/// free area; then spots across the free canvas, for when everything beside the item is busy.
+/// Clamping can push a candidate back over the item, so the ranking is: candidates clear of the
+/// item first; failing that, ones that leave its header row (its name) visible; then the rest.
+/// Within a rank the card covers the least area, of the item plus the weighted area of
+/// `others` (rect, weight), plus [`DISTANCE_COST`] for each point it strays beyond
+/// [`CARD_GAP`]; ties keep the earlier candidate (right, left, below, above).
 pub(crate) fn place_card(item: [f32; 4], head: f32, card: [f32; 2], free: [f32; 4], others: &[([f32; 4], f32)]) -> [f32; 2] {
     let [x, y, w, h] = item;
     let [cw, ch] = card;
     let [fx, fy, fw, fh] = free;
     let clamp = |cx: f32, cy: f32| [cx.clamp(fx, (fx + fw - cw).max(fx)), cy.clamp(fy, (fy + fh - ch).max(fy))];
     let gap = CARD_GAP;
-    let candidates = [
+    let mut candidates = vec![
         clamp(x + w + gap, y),
         clamp(x - gap - cw, y),
         clamp(x, y + h + gap),
@@ -565,13 +650,24 @@ pub(crate) fn place_card(item: [f32; 4], head: f32, card: [f32; 2], free: [f32; 
         clamp(x + w - cw, y + head + gap),
         clamp(x, y + head + gap),
     ];
+    // A grid over the free canvas, about `SCAN_SPOTS` spots, its last row and column on the
+    // far edges.
+    let (room_x, room_y) = ((fw - cw).max(0.0), (fh - ch).max(0.0));
+    let step = (room_x * room_y / SCAN_SPOTS).sqrt().max(12.0);
+    let (nx, ny) = ((room_x / step).ceil() as usize, (room_y / step).ceil() as usize);
+    for j in 0..=ny {
+        for i in 0..=nx {
+            candidates.push(clamp(fx + room_x * i as f32 / nx.max(1) as f32, fy + room_y * j as f32 / ny.max(1) as f32));
+        }
+    }
     let header = [x, y, w, head.min(h)];
     let rank = |c: [f32; 2]| {
         let r = [c[0], c[1], cw, ch];
         let on_item = overlap(r, item);
         let tier = if on_item <= 0.0 { 0 } else if overlap(r, header) <= 0.0 { 1 } else { 2 };
         let covered: f32 = others.iter().map(|(o, wt)| overlap(r, *o) * wt).sum();
-        (tier, on_item + covered)
+        let away = (rect_gap(r, item) - gap).max(0.0) * DISTANCE_COST;
+        (tier, on_item + covered + away)
     };
     candidates.into_iter().min_by(|a, b| {
         let (a, b) = (rank(*a), rank(*b));
@@ -596,6 +692,8 @@ fn hover_h(item: Item, w: f32, estimate: f32) -> f32 {
 
 /// Hover rows shown per port list before summarising.
 const HOVER_PORTS: usize = 5;
+/// Hover rows shown of a node group's members before summarising.
+const HOVER_MEMBERS: usize = 5;
 
 /// Points around a circle, closed.
 fn ring(c: [f32; 2], r: f32, n: usize) -> Vec<[f32; 2]> {
@@ -624,27 +722,33 @@ fn effect_badge(p: &Pal, mark: Mark, tip: String) -> El {
     el().size(20.0, 20.0).center().help(tip).child(canvas(effect_shape(p.muted, mark)).size(10.0, 10.0))
 }
 
-/// The docked panel's one-line key for the effect badge, this item's mark in full colour.
-fn effect_legend(p: &Pal, mark: Mark, tip: String) -> El {
-    let mut r = row().gap(6.0).items_center().help(tip)
-        .child(text("EFFECTS").font(LABEL).color(p.faint).w(58.0));
-    for (m, word) in [(Mark::Effects, "effects"), (Mark::Pure, "pure"), (Mark::Unknown, "unknown")] {
-        let c = if m == mark { p.text } else { p.faint };
-        r = r.child(row().gap(4.0).mr(6.0).items_center()
-            .child(canvas(effect_shape(if m == mark { p.muted } else { p.faint }, m)).size(10.0, 10.0))
-            .child(label(word, c)));
+/// The word for an effect mark.
+fn mark_word(mark: Mark) -> &'static str {
+    match mark {
+        Mark::Effects => "effects",
+        Mark::Pure => "pure",
+        Mark::Unknown => "unknown",
     }
-    r
 }
 
-fn status_glyph(p: &Pal, e: Evidence) -> El {
-    let (g, c, tip) = match e {
-        Evidence::None => return el(),
-        Evidence::Accepted => ("✓", p.ok, "Rust implementation accepted"),
-        Evidence::Rejected => ("✕", p.bad, "Latest Rust candidate failed its checks"),
-    };
-    el().size(20.0, 20.0).radius(10.0).fill(c.alpha(0.18)).center().help(tip)
-        .child(text(g).font(TextStyle::new(11.0, 800.0)).color(c))
+/// The docked panel's EFFECTS row: this item's mark and its word. The key to all three marks
+/// is in the tooltip, after what the effects are.
+fn effect_legend(p: &Pal, mark: Mark, tip: String) -> El {
+    row().gap(6.0).items_center().help(effect_key(&tip))
+        .child(text("EFFECTS").font(LABEL).color(p.faint).w(58.0))
+        .child(canvas(effect_shape(p.muted, mark)).size(10.0, 10.0))
+        .child(label(mark_word(mark), p.text))
+}
+
+/// An effect tooltip followed by the key to the three marks.
+fn effect_key(tip: &str) -> String {
+    format!("{tip}\n● effects · ○ pure · ◌ unknown or inferred")
+}
+
+/// The header's mark for an accepted Rust implementation.
+fn accepted_glyph(p: &Pal) -> El {
+    el().size(20.0, 20.0).radius(10.0).fill(p.ok.alpha(0.18)).center().help("Rust implementation accepted")
+        .child(text("✓").font(TextStyle::new(11.0, 800.0)).color(p.ok))
 }
 
 /// One compact line of agent activity, and one for a failed candidate. No prose banners.
@@ -689,27 +793,35 @@ fn validation(p: &Pal, r: &Rejection) -> El {
     c
 }
 
-/// Port rows: tag, type dot, pin, type and the other end. Cut text has its whole in a tooltip;
-/// the docked panel wraps the other end instead of cutting it.
-fn ports(p: &Pal, rows: &[Port], tag: &str, arrow: &str, limit: usize, docked: bool) -> El {
-    // Room left for the other end beside tag, dot, pin and type (and the docked padding).
-    let beside = detail_w() - 2.0 * 16.0 - (26.0 + 8.0 + 8.0 + 8.0 + 64.0 + 8.0 + 64.0 + 8.0);
+/// Width of a port row's columns before the other end: tag, type dot, pin and type, each
+/// followed by the row's 8-point gap.
+const PORT_COLUMNS: f32 = 26.0 + 8.0 + 8.0 + 8.0 + 64.0 + 8.0 + 64.0 + 8.0;
+/// Average advance of a `UI` character, for fitting an end into its column before layout.
+const UI_CHAR: f32 = 6.4;
+/// Where a docked port's other end starts on its own line: under the pin name.
+const END_INDENT: f32 = 26.0 + 8.0 + 8.0 + 8.0;
+
+/// Port rows: tag, type dot, pin, type and the other end, the whole of it in a tooltip.
+/// Floating (`width` is the card's), the end sits beside the type, its producer shortened so
+/// the pin it reaches stays readable ([`describe::fit_end`]). Docked, every end has its own
+/// line under its pin, so rows are even and nothing is cut.
+fn ports(p: &Pal, rows: &[Port], tag: &str, arrow: &str, limit: usize, docked: bool, width: f32) -> El {
+    // Characters that fit beside the type, less the arrow and its space.
+    let fits = (((width - 2.0 * 14.0 - PORT_COLUMNS) / UI_CHAR).floor() as usize).saturating_sub(2).max(4);
     let mut t = col().gap(2.0);
     for (k, port) in rows.iter().take(limit).enumerate() {
         // The arrow stays joined to the name it points at.
-        let other = label(&format!("{arrow}\u{a0}{}", port.other), p.muted).help(port.full.clone());
+        let end = if docked { port.other.clone() } else { describe::fit_end(&port.other, fits) };
+        let other = label(&format!("{arrow}\u{a0}{end}"), p.muted).help(port.full.clone());
         let pin = row().h(22.0).gap(8.0).items_center()
             .child(text(if k == 0 { tag } else { "" }).font(LABEL).color(p.faint).w(26.0).min_w(26.0))
             .child(el().size(8.0, 8.0).min_w(8.0).radius(4.0).fill(p.ty(port.ty)))
             .child(mono(&port.name, p.text).single_line().truncate().help_when_truncated(port.name.clone()).w(64.0).min_w(64.0))
             .child(mono(&port.ty_text, p.ty_text(port.ty)).single_line().truncate().help_when_truncated(port.ty_text.clone()).w(64.0).min_w(64.0));
-        // Docked text is never cut: an end too long to sit beside the type gets its own line
-        // under the pin, wrapping there if it must.
-        let long = (port.other.chars().count() + 2) as f32 * 6.6 > beside;
-        t = t.child(match (docked, long) {
-            (false, _) => pin.child(other.truncate().grow(1.0)),
-            (true, false) => pin.child(other.grow(1.0)),
-            (true, true) => col().child(pin).child(other.wrap_anywhere().ml(42.0).mb(3.0)),
+        t = t.child(if docked {
+            col().child(pin).child(other.wrap_anywhere().ml(END_INDENT).mb(3.0))
+        } else {
+            pin.child(other.truncate().grow(1.0))
         });
     }
     if rows.len() > limit {
@@ -773,10 +885,15 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let group = n.kind == Kind::Group;
             let tile = p.header(n.kind.category());
             let badge = c.badge().then(|| (c.mark, c.effect_tip()));
-            let mut head = header(p, &n.title, graph::kind_glyph(n.kind), tile, n.evidence, n.lang, badge, group.then_some(n.members));
+            let mut tools = vec![];
             if docked && group && s.can_expand(i) {
-                head = head.child(group_toggle(p, true).on_press(move |s: &mut State| s.expand_node(i)));
+                tools.push(group_toggle(p, true).on_press(move |s: &mut State| s.expand_node(i)));
             }
+            if docked {
+                tools.push(close_button(p));
+            }
+            let head = header(p, &n.title, graph::kind_glyph(n.kind), tile, n.evidence, n.lang, badge, group.then_some(n.members), docked, tools);
+            let width = if docked { detail_w() } else { hover_w(s, item) };
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, &kicker_text(n), tile)).child(head));
             if let Some(a) = activity(p, n.claim, n.evidence) {
@@ -791,13 +908,13 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             if !c.inputs.is_empty() || !c.outputs.is_empty() {
                 let mut t = col().gap(6.0);
                 if !c.inputs.is_empty() {
-                    t = t.child(ports(p, &c.inputs, "IN", "←", limit, docked));
+                    t = t.child(ports(p, &c.inputs, "IN", "←", limit, docked, width));
                 }
                 if !c.inputs.is_empty() && !c.outputs.is_empty() {
                     t = t.child(divider(p));
                 }
                 if !c.outputs.is_empty() {
-                    t = t.child(ports(p, &c.outputs, "OUT", "→", limit, docked));
+                    t = t.child(ports(p, &c.outputs, "OUT", "→", limit, docked, width));
                 }
                 body = body.child(t);
             }
@@ -818,10 +935,8 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             let members: Vec<&crate::model::Node> = s.view.nodes.iter().filter(|n| n.group == Some(g)).collect();
             let declared = grp.effects.as_deref().map(describe::declared);
             let badge = declared.as_ref().map(|(m, list)| (*m, format!("Effects: {}", list.join(", "))));
-            let mut head = header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, badge.clone(), Some(members.len()));
-            if docked {
-                head = head.child(group_toggle(p, false).on_press(move |s: &mut State| s.toggle_group(g)));
-            }
+            let tools = if docked { vec![group_toggle(p, false).on_press(move |s: &mut State| s.toggle_group(g)), close_button(p)] } else { vec![] };
+            let head = header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, badge.clone(), Some(members.len()), docked, tools);
             let mut body = col().gap(12.0)
                 .child(col().gap(4.0).child(kicker(p, "node group", p.header(Category::Function))).child(head));
             if let Some(a) = activity(p, grp.claim, grp.evidence) {
@@ -831,14 +946,16 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 body = body.child(validation(p, r));
             }
             let mut list = col().gap(2.0);
-            for n in members.iter().take(if docked { 16 } else { 5 }) {
+            // Docked lists every member (the panel scrolls); the hover card summarises.
+            let shown = if docked { members.len() } else { HOVER_MEMBERS };
+            for n in members.iter().take(shown) {
                 list = list.child(row().h(22.0).gap(8.0).items_center()
-                    .child(el().size(8.0, 8.0).radius(2.0).fill(p.header(n.kind.category())))
-                    .child(mono(&n.title, p.text).single_line().grow(1.0))
+                    .child(el().size(8.0, 8.0).min_w(8.0).radius(2.0).fill(p.header(n.kind.category())))
+                    .child(mono(&n.title, p.text).single_line().truncate().help_when_truncated(n.title.clone()).grow(1.0))
                     .child(graph::lang_chip(p, n.lang)));
             }
-            if !docked && members.len() > 5 {
-                list = list.child(label(&format!("+{} more", members.len() - 5), p.faint).ml(16.0));
+            if members.len() > shown {
+                list = list.child(label(&format!("+{} more", members.len() - shown), p.faint).ml(16.0));
             }
             body = body.child(list);
             if docked && s.scene == "fixture" {
@@ -851,7 +968,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             if docked && let Some((m, tip)) = badge {
                 body = body.child(effect_legend(p, m, tip));
             }
-            let sections: Vec<f32> = [activity_h(grp.claim.is_some(), grp.evidence == Evidence::Rejected), Some(rows_h(members.len(), 5))]
+            let sections: Vec<f32> = [activity_h(grp.claim.is_some(), grp.evidence == Evidence::Rejected), Some(rows_h(members.len(), HOVER_MEMBERS))]
                 .into_iter().flatten().collect();
             (shell(p, body, docked, p.header(Category::Function)), estimate_h(&sections))
         }
@@ -894,27 +1011,51 @@ fn group_toggle(p: &Pal, expand: bool) -> El {
         .child(canvas(sh).size(d, d))
 }
 
+/// The docked panel's close control: a small ✕, as the bar's icon buttons are drawn.
+fn close_button(p: &Pal) -> El {
+    let c = p.muted;
+    let x = Shape::new().line([1.0, 1.0], [9.0, 9.0], 1.5, LineCap::Round, c).line([9.0, 1.0], [1.0, 9.0], 1.5, LineCap::Round, c);
+    sized_icon_button(p, canvas(x).size(10.0, 10.0), "Close (Esc)", 26.0, 7.0).key("close-details")
+        .on_press(|s: &mut State| s.selected = None)
+}
+
+/// Size of the kind tile left of a card's title, and the gap after it.
+const TILE: f32 = 22.0;
+const TILE_GAP: f32 = 9.0;
+
+/// A card's header. Floating, one row: kind tile, title (cut, whole in its tooltip) and the
+/// chips. Docked, the title has its row to itself and wraps rather than being cut, and the
+/// chips, then `tools` (group toggle, close) at the far end, sit on a row under it.
 #[allow(clippy::too_many_arguments)]
-fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, lang: crate::model::Lang, badge: Option<(Mark, String)>, count: Option<usize>) -> El {
-    let mut r = row().h(28.0).gap(9.0).items_center()
-        .child(el().size(22.0, 22.0).radius(7.0).fill(tile).center()
-            .child(text(glyph).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE)))
-        .child(text(title).font(TextStyle::new(14.5, 650.0)).color(p.text).single_line().truncate().grow(1.0));
+fn header(p: &Pal, title: &str, glyph: &str, tile: Color, evidence: Evidence, lang: crate::model::Lang, badge: Option<(Mark, String)>, count: Option<usize>, docked: bool, tools: Vec<El>) -> El {
+    let tile = el().size(TILE, TILE).min_w(TILE).radius(7.0).fill(tile).center()
+        .child(text(glyph).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE));
+    let name = text(title).font(TextStyle::new(14.5, 650.0)).color(p.text);
+    let mut chips: Vec<El> = vec![];
     if let Some(c) = count {
-        r = r.child(row().h(18.0).px(6.0).radius(4.0).fill(p.code_bg).items_center().help("nodes in this group")
+        chips.push(row().h(18.0).px(6.0).radius(4.0).fill(p.code_bg).items_center().help("nodes in this group")
             .child(text(format!("▣ {c}")).font(TextStyle::new(10.5, 650.0)).color(p.muted)));
     }
     if let Some((mark, tip)) = badge {
-        r = r.child(effect_badge(p, mark, tip));
+        chips.push(effect_badge(p, mark, tip));
     }
-    // Absent marks add nothing, not an empty slot plus its gap.
-    if evidence != Evidence::None {
-        r = r.child(status_glyph(p, evidence));
+    // Absent marks add nothing, not an empty slot plus its gap. A failed candidate is told by
+    // the "checks failed" line under the header, so only an accepted one is marked here.
+    if evidence == Evidence::Accepted {
+        chips.push(accepted_glyph(p));
     }
     if lang != crate::model::Lang::None {
-        r = r.child(graph::lang_chip(p, lang));
+        chips.push(graph::lang_chip(p, lang));
     }
-    r
+    if !docked {
+        return row().h(28.0).gap(TILE_GAP).items_center().child(tile)
+            .child(name.single_line().truncate().help_when_truncated(title.to_string()).grow(1.0))
+            .children(chips);
+    }
+    let title_row = row().min_h(28.0).gap(TILE_GAP).items_center().child(tile).child(name.wrap().grow(1.0).shrink().min_w(0.0));
+    let chip_row = row().h(26.0).gap(TILE_GAP).ml(TILE + TILE_GAP).items_center().children(chips)
+        .child(el().grow(1.0)).child(row().gap(2.0).items_center().children(tools));
+    col().gap(2.0).child(title_row).child(chip_row)
 }
 
 /// The card around `body`. Docked, it is as tall as its content up to the canvas height, and
@@ -1033,6 +1174,28 @@ mod tests {
         for (o, _) in others {
             assert_eq!(overlap(r, o), 0.0, "card {r:?} covers {o:?}");
         }
+    }
+
+    #[test]
+    fn the_card_moves_off_a_neighbours_socket_into_empty_canvas() {
+        // Busy on both sides, so the card goes below; a neighbour's socket (the end of a wire the
+        // card describes) sits at the item's bottom-left, where "below" would land, with empty
+        // canvas further along. The card must leave the socket showing and stay near.
+        let item = [400.0, 300.0, 140.0, 90.0];
+        let socket = wire_end([420.0, 427.0], false);
+        let others = [
+            ([560.0, 280.0, 300.0, 110.0], 3.0),
+            ([60.0, 280.0, 320.0, 110.0], 3.0),
+            (socket, HOT_WEIGHT),
+        ];
+        // Without the socket the card sits right below the item, on it.
+        let plain = place(item, &others[..2]);
+        assert!(overlap(plain, socket) > 0.0, "the setup puts {plain:?} on the socket");
+        let r = place(item, &others);
+        assert_eq!(overlap(r, socket), 0.0, "card {r:?} covers the socket");
+        assert_eq!(overlap(r, item), 0.0);
+        assert!(inside(r, FREE));
+        assert!(rect_gap(r, item) < 100.0, "card {r:?} strays from the item");
     }
 
     #[test]

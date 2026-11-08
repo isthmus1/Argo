@@ -242,6 +242,38 @@ fn endpoint(g: &Graph, node: usize, label: &str) -> (String, String) {
     (format!("{}.{pin}", name(g, node)), format!("{full} · {}", label.trim()))
 }
 
+/// Endpoint text (`node.pin`, maybe `+N more` after it) cut to at most `max` characters while
+/// keeping the pin: the producer part is shortened instead, holding on to a disambiguating
+/// `(arg)` when there is room (`read_reg(rs1).value` → `read…(rs1).value` or `…(rs1).value`,
+/// else `read_reg….value`).
+/// Text without a pin, or whose pin alone doesn't fit, keeps its end (`…ng_pin_name`).
+pub fn fit_end(text: &str, max: usize) -> String {
+    let n = text.chars().count();
+    if n <= max {
+        return text.to_string();
+    }
+    let take = |s: &str, k: usize| s.chars().take(k).collect::<String>();
+    let tail = |s: &str, k: usize| {
+        let c = s.chars().count();
+        s.chars().skip(c.saturating_sub(k)).collect::<String>()
+    };
+    let head_cut = || format!("…{}", tail(text, max.saturating_sub(1)));
+    // The pin: from the last `.` outside the producer's parentheses.
+    let Some(dot) = text.rfind('.').filter(|&d| d > 0 && !text[d..].contains(')')) else { return head_cut() };
+    let (producer, pin) = text.split_at(dot);
+    let pin_n = pin.chars().count();
+    // Room for at least one producer character and the ellipsis.
+    let Some(room) = max.checked_sub(pin_n + 1).filter(|r| *r >= 1) else { return head_cut() };
+    if let Some(open) = producer.rfind('(').filter(|_| producer.ends_with(')')) {
+        let (callee, arg) = producer.split_at(open);
+        let arg_n = arg.chars().count();
+        if arg_n <= room && !callee.is_empty() {
+            return format!("{}…{arg}{pin}", take(callee, room - arg_n).trim_end());
+        }
+    }
+    format!("{}…{pin}", take(producer, room).trim_end())
+}
+
 /// The badge and labels for declared effects: unknown if any part is, pure only if all is.
 pub fn declared(effects: &[Effect]) -> (Mark, Vec<&'static str>) {
     let mark = if effects.contains(&Effect::Unknown) {
@@ -368,6 +400,28 @@ mod tests {
         let c = card(&m.view, report);
         assert_eq!((c.mark, c.inferred), (Mark::Unknown, true));
         assert!(c.effect_tip().contains("inferred"));
+    }
+
+    #[test]
+    fn cut_endpoints_keep_their_pin() {
+        // Short enough: as is.
+        assert_eq!(fit_end("acc.value", 16), "acc.value");
+        assert_eq!(fit_end("unconnected", 16), "unconnected");
+        // The producer is cut, keeping its disambiguating argument while it fits.
+        assert_eq!(fit_end("read_reg(rs1).value", 16), "read…(rs1).value");
+        assert_eq!(fit_end("acc(normalize).acc", 16), "…(normalize).acc");
+        assert_eq!(fit_end("acc(step ∘ normalize).value", 16), "acc(step….value");
+        assert_eq!(fit_end("x_really_long_name.result", 14), "x_real….result");
+        // A "+N more" tail rides with the pin.
+        assert_eq!(fit_end("x_really_long_name.acc +2 more", 20), "x_reall….acc +2 more");
+        // No pin, or a pin too long to keep whole: the end survives.
+        assert_eq!(fit_end("a_long_name_without_pin", 10), "…thout_pin");
+        assert_eq!(fit_end("f.an_extremely_long_pin_name", 10), "…_pin_name");
+        // A dot inside the producer's parentheses is not a pin.
+        assert_eq!(fit_end("call(a.b, c, d, e)", 8), "…, d, e)");
+        for (t, max) in [("read_reg(rs1).value", 16), ("acc(normalize).acc", 12), ("a_long_name_without_pin", 10), ("x.y", 1)] {
+            assert!(fit_end(t, max).chars().count() <= max.max(1), "{t} {max}");
+        }
     }
 
     #[test]
