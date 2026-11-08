@@ -33,6 +33,33 @@ fn text_at(value: &Value, path: &str) -> Option<String> {
     }
 }
 
+/// One chat completion with an explicit `model` (so a caller can escalate), against the
+/// OpenAI-compatible endpoint in `OPENAI_BASE_URL`, authorized by `OPENAI_API_KEY`. Returns the
+/// reply text; the caller owns the prompt.
+pub async fn complete(
+    model: &str,
+    prompt: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let api_key = std::env::var("OPENAI_API_KEY").map_err(|e| format!("OPENAI_API_KEY: {e}"))?;
+    let base_url = std::env::var("OPENAI_BASE_URL").map_err(|e| format!("OPENAI_BASE_URL: {e}"))?;
+    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": prompt }]
+    });
+    let response: Value = reqwest::Client::new()
+        .post(url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    text_at(&response, "/choices/0/message/content")
+        .ok_or_else(|| format!("no text content in response: {response}").into())
+}
+
 #[tokio::main]
 async fn sendPrompt(
     source: &str,

@@ -10,10 +10,11 @@
 //! - Loop backedges (`exec.next`, `next.*`) are drawn but don't rank layout columns.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use argo_protocol::{
-    ClaimPhase, Family, GraphIndex, Language, NodeId, NodeKind as P, PinKind, Relation,
-    Snapshot, ValueType, view,
+    AttemptId, ClaimPhase, Family, GraphIndex, Language, NodeId, NodeKind as P, PinKind, Relation,
+    Snapshot, ValueType, Verdict, view,
 };
 
 use crate::model::{Claim, Evidence, Graph, Group, Kind, Lang, Node, Pin, Ty, Wire};
@@ -81,9 +82,9 @@ fn spelled(k: &PinKind) -> Option<[String; 2]> {
     }
 }
 
-/// Language, evidence and claim for a node. Call sites take their callee's.
-fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> (Lang, Evidence, Option<Claim>) {
-    let shown = match ix.node(id).map(|n| n.kind) {
+/// The node whose status `id` shows: a call site shows its callee's.
+fn shown(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> NodeId {
+    match ix.node(id).map(|n| n.kind) {
         Some(P::Call) => snap
             .graph
             .edges
@@ -94,8 +95,17 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> (Lang, Evidence, Opti
             })
             .unwrap_or(id),
         _ => id,
-    };
-    let Some(s) = snap.status(shown) else { return (Lang::None, Evidence::None, None) };
+    }
+}
+
+/// Language, evidence and claim for a node. Call sites take their callee's.
+fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> (Lang, Evidence, Option<Claim>) {
+    own_status(snap, shown(snap, ix, id))
+}
+
+/// Language, evidence and claim of the node itself (a function, as the explorer lists it).
+pub fn own_status(snap: &Snapshot, id: NodeId) -> (Lang, Evidence, Option<Claim>) {
+    let Some(s) = snap.status(id) else { return (Lang::None, Evidence::None, None) };
     let lang = match s.accepted {
         Language::None => Lang::None,
         Language::C => Lang::C,
@@ -105,14 +115,24 @@ fn status(snap: &Snapshot, ix: &GraphIndex, id: NodeId) -> (Lang, Evidence, Opti
         Evidence::Rejected
     } else if s.is_accepted_rust() {
         Evidence::Accepted
+    } else if s.candidate.as_ref().is_some_and(|c| c.language == Language::Rust && c.verdict == Verdict::Unvalidated) {
+        Evidence::Unvalidated
     } else {
         Evidence::None
     };
     let claim = s.claim.as_ref().map(|c| Claim {
         worker: u8::try_from(c.worker.0).unwrap_or(u8::MAX),
-        active: c.phase == ClaimPhase::Running,
+        active: c.phase == ClaimPhase::Running && !lease_expired(snap, c.attempt),
     });
     (lang, evidence, claim)
+}
+
+/// Whether a claim's attempt outlived its lease: its worker stopped renewing it (it died or lost
+/// its connection), so nothing is being translated until another worker reclaims the node. A zero
+/// lease is unknown (the fixture and snapshot files record none).
+pub fn lease_expired(snap: &Snapshot, attempt: AttemptId) -> bool {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    snap.attempts.iter().find(|a| a.id == attempt).is_some_and(|a| a.lease_expires_ms != 0 && u128::from(a.lease_expires_ms) <= now)
 }
 
 fn is_backedge(ix: &GraphIndex, to: &argo_protocol::PinRef) -> bool {
@@ -264,6 +284,19 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         origin,
         frames,
     }
+}
+
+/// The Rust source a node shows (its callee's for a call site): the accepted implementation, else
+/// the latest candidate's, when its preview was recorded.
+pub fn rust_source(snap: &Snapshot, id: NodeId) -> Option<&str> {
+    let ix = GraphIndex::new(&snap.graph);
+    let s = snap.status(shown(snap, &ix, id))?;
+    let implementation = s.implementation.or(s.candidate.as_ref().map(|c| c.implementation))?;
+    snap.implementations
+        .iter()
+        .find(|i| i.id == implementation && i.language == Language::Rust)?
+        .preview
+        .as_deref()
 }
 
 /// Whether a protocol node can be opened in place.

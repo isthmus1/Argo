@@ -1,6 +1,17 @@
 [workspace]
 resolver = "3"
-members = ["argo", "argo-protocol", "argo-ui", "iterator"]
+members = [
+    "argo",
+    "argo-db-client",
+    "argo-protocol",
+    "argo-server",
+    "argo-ui",
+    "argo-worker",
+    "iterator",
+]
+# The SpacetimeDB module builds only for wasm32 and is published to the host, so it keeps its own
+# Cargo.lock and stays out of native workspace builds.
+exclude = ["argo-db"]
 
 [workspace.package]
 edition = "2024"
@@ -10,6 +21,10 @@ publish = false
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+# The installed SpacetimeDB host and CLI are 2.0.2; the client SDK and generated bindings match it.
+spacetimedb-sdk = "=2.0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "signal", "time", "sync"] }
 # Rune UI (github.com/anomalyco/rune), not the unrelated `rune` scripting-language crate on
 # crates.io. Rune is pre-release with an unstable API: its README says to pin a revision of `dev`
 # (never rewritten). Pinned to dev@c762af1 (2026-11-07); bump deliberately, never to a branch.

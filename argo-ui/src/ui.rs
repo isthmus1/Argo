@@ -2,6 +2,10 @@
 //! SpacetimeDB; it offers navigation and inspection, never editing. Opening a project and
 //! requesting a rewrite live in `dialogs`.
 
+use std::collections::HashSet;
+
+use argo_protocol::NodeId;
+
 use crate::app::{Item, MARGIN, State};
 use crate::describe::{self, Card};
 use crate::graph::{self, RADIUS};
@@ -57,7 +61,7 @@ pub fn view(p: &Pal, s: &State) -> El {
     let mut root = el().size(W, H)
         .child(graph::view(p, s, W, H).absolute(0.0, 0.0))
         .child(breadcrumb(p, s).absolute(M, M))
-        .child(row().gap(8.0).child(crate::dialogs::toolbar(p, s)).child(status(p, s)).pin(None, Some(M), Some(M), None));
+        .child(chrome(p, s).pin(None, Some(M), Some(M), None));
     if s.project.is_some() {
         root = root.child(crate::dialogs::explorer(p, s).absolute(M, 72.0));
     }
@@ -74,6 +78,14 @@ pub fn view(p: &Pal, s: &State) -> El {
         root = root.child(crate::dialogs::modal(p, s).absolute(0.0, 0.0));
     }
     root
+}
+
+/// Top-right controls. Watching SpacetimeDB offers no Open or Rewrite: what is shown and what is
+/// translated are the database's and the workers' business.
+fn chrome(p: &Pal, s: &State) -> El {
+    let r = row().gap(8.0);
+    let r = if s.db.is_some() { r } else { r.child(crate::dialogs::toolbar(p, s)) };
+    r.child(status(p, s))
 }
 
 fn breadcrumb(p: &Pal, s: &State) -> El {
@@ -110,13 +122,21 @@ fn status(p: &Pal, s: &State) -> El {
             workers.push((c.worker, c.active, g.title.clone()));
         }
     }
+    // Watching a database, every claim counts, not only those on the shown function's canvas.
+    if let Some(live) = s.live.as_ref().filter(|_| s.db.is_some()) {
+        let snap = &live.snap;
+        let claimed: HashSet<NodeId> = snap.status.iter().filter(|st| st.claim.is_some()).map(|st| st.node).collect();
+        workers = snap.graph.nodes.iter().filter(|n| claimed.contains(&n.id))
+            .filter_map(|n| crate::bridge::own_status(snap, n.id).2.map(|c| (c.worker, c.active, n.name.clone())))
+            .collect();
+    }
     workers.sort_by_key(|w| w.0);
     let mut r = row().h(40.0).px(6.0).gap(4.0).items_center()
         .child(icon_button(p, conn, if s.online { "SpacetimeDB · live" } else { "SpacetimeDB · offline" }));
     r = r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0));
     for (worker, active, title) in &workers {
         let a = graph::avatar(p, *worker, true, 22.0).child(state_glyph(p, *active).absolute(12.0, 12.0));
-        let tip = format!("worker {worker} · {} {title}", if *active { "translating" } else { "queued for" });
+        let tip = format!("worker {worker} · {title} · {}", if *active { "translating" } else { idle(s) });
         r = r.child(icon_button(p, a, &tip));
     }
     r = r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(3.0))
@@ -243,14 +263,21 @@ fn status_glyph(p: &Pal, e: Evidence) -> El {
     let (g, c, tip) = match e {
         Evidence::None => return el(),
         Evidence::Accepted => ("✓", p.ok, "Rust implementation accepted"),
+        Evidence::Unvalidated => ("?", p.pending, "Rust candidate submitted, not validated yet"),
         Evidence::Rejected => ("✕", p.bad, "Latest Rust candidate failed its checks"),
     };
     el().size(20.0, 20.0).radius(10.0).fill(c.alpha(0.18)).center().help(tip)
         .child(text(g).font(TextStyle::new(11.0, 800.0)).color(c))
 }
 
+/// What an inactive claim means: queued in the mock scenes; watching a database, where every
+/// claim starts running, a lease that ran out.
+fn idle(s: &State) -> &'static str {
+    if s.db.is_some() { "lease expired" } else { "queued" }
+}
+
 /// One compact line of agent activity, and one for a failed candidate. No prose banners.
-fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence) -> Option<El> {
+fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence, idle: &str) -> Option<El> {
     let mut c = col().gap(6.0);
     let mut any = false;
     if let Some(cl) = claim {
@@ -258,7 +285,7 @@ fn activity(p: &Pal, claim: Option<crate::model::Claim>, evidence: Evidence) -> 
         c = c.child(row().h(22.0).gap(8.0).items_center()
             .child(graph::avatar(p, cl.worker, true, 18.0))
             .child(text(format!("worker {}", cl.worker)).font(UI_STRONG).color(p.text))
-            .child(label(if cl.active { "translating" } else { "queued" }, p.muted)));
+            .child(label(if cl.active { "translating" } else { idle }, p.muted)));
     }
     if evidence == Evidence::Rejected {
         any = true;
@@ -309,11 +336,14 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 .child(col().gap(4.0)
                     .child(kicker(p, n.kind.category().name(), p.header(n.kind.category())))
                     .child(header(p, &n.title, graph::kind_glyph(n.kind), p.header(n.kind.category()), n.evidence, n.lang, &c.effects, (n.kind == crate::model::Kind::Group).then_some(n.members))));
-            if let Some(a) = activity(p, n.claim, n.evidence) {
+            if let Some(a) = activity(p, n.claim, n.evidence, idle(s)) {
                 body = body.child(a);
             }
             if docked {
                 body = body.child(col().padding(9.0).radius(8.0).fill(p.code_bg).child(mono(&c.signature, p.text).wrap()));
+                if let Some(code) = rust_code(p, s, i) {
+                    body = body.child(code);
+                }
             }
             if !c.inputs.is_empty() || !c.outputs.is_empty() {
                 let mut t = col().gap(6.0);
@@ -348,7 +378,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
                 .child(col().gap(4.0)
                     .child(kicker(p, "node group", p.header(Category::Function)))
                     .child(header(p, &grp.title, "▣", p.header(Category::Function), grp.evidence, grp.lang, &[], Some(members.len()))));
-            if let Some(a) = activity(p, grp.claim, grp.evidence) {
+            if let Some(a) = activity(p, grp.claim, grp.evidence, idle(s)) {
                 body = body.child(a);
             }
             let mut list = col().gap(2.0);
@@ -372,6 +402,23 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             (shell(p, body, docked, p.header(Category::Function)), 80.0 + members.len().min(6) as f32 * 24.0)
         }
     }
+}
+
+/// The Rust a worker wrote for a node (accepted, or the latest candidate), first lines only.
+fn rust_code(p: &Pal, s: &State, i: usize) -> Option<El> {
+    const LINES: usize = 24;
+    let live = s.live.as_ref()?;
+    let source = crate::bridge::rust_source(&live.snap, *live.origin.get(i)?)?;
+    let mut code = col().padding(10.0).radius(8.0).fill(p.code_bg)
+        .child(row().gap(6.0).items_center().child(graph::lang_chip(p, crate::model::Lang::Rust)));
+    for line in source.lines().take(LINES) {
+        code = code.child(mono(if line.is_empty() { " " } else { line }, p.text).single_line().truncate());
+    }
+    let more = source.lines().count().saturating_sub(LINES);
+    if more > 0 {
+        code = code.child(label(&format!("+{more} lines"), p.faint));
+    }
+    Some(code)
 }
 
 /// What kind of node this is, in words, above the title: the header colour's meaning.

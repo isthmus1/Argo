@@ -1,0 +1,22 @@
+[package]
+name = "argo-worker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Claims C chunks from SpacetimeDB, asks nemotron for extern \"C\" Rust, submits it."
+
+[dependencies]
+argo-db-client = { path = "../argo-db-client" }
+# Nemotron (OpenAI-compatible chat completions): `iterator::nemo::complete` and `getLines`.
+iterator = { path = "../iterator" }
+# `env`: the base model defaults to `OPENAI_MODEL`, as iterator's prompt code reads it.
+clap = { workspace = true, features = ["env"] }
+# Only to tell an unavailable endpoint from a rejected request in iterator's errors; the
+# version iterator uses.
+reqwest = { version = "0.13.5", default-features = false }
+spacetimedb-sdk.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27"

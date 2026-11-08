@@ -1,0 +1,20 @@
+[package]
+name = "argo-db"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Argo's SpacetimeDB module: C chunks, Rust chunks, ingest and claim reducers."
+
+# A SpacetimeDB module is a wasm32 cdylib published to the host, so it stays out of the native
+# workspace (root Cargo.toml `exclude`) with its own Cargo.lock. `rlib` lets `cargo test` run the
+# plain rules natively.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Pinned to the installed host (`spacetime --version`: 2.0.2), the version `spacetime init`
+# scaffolds for it. Newer module crates (2.12/2.14) were not used: the module ABI must be one this
+# host accepts, and 2.0.2 is the one verified by publishing.
+[dependencies]
+spacetimedb = "=2.0.2"
+log = "0.4"
