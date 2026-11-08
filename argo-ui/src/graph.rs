@@ -6,7 +6,8 @@ use crate::model::{self, Claim, Evidence, Graph, Kind, Lang, Node, Pin, ROW, Ty}
 use crate::palette::Pal;
 use rune_ui::{Color, Cursor, Drag, El, LineCap, Path, Shape, TextStyle, Tx, canvas, col, el, row, text};
 
-const SOCKET: TextStyle = TextStyle::new(11.0, 450.0);
+/// Pin labels' weight; their size follows the zoom (see [`label_size`]).
+const SOCKET_WEIGHT: f32 = 450.0;
 /// Matches the floating panels' corner radius.
 pub const RADIUS: f32 = 12.0;
 /// Frames round a little more than the nodes inside them.
@@ -28,15 +29,45 @@ pub fn concentric(outer: f32, inset: f32, height: f32) -> f32 {
 const LABEL_ZOOM: f32 = 0.55;
 /// Node titles' world size at rest.
 const TITLE_SIZE: f32 = 11.5;
-/// Zoomed out, node titles keep at least this screen size (truncating sooner inside their
-/// header), up to `TITLE_MAX` world points so they still fit the header's height.
-const TITLE_MIN_SCREEN: f32 = 9.5;
+/// Zoomed out, node titles keep at least this screen size where their header has room (see
+/// [`fit_title`]), up to `TITLE_MAX` world points so they still fit the header's height.
+const TITLE_MIN_SCREEN: f32 = 11.5;
 const TITLE_MAX: f32 = 16.0;
+/// Pin labels' world size at rest.
+const LABEL_SIZE: f32 = 11.0;
+/// Zoomed out (while labels show at all), pin labels keep at least this screen size,
+/// truncating sooner inside their row, up to `LABEL_MAX` world points so they fit its height.
+const LABEL_MIN_SCREEN: f32 = 11.0;
+const LABEL_MAX: f32 = 15.0;
 
-/// The world size of node titles at `zoom`: `TITLE_SIZE`, counter-scaled when zoomed out far
-/// enough that it would read smaller than `TITLE_MIN_SCREEN` on screen.
+/// `rest` world points, counter-scaled when zoomed out far enough that it would read smaller
+/// than `min_screen` on screen, but never past `max`.
+fn screen_floor(zoom: f32, rest: f32, min_screen: f32, max: f32) -> f32 {
+    (min_screen / zoom.max(1e-3)).clamp(rest, max)
+}
+
+/// The world size of node titles at `zoom` (see [`TITLE_MIN_SCREEN`]).
 fn title_size(zoom: f32) -> f32 {
-    (TITLE_MIN_SCREEN / zoom.max(1e-3)).clamp(TITLE_SIZE, TITLE_MAX)
+    screen_floor(zoom, TITLE_SIZE, TITLE_MIN_SCREEN, TITLE_MAX)
+}
+
+/// Advance per character, in ems, assumed when fitting a title (the ratios `model::size` budgets
+/// at rest, so there is a little slack): monospace code headers, and the proportional UI face.
+const MONO_EM: f32 = 0.67;
+const UI_EM: f32 = 0.6;
+
+/// A node title's world size: the zoom's counter-scaled `size` (see [`title_size`]), but only as
+/// far as `title` still fits `room` points at `em` per character, and never under `TITLE_SIZE`.
+/// Node widths are laid out for titles at rest, so counter-scaling alone would cut long titles
+/// short; this grows each as far as its header has room, and truncation stays the backstop.
+fn fit_title(size: f32, title: &str, room: f32, em: f32) -> f32 {
+    let chars = title.chars().count().max(1) as f32;
+    size.min(room / (chars * em)).max(TITLE_SIZE)
+}
+
+/// The world size of pin labels at `zoom` (see [`LABEL_MIN_SCREEN`]).
+fn label_size(zoom: f32) -> f32 {
+    screen_floor(zoom, LABEL_SIZE, LABEL_MIN_SCREEN, LABEL_MAX)
 }
 
 /// How an item is emphasised on the canvas.
@@ -46,7 +77,8 @@ struct Look {
     hovered: bool,
     /// Screen-size compensation for badges and avatars at low zoom.
     badge_scale: f32,
-    labels: bool,
+    /// Pin label size in world points (see [`label_size`]), or `None` when they are hidden.
+    labels: Option<f32>,
     /// Node title size in world points (see [`title_size`]).
     title: f32,
 }
@@ -63,7 +95,7 @@ pub fn view(p: &Pal, s: &State, w: f32, h: f32) -> El {
         selected: s.selected == Some(item),
         hovered: s.hovered == Some(item) && s.selected != Some(item),
         badge_scale: (1.0 / s.cam.zoom).clamp(1.0, 2.2),
-        labels: s.cam.zoom >= LABEL_ZOOM,
+        labels: (s.cam.zoom >= LABEL_ZOOM).then(|| label_size(s.cam.zoom)),
         title: title_size(s.cam.zoom),
     };
 
@@ -139,7 +171,7 @@ fn grid(p: &Pal, s: &State, w: f32, h: f32) -> Shape {
 /// An expanded node group: a frame around its members. The title's button (or a double-click
 /// anywhere on the frame) collapses it into a single node in place.
 fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El {
-    let collapse = group_button(p.frame_text.alpha(0.9), p.frame_text.alpha(0.16), false, look.badge_scale)
+    let collapse = group_button(p.frame_text.alpha(0.9), p.frame_text.alpha(0.1), p.frame_text.alpha(0.14), false, look.badge_scale)
         .key(format!("collapse-group-{gi}"))
         .on_press(move |s: &mut State| s.collapse_group(gi));
     // Trailing controls sit in the frame's corner: equal top and right insets, concentric radii;
@@ -163,21 +195,26 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
 
 /// The collapse/expand button's hit target is at least this many screen points across.
 const GROUP_HIT: f32 = 22.0;
+/// The collapse/expand glyph's span inside that target, in the same points.
+const GROUP_GLYPH: f32 = 13.0;
+/// The drawn button's corner radius, in the same points.
+const GROUP_BUTTON_R: f32 = 6.0;
 /// Extra right inset that keeps a corner button clear of the evidence badge on that corner.
-const BADGE_CLEAR: f32 = 6.0;
+const BADGE_CLEAR: f32 = 10.0;
 
 /// The collapse (frame -> node) or expand (node -> frame) button: diagonal arrows drawn as
 /// strokes, pointing in to collapse and out to expand, as for leaving and entering full screen.
 /// It takes the `model::GROUP_BUTTON` slot in layout but draws, highlights and hit-tests as a
-/// `GROUP_HIT` square (times `badge_scale`, so it stays that big on screen when zoomed out); the
-/// glyph inside keeps the slot's size.
-fn group_button(fg: Color, hover: Color, expand: bool, badge_scale: f32) -> El {
+/// `GROUP_HIT` square (times `badge_scale`, so it stays that big on screen when zoomed out),
+/// with a quiet `rest` fill so it reads as a button, `hover` laid over that, and a glyph
+/// `GROUP_GLYPH` across.
+fn group_button(fg: Color, rest: Color, hover: Color, expand: bool, badge_scale: f32) -> El {
     let d = model::GROUP_BUTTON;
-    // Drawn in the slot, then scaled up by `grow`: draw the glyph `1 / grow` as large.
+    // Drawn in the slot, then scaled up by `grow`: one point of the drawn button is `u` here.
     let grow = GROUP_HIT / d;
     let u = 1.0 / grow;
     let c = d / 2.0;
-    let (reach, stroke, head, gap) = (d * 0.28 * u, 1.5 * u, 4.0 * u, 1.5 * u);
+    let (reach, stroke, head, gap) = (GROUP_GLYPH / 2.0 * u, 1.6 * u, 4.2 * u, 1.3 * u);
     let mut sh = Shape::new();
     // One arrow per diagonal quadrant: a shaft from the corner to near the centre, and an
     // L-shaped head at its corner end (expand) or centre end (collapse).
@@ -194,7 +231,8 @@ fn group_button(fg: Color, hover: Color, expand: bool, badge_scale: f32) -> El {
         );
     }
     // Named as the docked panel's button is.
-    el().size(d, d).radius(5.0).hover(hover).cursor(Cursor::Pointer).scale(grow * badge_scale).child(canvas(sh).size(d, d))
+    el().size(d, d).radius(GROUP_BUTTON_R * u).fill(rest).hover(hover).cursor(Cursor::Pointer).scale(grow * badge_scale)
+        .child(canvas(sh).size(d, d))
         .help(if expand { "Expand group" } else { "Collapse to node" })
 }
 
@@ -456,7 +494,10 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         rects.iter().enumerate().filter(|&(j, _)| j != w.from.0 && j != w.to.0).map(|(_, &r)| r).collect()
     };
     let mut gutter_lanes = GutterLanes::new();
-    let curves: Vec<Curve> = g.wires.iter().zip(&ends).map(|(w, &(a, b))| {
+    // Forward wires between the same two nodes run as translated copies of each other, which
+    // merge wherever they turn steep: each takes its own lane.
+    let lanes = parallel_lanes(&g.wires.iter().zip(&ends).map(|(w, &(a, b))| (!w.back).then_some(((w.from.0, w.to.0), a, b))).collect::<Vec<_>>());
+    let curves: Vec<Curve> = g.wires.iter().zip(&ends).enumerate().map(|(i, (w, &(a, b)))| {
         if w.back {
             let (below, reach) = backs.next().expect("one lane per backedge");
             return Curve::Routed { a, b, below, reach };
@@ -473,7 +514,9 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
             return Curve::Routed { a, b, below, reach: BACK_REACH };
         }
         let dx = ((b[0] - a[0]).abs() * 0.5).max(28.0);
-        let cubic = Curve::Cubic([a, [a[0] + dx, a[1]], [b[0] - dx, b[1]], b]);
+        // Both handles shift by the lane offset, moving the curve's middle `0.75 ×` as far.
+        let shift = lanes[i].map_or(0.0, |l| l.shift);
+        let cubic = Curve::Cubic([a, [a[0] + dx + shift, a[1]], [b[0] - dx + shift, b[1]], b]);
         // An S-curve that would cut through other nodes drops down a gutter instead.
         let obstacles = others(w);
         if crosses(&cubic.points(), &obstacles)
@@ -487,7 +530,7 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
     let boxes: Vec<[f32; 4]> = routes.iter().map(|r| bbox(r)).collect();
     // What shows behind a wire: the canvas, or an expanded frame's fill over it.
     let frames: Vec<[f32; 4]> = pl.frames.iter().filter(|f| f[2] > 0.0).map(|f| [f[0] + o[0], f[1] + o[1], f[0] + f[2] + o[0], f[1] + f[3] + o[1]]).collect();
-    let framed = p.canvas.mix(p.frame_fill.alpha(1.0), p.frame_fill.a);
+    let framed = p.framed();
     let backdrop = |pt: [f32; 2]| {
         if frames.iter().any(|f| pt[0] > f[0] && pt[0] < f[2] && pt[1] > f[1] && pt[1] < f[3]) { framed } else { p.canvas }
     };
@@ -501,7 +544,14 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         let exec = ty == Ty::Exec;
         let lit = touches(w);
         let emphasised = focus.is_some() && lit;
-        let width = if exec { 2.8 } else { 1.8 } + if emphasised { 0.8 } else { 0.0 };
+        // Faded wires are thinner as well as quieter: their colour keeps 3:1 against what is
+        // behind them (see `Pal::dim_wire`), so the stroke carries the rest of the fade.
+        let width = match (exec, lit) {
+            (true, true) => 2.8,
+            (true, false) => 2.0,
+            (false, true) => 1.8,
+            (false, false) => 1.3,
+        } + if emphasised { 0.8 } else { 0.0 };
         let core = if lit { p.ty(ty) } else { p.dim_wire(p.ty(ty)) };
         // The outline under the core, if any: exec wires' casing; lit data wires' dark halo.
         // Mixed toward the canvas (opaque), never by alpha: translucent polylines double-blend
@@ -545,8 +595,10 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         }
         // One direction arrow along the route, clear of other wires: its outline, then its core.
         // Wires sharing a socket run together there, so they don't push each other's arrows.
-        let bundled = |j: usize| g.wires[j].from == w.from || g.wires[j].to == w.to;
-        let tri = arrow(arrow_spot(i, &routes, &boxes, bundled), width, exec);
+        // Lane-mates run alongside on purpose; their arrows are staggered along them instead.
+        let pair = |j: usize| (g.wires[j].from.0, g.wires[j].to.0);
+        let bundled = |j: usize| g.wires[j].from == w.from || g.wires[j].to == w.to || (lanes[i].is_some() && lanes[j].is_some() && pair(j) == pair(i));
+        let tri = arrow(arrow_spot(i, &routes, &boxes, bundled, lanes[i].map_or(0.5, |l| l.arrow)), width, exec);
         if let Some((out, c)) = under {
             s = s.fill(grow_triangle(tri, out).to_vec(), c);
         }
@@ -627,10 +679,12 @@ fn back_lanes(runs: &[BackRun]) -> Vec<(f32, f32)> {
     out
 }
 
-/// Point and unit tangent for wire `own`'s direction arrow: halfway along its route, unless
-/// another (non-`bundled`) wire passes within `ARROW_CLEAR` of the arrow there, as at a
-/// crossing; then the nearest clear spot among 40, 60, 30 and 70 % of the way.
-fn arrow_spot(own: usize, routes: &[Vec<[f32; 2]>], boxes: &[[f32; 4]], bundled: impl Fn(usize) -> bool) -> ([f32; 2], [f32; 2]) {
+/// Point and unit tangent for wire `own`'s direction arrow: `at` of the way (halfway, unless its
+/// lane staggers it) along its longest straight segment when it has one (see
+/// [`straight_span`]), else along the whole route; unless another (non-`bundled`) wire passes
+/// within `ARROW_CLEAR` of the arrow there, as at a crossing; then the nearest clear spot 10 %
+/// and 20 % either side.
+fn arrow_spot(own: usize, routes: &[Vec<[f32; 2]>], boxes: &[[f32; 4]], bundled: impl Fn(usize) -> bool, at: f32) -> ([f32; 2], [f32; 2]) {
     let clear = |(c, d): ([f32; 2], [f32; 2])| {
         let m = ARROW_CLEAR;
         let along = |k: f32| [c[0] + d[0] * k, c[1] + d[1] * k];
@@ -645,8 +699,74 @@ fn arrow_spot(own: usize, routes: &[Vec<[f32; 2]>], boxes: &[[f32; 4]], bundled:
             })
             .all(|j| routes[j].windows(2).all(|s| probes.iter().all(|&p| seg_dist(p, s[0], s[1]) >= m)))
     };
-    let spot = |f: f32| polyline_at(&routes[own], f);
-    [0.5, 0.4, 0.6, 0.3, 0.7].into_iter().map(spot).find(|&s| clear(s)).unwrap_or_else(|| spot(0.5))
+    let pts = &routes[own];
+    let (s0, s1) = straight_span(pts);
+    let spot = |f: f32| polyline_at_len(pts, s0 + (s1 - s0) * f.clamp(0.0, 1.0));
+    [at, at - 0.1, at + 0.1, at - 0.2, at + 0.2].into_iter().map(spot).find(|&s| clear(s)).unwrap_or_else(|| spot(at))
+}
+
+/// The stretch of a route an arrow belongs on, as distances along it: its longest straight
+/// segment (a gutter wire's leg, a routed wire's run) when that is a real share of the route
+/// and long enough to hold an arrow, else the whole route (an S-curve has no straight part).
+fn straight_span(pts: &[[f32; 2]]) -> (f32, f32) {
+    let total = polyline_len(pts);
+    let mut along = 0.0;
+    let mut best = (0.0, 0.0);
+    for s in pts.windows(2) {
+        let len = (s[1][0] - s[0][0]).hypot(s[1][1] - s[0][1]);
+        if len > best.1 - best.0 {
+            best = (along, along + len);
+        }
+        along += len;
+    }
+    if best.1 - best.0 >= (0.25 * total).max(4.0 * ARROW_TIP) { best } else { (0.0, total) }
+}
+
+/// Spacing between the middles of forward wires that share a lane bundle (the same two nodes).
+const PARALLEL_LANE: f32 = 5.0;
+/// How far apart, as a share of the route, lane-mates' arrows sit.
+const PARALLEL_ARROW: f32 = 0.15;
+
+/// A forward wire for lane assignment: its (source, target) node pair and its two ends.
+type ForwardWire = ((usize, usize), [f32; 2], [f32; 2]);
+
+/// A forward wire's place among wires between the same two nodes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Lane {
+    /// Horizontal shift of both its S-curve's handles.
+    shift: f32,
+    /// Where along its route its arrow prefers to sit.
+    arrow: f32,
+}
+
+/// Lanes for forward wires (`(node pair, from, to)`, `None` for wires routed otherwise) that
+/// share their two nodes with another wire: their middles step `PARALLEL_LANE` apart, ordered
+/// so neighbours never cross (going down, the wire leaving higher keeps right of the others;
+/// going up, the one leaving lower does), and their arrows stagger along them. Wires alone
+/// between their nodes get `None`.
+fn parallel_lanes(wires: &[Option<ForwardWire>]) -> Vec<Option<Lane>> {
+    let mut groups = std::collections::BTreeMap::<(usize, usize), Vec<usize>>::new();
+    for (i, w) in wires.iter().enumerate() {
+        if let Some((pair, _, _)) = w {
+            groups.entry(*pair).or_default().push(i);
+        }
+    }
+    let mut out = vec![None; wires.len()];
+    for mut members in groups.into_values().filter(|m| m.len() > 1) {
+        let end = |i: usize| wires[i].map(|(_, a, b)| (a, b)).expect("grouped wires are forward");
+        members.sort_by(|&i, &j| {
+            let ((a, b), (c, d)) = (end(i), end(j));
+            a[1].total_cmp(&c[1]).then(b[1].total_cmp(&d[1])).then(i.cmp(&j))
+        });
+        let n = members.len();
+        let down = members.iter().map(|&i| end(i).1[1] - end(i).0[1]).sum::<f32>() >= 0.0;
+        for (k, &i) in members.iter().enumerate() {
+            let rank = k as f32 - (n as f32 - 1.0) / 2.0;
+            let side = if down { -rank } else { rank };
+            out[i] = Some(Lane { shift: side * PARALLEL_LANE / 0.75, arrow: (0.5 + rank * PARALLEL_ARROW).clamp(0.25, 0.75) });
+        }
+    }
+    out
 }
 
 /// `[min x, min y, max x, max y]` of a polyline.
@@ -663,10 +783,15 @@ fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
 }
 
 /// Point and unit tangent `frac` of the way along a polyline, by arc length.
+#[cfg(test)]
 fn polyline_at(pts: &[[f32; 2]], frac: f32) -> ([f32; 2], [f32; 2]) {
+    polyline_at_len(pts, polyline_len(pts) * frac)
+}
+
+/// Point and unit tangent `dist` along a polyline.
+fn polyline_at_len(pts: &[[f32; 2]], dist: f32) -> ([f32; 2], [f32; 2]) {
     let len = |s: &[[f32; 2]]| ((s[1][0] - s[0][0]).powi(2) + (s[1][1] - s[0][1]).powi(2)).sqrt();
-    let total: f32 = pts.windows(2).map(len).sum();
-    let mut left = total * frac;
+    let mut left = dist;
     for seg in pts.windows(2) {
         let l = len(seg);
         if l > 0.0 && left <= l {
@@ -806,16 +931,16 @@ pub fn kind_glyph(kind: Kind) -> &'static str {
     }
 }
 
-/// Implementation language as a compact chip on a neutral (C) or rust (Rust) fill, legible on
-/// any header colour; structural nodes have none.
+/// Implementation language as a compact chip on a solid slate (C) or rust (Rust) fill, legible
+/// on any header colour; structural nodes have none.
 pub fn lang_chip(p: &Pal, lang: Lang) -> El {
     let t = match lang {
         Lang::None => return el(),
         Lang::C => "C",
         Lang::Rust => "RS",
     };
-    let (fill, fg) = p.chip(lang);
-    row().h(CHIP_H).px(5.0).radius(4.0).fill(fill).border(1.0, Color::BLACK.alpha(0.2)).items_center()
+    let (fill, fg, edge) = p.chip(lang);
+    row().h(CHIP_H).px(5.0).radius(4.0).fill(fill).border(1.0, edge).items_center()
         .child(text(t).font(TextStyle::new(9.5, 750.0).tracking(0.3)).color(fg))
 }
 
@@ -859,7 +984,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         let card = row().size(w, h).px(10.0).gap(7.0).items_center().fill(fill).radius(h / 2.0)
             .border(edge.0, edge.1)
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.0, 600.0)).color(fg.alpha(0.7)))
-            .child(text(n.title.clone()).font(TextStyle::new(look.title, 600.0)).color(fg).single_line().truncate().grow(1.0).min_w(0.0))
+            .child(text(n.title.clone()).font(TextStyle::new(fit_title(look.title, &n.title, w - 39.0, UI_EM), 600.0)).color(fg).single_line().truncate().grow(1.0).min_w(0.0))
             .child(socket(p, n.outs[0].ty, model::socket_local(n, w, true, 0)));
         return interact(decorate(p, emphasis(p, card, look), [w, h], h / 2.0, n.evidence, n.claim, look));
     }
@@ -876,10 +1001,21 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         (false, false) => 10.0,
     };
     let bottom = if pinless { RADIUS } else { 0.0 };
+    // The title's room: the header less its padding, glyph slot and trailing chips with their
+    // gaps (the widths `model::size` budgets).
+    let trailing = if n.kind == Kind::Group { 7.0 + 34.0 } else { 0.0 }
+        + if expandable { 7.0 + model::GROUP_BUTTON } else { 0.0 }
+        + match n.lang {
+            Lang::None => 0.0,
+            Lang::C => 7.0 + 16.0,
+            Lang::Rust => 7.0 + 26.0,
+        };
+    let mono = !matches!(n.kind, Kind::GroupIn | Kind::GroupOut);
+    let title = fit_title(look.title, &n.title, w - 10.0 - 16.0 - 7.0 - pr - trailing, if mono { MONO_EM } else { UI_EM });
     let mut header = row().h(model::HEADER).pl(10.0).pr(pr).gap(7.0).items_center().fill(head).corners([RADIUS, RADIUS, bottom, bottom])
         .child(el().w(16.0).center()
             .child(text(kind_glyph(n.kind)).font(TextStyle::new(11.5, 650.0)).color(Color::WHITE.alpha(0.75)).single_line()))
-        .child(text(n.title.clone()).font(header_font(n.kind, look.title)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
+        .child(text(n.title.clone()).font(header_font(n.kind, title)).color(Color::WHITE).single_line().truncate().grow(1.0).min_w(0.0));
     if n.kind == Kind::Group {
         header = header.child(row().h(CHIP_H).px(5.0).radius(chip_r).fill(Color::BLACK.alpha(0.25)).items_center()
             .child(text(format!("▣ {}", n.members)).font(TextStyle::new(9.5, 700.0)).color(Color::WHITE)));
@@ -888,7 +1024,7 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
         header = header.child(lang_chip(p, n.lang).radius(chip_r));
     }
     if expandable {
-        header = header.child(group_button(Color::WHITE.alpha(0.95), Color::BLACK.alpha(0.25), true, look.badge_scale)
+        header = header.child(group_button(Color::WHITE, Color::WHITE.alpha(0.16), Color::WHITE.alpha(0.16), true, look.badge_scale)
             .key(format!("expand-group-{i}"))
             .on_press(move |s: &mut State| s.expand_node(i)));
     }
@@ -927,12 +1063,14 @@ fn node(p: &Pal, n: &Node, i: usize, [w, h]: [f32; 2], expandable: bool, look: L
     // right behind its body, each a shade deeper, edged and topped in its header colour. The
     // first step clears the hover/selection ring around the body.
     let mut stack = el().size(w, h);
+    // A header-only plate (no pins) is rounded all round, as the header-only card is.
+    let plate_bottom = if h <= model::HEADER { RADIUS } else { 0.0 };
     for k in (1..=STACK_PLATES).rev() {
         let d = STACK_STEP * k as f32;
         let t = k as f32 / (STACK_PLATES as f32 + 1.0);
         let mut plate = el().size(w, h).absolute(d, d).radius(RADIUS)
             .fill(p.node_body.mix(p.canvas, t * 0.6)).border(1.5, head.mix(p.canvas, 0.15 + 0.3 * t))
-            .child(el().size(w, model::HEADER).corners([RADIUS, RADIUS, 0.0, 0.0]).fill(head.mix(p.canvas, 0.25 + 0.25 * t)));
+            .child(el().size(w, model::HEADER.min(h)).corners([RADIUS, RADIUS, plate_bottom, plate_bottom]).fill(head.mix(p.canvas, 0.25 + 0.25 * t)));
         if k == STACK_PLATES {
             plate = plate.shadow(if p.dark { 4.0 } else { 1.0 }, if p.dark { 14.0 } else { 4.0 }, p.shadow);
         }
@@ -947,24 +1085,35 @@ const STACK_STEP: f32 = 6.0;
 
 /// Evidence badge (top-right), worker avatar (top-left) and, for active work, a dashed ring in
 /// the worker's colour. Badges keep a readable screen size when zoomed out.
+/// Nodes and frames share one rule: each corner badge is centred on the middle of its corner's
+/// arc (see [`corner_inset`]), so it sits the same way on any radius.
 fn decorate(p: &Pal, mut e: El, [w, h]: [f32; 2], radius: f32, evidence: Evidence, claim: Option<Claim>, look: Look) -> El {
+    let k = corner_inset(radius.min(w / 2.0).min(h / 2.0));
     if let Some(c) = claim {
         if c.active && !look.selected && !look.hovered {
             let pad = 6.0;
             e = e.child(el().size(w + 2.0 * pad, h + 2.0 * pad).absolute(-pad, -pad).radius(radius + pad)
                 .border(2.0, p.worker(c.worker)).border_dash(6.0, 4.0));
         }
-        e = e.child(avatar(p, c.worker, c.active, 20.0).scale(look.badge_scale).absolute(-10.0, -10.0));
+        let d = 20.0;
+        e = e.child(avatar(p, c.worker, c.active, d).scale(look.badge_scale).absolute(k - d / 2.0, k - d / 2.0));
     }
     let badge = match evidence {
         Evidence::None => return e,
         Evidence::Accepted => ("✓", p.ok),
         Evidence::Rejected => ("!", p.bad),
     };
-    e.child(el().size(18.0, 18.0).radius(9.0).fill(badge.1).border(2.0, p.canvas).center()
+    let d = 18.0;
+    e.child(el().size(d, d).radius(d / 2.0).fill(badge.1).border(2.0, p.canvas).center()
         .child(text(badge.0).font(TextStyle::new(10.5, 750.0)).color(if p.dark { p.canvas } else { Color::WHITE }))
         .scale(look.badge_scale)
-        .absolute(w - 9.0, -9.0))
+        .absolute(w - k - d / 2.0, k - d / 2.0))
+}
+
+/// How far the middle of a corner arc of `radius` sits in from the bounding corner, along each
+/// axis: where a corner badge is centred.
+fn corner_inset(radius: f32) -> f32 {
+    radius * (1.0 - std::f32::consts::FRAC_1_SQRT_2)
 }
 
 pub fn avatar(p: &Pal, worker: u8, active: bool, d: f32) -> El {
@@ -973,12 +1122,14 @@ pub fn avatar(p: &Pal, worker: u8, active: bool, d: f32) -> El {
     if active { a } else { a.opacity(0.65) }
 }
 
-fn socket_row(p: &Pal, pin: &Pin, output: bool, labels: bool) -> El {
-    let r = row().h(ROW).px(12.0).items_center();
-    if !labels {
+/// One side of a body row. A label that no longer fits (counter-scaled when zoomed out, see
+/// [`label_size`]) shrinks with its row and is cut short rather than overflowing the node.
+fn socket_row(p: &Pal, pin: &Pin, output: bool, labels: Option<f32>) -> El {
+    let r = row().h(ROW).px(12.0).items_center().min_w(0.0);
+    let Some(size) = labels else {
         return r;
-    }
-    let t = text(pin.label.clone()).font(SOCKET).color(p.node_text);
+    };
+    let t = text(pin.label.clone()).font(TextStyle::new(size, SOCKET_WEIGHT)).color(p.node_text).single_line().truncate().min_w(0.0);
     if output { r.justify_end().child(t) } else { r.child(t) }
 }
 
@@ -1088,13 +1239,56 @@ mod tests {
         // included) moves back to 40 %.
         let routes = vec![vec![[0.0, 0.0], [100.0, 0.0]], vec![[55.0, -50.0], [55.0, 50.0]]];
         let boxes: Vec<_> = routes.iter().map(|r| bbox(r)).collect();
-        let (p, d) = arrow_spot(0, &routes, &boxes, |_| false);
+        let (p, d) = arrow_spot(0, &routes, &boxes, |_| false, 0.5);
         assert!(close(p, [40.0, 0.0]) && close(d, [1.0, 0.0]), "{p:?}");
         // Unless the two are bundled (sharing a socket), or nothing is near.
-        assert!(close(arrow_spot(0, &routes, &boxes, |_| true).0, [50.0, 0.0]));
+        assert!(close(arrow_spot(0, &routes, &boxes, |_| true, 0.5).0, [50.0, 0.0]));
         let far = vec![routes[0].clone(), vec![[55.0, 20.0], [55.0, 50.0]]];
         let boxes: Vec<_> = far.iter().map(|r| bbox(r)).collect();
-        assert!(close(arrow_spot(0, &far, &boxes, |_| false).0, [50.0, 0.0]));
+        assert!(close(arrow_spot(0, &far, &boxes, |_| false, 0.5).0, [50.0, 0.0]));
+    }
+
+    #[test]
+    fn parallel_wires_between_two_nodes_take_lanes_that_never_cross() {
+        // `completed → end` and `final acc → acc`: the same drop, 16 apart, from one node into
+        // another; a third wire elsewhere stays alone.
+        let (a1, b1, a2, b2) = ([363.0, 432.0], [424.0, 577.0], [363.0, 448.0], [424.0, 594.0]);
+        let lanes = parallel_lanes(&[Some(((0, 1), a2, b2)), Some(((0, 1), a1, b1)), Some(((0, 2), a1, [500.0, 300.0])), None]);
+        assert_eq!((lanes[2], lanes[3]), (None, None));
+        let (lower, upper) = (lanes[0].unwrap(), lanes[1].unwrap());
+        let curve = |a: [f32; 2], b: [f32; 2], l: Lane| {
+            let dx = ((b[0] - a[0]) * 0.5).max(28.0);
+            Curve::Cubic([a, [a[0] + dx + l.shift, a[1]], [b[0] - dx + l.shift, b[1]], b]).points()
+        };
+        let (up, lo) = (curve(a1, b1, upper), curve(a2, b2, lower));
+        // Going down, the wire leaving higher keeps right: their middles sit a lane apart.
+        let mid = |pts: &[[f32; 2]]| polyline_at(pts, 0.5).0;
+        let gap = mid(&up)[0] - mid(&lo)[0];
+        assert!((4.0..=6.5).contains(&gap), "{gap}");
+        // They never cross: at every height they share, the upper one is right of the lower.
+        let x_at = |pts: &[[f32; 2]], y: f32| pts.windows(2).find(|s| (s[0][1] - y) * (s[1][1] - y) <= 0.0).map(|s| {
+            let t = if s[1][1] != s[0][1] { (y - s[0][1]) / (s[1][1] - s[0][1]) } else { 0.0 };
+            s[0][0] + (s[1][0] - s[0][0]) * t
+        });
+        for y in (460..570).step_by(10).map(|y| y as f32) {
+            let (u, l) = (x_at(&up, y).unwrap(), x_at(&lo, y).unwrap());
+            assert!(u > l, "at {y}: {u} / {l}");
+        }
+        // Their arrows stagger along them instead of stacking.
+        assert!((upper.arrow - lower.arrow).abs() >= 0.1, "{upper:?} {lower:?}");
+    }
+
+    #[test]
+    fn arrows_sit_on_a_routes_longest_straight_segment() {
+        // A gutter wire: a long straight leg out, a short bend down, a short leg in.
+        let route = Curve::Gutter { a: [0.0, 0.0], b: [300.0, 100.0], x: 240.0, bend: 20.0 }.points();
+        let (p, d) = polyline_at_len(&route, { let (s0, s1) = straight_span(&route); (s0 + s1) / 2.0 });
+        assert!(close(p, [110.0, 0.0]) && close(d, [1.0, 0.0]), "{p:?}");
+        let boxes: Vec<_> = [route.clone()].iter().map(|r| bbox(r)).collect();
+        assert!(close(arrow_spot(0, &[route], &boxes, |_| false, 0.5).0, [110.0, 0.0]));
+        // An S-curve has no straight stretch: the whole route counts.
+        let s = Curve::Cubic([[0.0, 0.0], [50.0, 0.0], [50.0, 40.0], [100.0, 40.0]]).points();
+        assert_eq!(straight_span(&s), (0.0, polyline_len(&s)));
     }
 
     #[test]
@@ -1184,14 +1378,47 @@ mod tests {
     #[test]
     fn zoomed_out_titles_keep_a_readable_screen_size() {
         assert_eq!(title_size(1.0), TITLE_SIZE);
-        assert_eq!(title_size(0.9), TITLE_SIZE);
-        // At the fit floor the title is counter-scaled to the minimum on screen.
-        for zoom in [0.72, 0.8] {
+        assert_eq!(title_size(1.5), TITLE_SIZE);
+        // Across the default zoom range and down to the fit floor, the title is counter-scaled
+        // to the minimum on screen, which is at least 11 points.
+        const { assert!(TITLE_MIN_SCREEN >= 11.0) };
+        for zoom in [0.72, 0.8, 0.85, 0.95] {
             assert!((title_size(zoom) * zoom - TITLE_MIN_SCREEN).abs() < 1e-3, "{zoom}");
         }
         // Far out it stops growing, so it still fits its header.
         assert_eq!(title_size(0.2), TITLE_MAX);
         const { assert!(TITLE_MAX < model::HEADER - 8.0) };
+    }
+
+    #[test]
+    fn counter_scaled_titles_grow_only_as_far_as_their_header_has_room() {
+        let floor = title_size(0.85);
+        // A short title in a roomy header gets the full counter-scaled size.
+        assert_eq!(fit_title(floor, "report", 120.0, MONO_EM), floor);
+        // A long one grows only until it fills its room...
+        let long = "for (i = 0; i < n; i++)";
+        let room = long.chars().count() as f32 * MONO_EM * 12.5;
+        assert!((fit_title(floor, long, room, MONO_EM) - 12.5).abs() < 1e-3);
+        // ...and never shrinks below its rest size, however tight (truncation takes over).
+        assert_eq!(fit_title(floor, long, 10.0, MONO_EM), TITLE_SIZE);
+        assert_eq!(fit_title(TITLE_SIZE, "", 0.0, UI_EM), TITLE_SIZE);
+    }
+
+    #[test]
+    fn pin_labels_keep_a_readable_screen_size_while_shown() {
+        assert_eq!(label_size(1.0), LABEL_SIZE);
+        assert_eq!(label_size(1.25), LABEL_SIZE);
+        // At the default zoom range's low end, and anywhere it still fits its row, a label
+        // reads at least 11 points on screen.
+        const { assert!(LABEL_MIN_SCREEN >= 11.0) };
+        for zoom in [0.75, 0.85, 0.95] {
+            assert!(label_size(zoom) * zoom >= LABEL_MIN_SCREEN - 1e-3, "{zoom}");
+        }
+        // Further out it stops growing, so it still fits its row; below `LABEL_ZOOM` labels
+        // hide rather than shrink to noise.
+        assert_eq!(label_size(LABEL_ZOOM), LABEL_MAX);
+        assert_eq!(label_size(0.2), LABEL_MAX);
+        const { assert!(LABEL_MAX <= ROW - 6.0) };
     }
 
     #[test]

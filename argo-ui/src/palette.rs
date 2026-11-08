@@ -28,7 +28,7 @@ pub struct Pal {
     /// Outline around exec wires and diamonds.
     pub exec_casing: Color,
     /// What wires away from the hovered or selected item fade toward. Dark mode fades into the
-    /// canvas; light mode into a grey that keeps them traceable (3:1 on the canvas).
+    /// canvas; light mode into a grey. Either stops at `WIRE_FLOOR` (see [`Pal::dim_wire`]).
     pub wire_dim: Color,
     pub u32_: Color,
     pub bool_: Color,
@@ -39,6 +39,16 @@ pub struct Pal {
 
 fn h(s: &str) -> Color {
     rune_ui::color::hex(s).expect("valid hex literal")
+}
+
+/// Least contrast a faded wire keeps against what it is drawn over (WCAG non-text, 3:1).
+pub const WIRE_FLOOR: f32 = 3.0;
+
+/// WCAG 2 contrast ratio. `Color` holds linear components, so its luminance is relative
+/// luminance directly.
+pub fn contrast(a: Color, b: Color) -> f32 {
+    let (la, lb) = (a.luminance(), b.luminance());
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
 impl Pal {
@@ -84,21 +94,43 @@ impl Pal {
         if self.dark { h("#17131f") } else { Color::WHITE }
     }
 
-    /// Language chip (fill, text): neutral for C, rust orange for Rust, independent of header hue.
-    /// The rust fill is dark enough for its small white label (4.5:1).
-    pub fn chip(&self, lang: Lang) -> (Color, Color) {
+    /// Language chip (fill, text, edge): solid slate for C, rust orange for Rust, independent of
+    /// header hue and of equal weight. Both fills are dark enough for their small white label
+    /// (4.5:1); the C chip's lighter edge keeps it apart from the slate Statement header.
+    pub fn chip(&self, lang: Lang) -> (Color, Color, Color) {
         match (lang, self.dark) {
-            (Lang::Rust, _) => (h("#c4521f"), Color::WHITE),
-            (_, true) => (h("#3a3f47"), h("#c9d1d9")),
-            (_, false) => (h("#e8eaed"), h("#3c4043")),
+            (Lang::Rust, _) => (h("#c4521f"), Color::WHITE, Color::BLACK.alpha(0.2)),
+            (_, true) => (h("#5b6678"), Color::WHITE, h("#8b95a7")),
+            (_, false) => (h("#475569"), Color::WHITE, h("#8592a6")),
         }
     }
 
+    /// An expanded frame's fill over the canvas, as one opaque colour: what wires inside a frame
+    /// are seen against.
+    pub fn framed(&self) -> Color {
+        self.canvas.mix(self.frame_fill.alpha(1.0), self.frame_fill.a)
+    }
+
     /// A wire colour faded for wires away from the hovered or selected item. Mixed toward an
-    /// opaque colour, never by alpha: translucent polylines double-blend at their joints. Light
-    /// mode goes most of the way to its grey, so dense graphs stay calm but every wire traceable.
+    /// opaque colour, never by alpha: translucent polylines double-blend at their joints. It goes
+    /// up to `DIM_MIX` of the way to `wire_dim`, so dense graphs stay calm, but stops where it
+    /// would fall under `WIRE_FLOOR` contrast against the canvas or a frame's fill, so every
+    /// faded wire stays traceable.
     pub fn dim_wire(&self, c: Color) -> Color {
-        c.mix(self.wire_dim, if self.dark { 0.6 } else { 0.75 })
+        let backs = [self.canvas, self.framed()];
+        let ok = |t: f32| backs.iter().all(|&b| contrast(c.mix(self.wire_dim, t), b) >= WIRE_FLOOR);
+        let most = if self.dark { 0.6 } else { 0.75 };
+        if ok(most) {
+            return c.mix(self.wire_dim, most);
+        }
+        // Contrast falls monotonically along the mix while the colour stays on its side of the
+        // backdrops, so bisect for the furthest mix that still clears the floor.
+        let (mut lo, mut hi) = (0.0f32, most);
+        for _ in 0..20 {
+            let mid = (lo + hi) / 2.0;
+            if ok(mid) { lo = mid } else { hi = mid }
+        }
+        c.mix(self.wire_dim, lo)
     }
 
     /// Small type-name text: darker than the pin colour in light mode for contrast.
@@ -180,20 +212,15 @@ fn light_pal() -> Pal {
 mod tests {
     use super::*;
 
-    /// WCAG 2 contrast ratio. `Color` holds linear components, so its luminance is relative
-    /// luminance directly.
-    fn contrast(a: Color, b: Color) -> f32 {
-        let (la, lb) = (a.luminance(), b.luminance());
-        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
-    }
-
     #[test]
     fn small_text_meets_wcag_aa() {
         let (light, dark) = (Pal::new(false), Pal::new(true));
         for p in [light, dark] {
-            // The RS chip's white label.
-            let (fill, fg) = p.chip(Lang::Rust);
-            assert!(contrast(fg, fill) >= 4.5, "RS chip {}", contrast(fg, fill));
+            // Both language chips' labels.
+            for lang in [Lang::Rust, Lang::C] {
+                let (fill, fg, _) = p.chip(lang);
+                assert!(contrast(fg, fill) >= 4.5, "{lang:?} chip {}", contrast(fg, fill));
+            }
             // White primary-button labels on the accent.
             assert!(contrast(Color::WHITE, p.accent) >= 4.5, "white/accent {}", contrast(Color::WHITE, p.accent));
         }
@@ -212,14 +239,30 @@ mod tests {
     }
 
     #[test]
-    fn faded_wires_stay_traceable_in_light_mode_but_weaker() {
-        let p = Pal::new(false);
-        let dist = |a: Color, b: Color| (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs();
-        for ty in [Ty::Exec, Ty::U32, Ty::Bool, Ty::Ptr] {
-            let (full, dim) = (p.ty(ty), p.dim_wire(p.ty(ty)));
-            assert!(contrast(dim, p.canvas) >= 3.0, "{ty:?} faded {}", contrast(dim, p.canvas));
-            // Weaker: most of the way to the neutral dimming grey.
-            assert!(dist(dim, p.wire_dim) < dist(full, p.wire_dim) * 0.5, "{ty:?}");
+    fn faded_wires_stay_traceable_on_canvas_and_frames_but_weaker() {
+        for p in [Pal::new(false), Pal::new(true)] {
+            let mode = if p.dark { "dark" } else { "light" };
+            for ty in [Ty::Exec, Ty::U32, Ty::Bool, Ty::Ptr] {
+                let (full, dim) = (p.ty(ty), p.dim_wire(p.ty(ty)));
+                for (on, back) in [("canvas", p.canvas), ("frame", p.framed())] {
+                    let r = contrast(dim, back);
+                    assert!(r >= WIRE_FLOOR - 1e-3, "{mode} {ty:?} faded on {on}: {r}");
+                    // Weaker: visibly less contrast than the full colour where that has room.
+                    assert!(r < contrast(full, back) - 0.4 || contrast(full, back) < WIRE_FLOOR + 0.5, "{mode} {ty:?} on {on}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_c_chip_stands_apart_from_slate_headers() {
+        for p in [Pal::new(false), Pal::new(true)] {
+            let (fill, _, edge) = p.chip(Lang::C);
+            let head = p.header(Category::Statement);
+            // A solid chip, with an edge lighter than both it and the header around it.
+            assert_eq!(fill.a, 1.0);
+            assert!(edge.luminance() > fill.luminance() && edge.luminance() > head.luminance(), "dark: {}", p.dark);
+            assert!(contrast(edge, head) >= 1.5, "dark: {} edge/header {}", p.dark, contrast(edge, head));
         }
     }
 }
