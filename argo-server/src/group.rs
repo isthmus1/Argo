@@ -9,18 +9,23 @@ use tokio::process::{Child, Command};
 /// thread, which lives until exit. The death signal reaches only this direct child: if
 /// `argo-server` is SIGKILLed mid-load, the loader dies but a `git` or `cc` it was running
 /// (`cc` is spawned inside `argo::project`, out of reach here) finishes on its own and exits.
+///
+/// The death signal is Linux-only (`prctl`); elsewhere (macOS) a SIGKILLed `argo-server` leaves
+/// its children running, while every other exit still stops them through [`Group`].
 pub fn isolate(cmd: &mut Command) -> &mut Command {
     cmd.process_group(0);
     // SAFETY: runs in the forked child before exec; `prctl` is async-signal-safe and touches no
     // memory of ours.
+    #[cfg(target_os = "linux")]
     unsafe {
         cmd.pre_exec(|| {
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
-        })
+        });
     }
+    cmd
 }
 
 /// Signal the process group led by `pid` (an [`isolate`]d child).
