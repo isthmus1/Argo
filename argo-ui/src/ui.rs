@@ -55,7 +55,9 @@ pub fn dark(system_dark: bool) -> bool {
 pub fn set_theme(dark: Option<bool>) {
     THEME.with(|t| t.set(dark));
 }
-const DETAIL_W: f32 = 380.0;
+/// Docked details width in large and small windows (see [`detail_w`]).
+const DETAIL_W: f32 = 420.0;
+const DETAIL_MIN_W: f32 = 260.0;
 const HOVER_W: f32 = 340.0;
 
 const RUST_SOURCE: &[&str] = &[
@@ -76,9 +78,11 @@ pub fn free_area(detail_open: bool, explorer: bool) -> [f32; 4] {
     [left, TOP, (w - left - right).max(120.0), (h - TOP - M).max(120.0)]
 }
 
-/// Docked details width: narrower in small windows so the canvas keeps most of the width.
+/// Docked details width, growing with the window from [`DETAIL_MIN_W`] at 1024 points wide to
+/// [`DETAIL_W`] at 2560: small windows keep more canvas, large ones a proportionate panel.
 pub fn detail_w() -> f32 {
-    (viewport()[0] * 0.3).clamp(280.0, DETAIL_W)
+    let t = (viewport()[0] - 1024.0) / (2560.0 - 1024.0);
+    (DETAIL_MIN_W + t * (DETAIL_W - DETAIL_MIN_W)).clamp(DETAIL_MIN_W, DETAIL_W)
 }
 
 /// Explorer width, narrowing with the window like the details panel.
@@ -961,7 +965,7 @@ fn info(p: &Pal, s: &State, item: Item, docked: bool) -> (El, f32) {
             if docked && s.scene == "fixture" {
                 let mut code = col().padding(10.0).radius(8.0).fill(p.code_bg);
                 for line in RUST_SOURCE {
-                    code = code.child(mono(if line.is_empty() { " " } else { line }, p.text));
+                    code = code.child(mono(if line.is_empty() { " " } else { line }, p.text).wrap());
                 }
                 body = body.child(code);
             }
