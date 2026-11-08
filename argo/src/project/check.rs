@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::Step;
 use super::cpp::{self, Input};
+use super::files;
 use super::lines::Mapped;
-use super::{dialect, files};
 use crate::graph::Graph;
 use crate::{ParseResult, Parser, templates};
 
@@ -159,8 +159,7 @@ fn one(setup: &Setup<'_>, path: &Path, mut extra: Vec<String>) -> Checked {
 }
 
 fn parse(raw: &[u8], root: &Path) -> Result<Read, String> {
-    let mut mapped = Mapped::new(raw);
-    dialect::neutralize(&mut mapped.text);
+    let mapped = Mapped::new(raw);
     let parsed = Parser::default().parse(&mapped.text);
     if let Some(d) = parsed.diagnostics.iter().find(|d| d.severity.is_fatal()) {
         let o = mapped.origin(d.span.lo);
