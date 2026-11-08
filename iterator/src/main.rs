@@ -1,38 +1,15 @@
-//mod returnValue;
-//mod returnValue_AI;
+mod returnValue_AI;
 use serde_json::Value;
 const testCode: &str = "
-int ram_read(struct ram *r, unsigned long addr, enum bus_width w, unsigned long *out)
-{
-    unsigned long offset;
-
-    if (r == 0 || r->data == 0)
-        return -1;
-
-    offset = addr - r->base;
-    if (offset >= r->size)
-        return -1;
-
-    *out = 0;
-    switch (w) {
-    case BUS_8:
-        *out = r->data[offset];
-        break;
-    case BUS_16:
-        *out = r->data[offset] | ((unsigned long)r->data[offset + 1] << 8);
-        break;
-    default:
-        return -2;
-    }
-
-    return 0;
-}
-        ";
+ printf(\"Hello, World!\\n\");
+";
 
 fn main() {
-    if let Err(err) = sendPrompt(getLines(testCode, 3, 1000)) {
-        eprintln!("error: {err}");
-    }
+    // if let Err(err) = sendPrompt(getLines(testCode, 3, 1000)) {
+    //     eprintln!("error: {err}");
+    // }
+
+    println!("{}", returnValue_AI::compiled_c_return_val(testCode));
 }
 
 fn getLines(code: &str, startLine: u32, endLine: u32) -> String {
