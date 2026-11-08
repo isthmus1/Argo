@@ -135,7 +135,7 @@ fn a_data_input_has_one_source() {
         let init = g
             .nodes
             .iter()
-            .find(|n| n.parent == Some(ids.compute) && n.name == "acc = 0")
+            .find(|n| n.parent == Some(ids.compute) && n.name == "uint32_t acc = 0")
             .unwrap()
             .id;
         let ret = g
@@ -160,7 +160,7 @@ fn an_exec_output_drives_one_wire() {
         let init = g
             .nodes
             .iter()
-            .find(|n| n.parent == Some(ids.compute) && n.name == "acc = 0")
+            .find(|n| n.parent == Some(ids.compute) && n.name == "uint32_t acc = 0")
             .unwrap()
             .id;
         let ret = g

@@ -8,7 +8,7 @@
       "analysis": "interfaces",
       "state": {
         "state": "frozen",
-        "hash": "bb3be3c93f788683ab6b789899c0349f3d02b703cdefaf81a7618b15e62a336b"
+        "hash": "374c93e6cfdc2f8faf18394a1b861707c740da8a01523946f5bb17f310550d8f"
       }
     },
     "files": [
@@ -326,7 +326,7 @@
           "kind": "call"
         },
         "template": "c.call",
-        "name": "normalize",
+        "name": "normalize(acc + i)",
         "provenance": {
           "range": {
             "file": 1,
@@ -413,7 +413,7 @@
       },
       {
         "id": 17,
-        "logical": "fixture/compute_c/compute/acc___0",
+        "logical": "fixture/compute_c/compute/uint32_t_acc___0",
         "instance": null,
         "parent": 15,
         "order": 1,
@@ -421,7 +421,7 @@
           "kind": "sequence"
         },
         "template": "c.sequence",
-        "name": "acc = 0",
+        "name": "uint32_t acc = 0",
         "provenance": {
           "range": {
             "file": 1,
@@ -441,7 +441,7 @@
       },
       {
         "id": 18,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i",
         "instance": null,
         "parent": 15,
         "order": 2,
@@ -450,7 +450,7 @@
           "of": "for"
         },
         "template": "c.for",
-        "name": "for i in 0..n",
+        "name": "for (uint32_t i = 0; i < n; i++)",
         "provenance": {
           "range": {
             "file": 1,
@@ -513,7 +513,7 @@
       },
       {
         "id": 21,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/Input",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/Input",
         "instance": null,
         "parent": 18,
         "order": 0,
@@ -528,7 +528,7 @@
       },
       {
         "id": 22,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/for",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/for__uint32_t_i___0__i___n__i",
         "instance": null,
         "parent": 18,
         "order": 1,
@@ -537,7 +537,7 @@
           "of": "loop"
         },
         "template": "argo.dispatch.loop",
-        "name": "for",
+        "name": "for (uint32_t i = 0; i < n; i++)",
         "provenance": {
           "range": {
             "file": 1,
@@ -582,7 +582,7 @@
       },
       {
         "id": 23,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/acc___step_acc__i",
         "instance": null,
         "parent": 18,
         "order": 2,
@@ -610,7 +610,7 @@
       },
       {
         "id": 24,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/Output",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/Output",
         "instance": null,
         "parent": 18,
         "order": 3,
@@ -625,7 +625,7 @@
       },
       {
         "id": 25,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i/Input",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/acc___step_acc__i/Input",
         "instance": null,
         "parent": 23,
         "order": 0,
@@ -640,7 +640,7 @@
       },
       {
         "id": 26,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i/step",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/acc___step_acc__i/step",
         "instance": null,
         "parent": 23,
         "order": 1,
@@ -648,7 +648,7 @@
           "kind": "call"
         },
         "template": "c.call",
-        "name": "step",
+        "name": "step(acc, i)",
         "provenance": {
           "range": {
             "file": 1,
@@ -668,7 +668,7 @@
       },
       {
         "id": 27,
-        "logical": "fixture/compute_c/compute/for_i_in_0__n/acc___step_acc__i/Output",
+        "logical": "fixture/compute_c/compute/for__uint32_t_i___0__i___n__i/acc___step_acc__i/Output",
         "instance": null,
         "parent": 23,
         "order": 2,

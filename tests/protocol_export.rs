@@ -69,7 +69,7 @@ fn exits_escape_to_their_targets() {
         .nodes
         .iter()
         .find(|n| {
-            n.kind == NodeKind::Dispatch(argo_protocol::DispatchKind::Loop) && n.name == "for"
+            n.kind == NodeKind::Dispatch(argo_protocol::DispatchKind::Loop) && n.name.starts_with("for (")
         })
         .unwrap();
     let into_next: Vec<_> = graph

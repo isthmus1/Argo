@@ -196,6 +196,7 @@ pub fn graph() -> (Graph, Ids) {
         );
         let call = b.call(step_body, normalize, true);
         b.provenance(call, at("normalize(acc + i)"));
+        b.node_mut(call).name = "normalize(acc + i)".into();
         let go = b.group_output(step_body, key::RETURN_EXIT, &[key::RETURN]);
         b.data((gi, &key::live("acc")), (sum, &key::operand(0)));
         b.data((gi, &key::live("i")), (sum, &key::operand(1)));
@@ -214,7 +215,7 @@ pub fn graph() -> (Graph, Ids) {
         &mut b,
         compute,
         NodeKind::Sequence,
-        "acc = 0",
+        "uint32_t acc = 0",
         "uint32_t acc = 0;",
     );
     b.pins(
@@ -228,7 +229,7 @@ pub fn graph() -> (Graph, Ids) {
         &mut b,
         compute,
         NodeKind::Loop(LoopKind::For),
-        "for i in 0..n",
+        "for (uint32_t i = 0; i < n; i++)",
         "for (uint32_t i = 0; i < n; i++)\n        acc = step(acc, i);",
     );
     b.pins(
@@ -263,7 +264,7 @@ pub fn graph() -> (Graph, Ids) {
     let loop_dispatch = b.node(
         Some(loop_region),
         NodeKind::Dispatch(DispatchKind::Loop),
-        "for",
+        "for (uint32_t i = 0; i < n; i++)",
     );
     let mut prov = at("for (uint32_t i = 0; i < n; i++)");
     prov.parts = vec![
@@ -336,6 +337,7 @@ pub fn graph() -> (Graph, Ids) {
     let gi = b.group_input(loop_body);
     let call_step = b.call(loop_body, step, false);
     b.provenance(call_step, at("step(acc, i)"));
+    b.node_mut(call_step).name = "step(acc, i)".into();
     let go = b.group_output(loop_body, key::THEN, &["live.acc"]);
     b.exec((gi, key::ENTER), (call_step, key::ENTER));
     b.exec((call_step, key::THEN), (go, key::THEN));

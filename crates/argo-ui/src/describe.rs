@@ -97,7 +97,7 @@ fn signature(g: &Graph, n: &Node) -> String {
             let arms: Vec<_> = n.outs.iter().filter(|p| p.ty == Ty::Exec).map(|p| p.label.as_str()).collect();
             format!("switch value {{ {} }}", arms.join(", "))
         }
-        Kind::Set => format!("{} = value", n.title.trim_start_matches("Set ")),
+        Kind::Set => format!("{} = value", n.title.trim_end_matches(" = …")),
         Kind::Local => {
             let ty = n.outs.first().map_or_else(|| "u32".to_string(), rs_of);
             match n.title.split_once(" = ") {

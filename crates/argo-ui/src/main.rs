@@ -95,12 +95,12 @@ fn main() {
             ("protocol-hover", |s| {
                 *s = State::protocol_fixture();
                 s.replay(15);
-                hover(s, "step");
+                hover(s, "step(acc, i)");
             }),
             ("protocol-live", |s| {
                 *s = State::protocol_fixture();
                 s.replay(usize::MAX);
-                hover(s, "acc = 0");
+                hover(s, "uint32_t acc = 0");
             }),
             ("snapshot", |s| *s = snapshot_from_env().unwrap_or_else(State::protocol_fixture)),
             ("interp-collapsed", |s| {

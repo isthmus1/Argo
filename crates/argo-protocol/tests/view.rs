@@ -23,12 +23,12 @@ fn closed_level_shows_region_pins() {
     let lv = level(&ix, Some(ids.compute), |_| false);
     assert_eq!(
         names(&ix, lv.nodes.iter().map(|n| n.id)),
-        ["Input", "acc = 0", "for i in 0..n", "return acc", "Output"]
+        ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "return acc", "Output"]
     );
     let wires: HashSet<_> = lv.wires.iter().map(|w| wire(&ix, w)).collect();
-    assert!(wires.contains("acc = 0.live.acc -> for i in 0..n.live.acc"));
-    assert!(wires.contains("Input.param.n -> for i in 0..n.live.n"));
-    assert!(wires.contains("for i in 0..n.exec.then -> return acc.exec.in"));
+    assert!(wires.contains("uint32_t acc = 0.live.acc -> for (uint32_t i = 0; i < n; i++).live.acc"));
+    assert!(wires.contains("Input.param.n -> for (uint32_t i = 0; i < n; i++).live.n"));
+    assert!(wires.contains("for (uint32_t i = 0; i < n; i++).exec.then -> return acc.exec.in"));
     assert!(lv.frames.is_empty());
 }
 
@@ -42,7 +42,7 @@ fn opened_regions_resolve_wires_through_their_interfaces() {
     let shown = names(&ix, lv.nodes.iter().map(|n| n.id));
     assert_eq!(
         shown,
-        ["Input", "acc = 0", "for", "step", "return acc", "Output"]
+        ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output"]
     );
     assert_eq!(lv.frames.len(), 2);
     let step = lv.nodes.iter().find(|n| n.id == ids.call_step).unwrap();
@@ -50,16 +50,16 @@ fn opened_regions_resolve_wires_through_their_interfaces() {
 
     let wires: HashSet<_> = lv.wires.iter().map(|w| wire(&ix, w)).collect();
     for expected in [
-        "Input.param.n -> for.live.n",
-        "acc = 0.live.acc -> for.init.acc",
-        "acc = 0.exec.then -> for.exec.in",
-        "for.body -> step.exec.in",
-        "for.live.acc -> step.param.acc",
-        "for.live.i -> step.param.i",
-        "step.return -> for.next.acc",
-        "step.exec.then -> for.exec.next",
-        "for.completed -> return acc.exec.in",
-        "for.live.acc -> return acc.live.acc",
+        "Input.param.n -> for (uint32_t i = 0; i < n; i++).live.n",
+        "uint32_t acc = 0.live.acc -> for (uint32_t i = 0; i < n; i++).init.acc",
+        "uint32_t acc = 0.exec.then -> for (uint32_t i = 0; i < n; i++).exec.in",
+        "for (uint32_t i = 0; i < n; i++).body -> step(acc, i).exec.in",
+        "for (uint32_t i = 0; i < n; i++).live.acc -> step(acc, i).param.acc",
+        "for (uint32_t i = 0; i < n; i++).live.i -> step(acc, i).param.i",
+        "step(acc, i).return -> for (uint32_t i = 0; i < n; i++).next.acc",
+        "step(acc, i).exec.then -> for (uint32_t i = 0; i < n; i++).exec.next",
+        "for (uint32_t i = 0; i < n; i++).completed -> return acc.exec.in",
+        "for (uint32_t i = 0; i < n; i++).live.acc -> return acc.live.acc",
     ] {
         assert!(
             wires.contains(expected),
@@ -94,7 +94,7 @@ fn pass_through_exec_reaches_the_container_output() {
         "{wires:#?}"
     );
     assert!(
-        wires.contains("normalize.return -> Output.return"),
+        wires.contains("normalize(acc + i).return -> Output.return"),
         "{wires:#?}"
     );
     assert!(

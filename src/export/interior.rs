@@ -59,7 +59,7 @@ impl Exporter<'_> {
                 .map_or(range(n.span.lo, n.span.hi), |p| range(p.span.lo, p.span.hi));
             let dn = self
                 .b
-                .node(Some(node), NodeKind::Dispatch(d), n.template.clone());
+                .node(Some(node), NodeKind::Dispatch(d), self.header(n));
             let mut prov = Provenance::at(header);
             prov.parts = Self::parts(n);
             self.b.provenance(dn, prov);

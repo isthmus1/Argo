@@ -221,12 +221,12 @@ mod tests {
     fn projects_one_frame_with_backedges_flagged() {
         let p = compute_level(&fixture::snapshot());
         let titles: Vec<_> = p.graph.nodes.iter().map(|n| n.title.as_str()).collect();
-        assert_eq!(titles, ["Input", "acc = 0", "for", "step", "return acc", "Output"]);
+        assert_eq!(titles, ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output"]);
         assert_eq!(p.graph.groups.len(), 1, "nested frames draw as one");
-        assert_eq!(p.graph.groups[0].title, "for i in 0..n");
+        assert_eq!(p.graph.groups[0].title, "for (uint32_t i = 0; i < n; i++)");
         assert!(p.graph.nodes.iter().filter(|n| n.group == Some(0)).count() == 2);
         let back: Vec<_> = p.graph.wires.iter().filter(|w| w.back).map(|w| p.graph.nodes[w.from.0].title.as_str()).collect();
-        assert_eq!(back, ["step", "step"], "exec and acc both loop back into the dispatch");
+        assert_eq!(back, ["step(acc, i)", "step(acc, i)"], "exec and acc both loop back into the dispatch");
         assert_eq!(p.graph.crumbs, ["fixture", "compute.c", "compute"]);
     }
 
@@ -237,7 +237,7 @@ mod tests {
             snap.apply(u);
         }
         let p = compute_level(&snap);
-        let step = p.graph.nodes.iter().find(|n| n.title == "step").unwrap();
+        let step = p.graph.nodes.iter().find(|n| n.title == "step(acc, i)").unwrap();
         assert_eq!((step.lang, step.evidence), (Lang::Rust, Evidence::Accepted));
         let pin = &step.ins.iter().find(|p| p.label == "acc").unwrap();
         assert_eq!(pin.spelled.as_ref().unwrap(), &["uint32_t".to_string(), "u32".to_string()]);

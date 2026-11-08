@@ -60,29 +60,62 @@ impl Exporter<'_> {
         }
     }
 
+    /// A node's header: what kind of construct it is, in the source's own words.
     pub(super) fn name(&self, n: &GraphNode) -> String {
-        match (n.kind, &n.name) {
-            (GraphNodeKind::Scope, _) | (_, None) => {}
-            (_, Some(name)) => return name.clone(),
-        }
+        let header = self.header(n);
         match n.kind {
-            GraphNodeKind::CaseGroup => self.case_label(n),
-            GraphNodeKind::Sequence | GraphNodeKind::Opaque => {
-                // The first statement, trimmed to a header-sized label.
-                let text = self.text(n.span.lo, n.span.hi);
-                let line = text
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .trim_end_matches(';');
-                if line.chars().count() > 32 {
-                    format!("{}…", line.chars().take(31).collect::<String>())
-                } else {
-                    line.to_string()
-                }
+            GraphNodeKind::Branch if n.children.len() > 1 => format!("{header} … else"),
+            _ => header,
+        }
+    }
+
+    /// The construct's C header, e.g. `if (i & 1)` or `for (int i = 0; i < n; i++)`. A dispatch
+    /// node shows this; its region adds `… else` when it has one.
+    pub(super) fn header(&self, n: &GraphNode) -> String {
+        let part = |role| {
+            n.parts
+                .iter()
+                .find(|p| p.role == role)
+                .map(|p| collapse(&self.text(p.span.lo, p.span.hi)))
+                .unwrap_or_default()
+        };
+        let text = match (n.kind, kind(n)) {
+            (GraphNodeKind::Branch, _) => format!("if ({})", part(CNodeRole::Condition)),
+            (_, NodeKind::Loop(LoopKind::For)) => format!(
+                "for ({}; {}; {})",
+                part(CNodeRole::Initializer).trim_end_matches(';'),
+                part(CNodeRole::Condition),
+                part(CNodeRole::Step)
+            ),
+            (_, NodeKind::Loop(LoopKind::While)) => format!("while ({})", part(CNodeRole::Condition)),
+            (_, NodeKind::Loop(LoopKind::DoWhile)) => {
+                format!("do … while ({})", part(CNodeRole::Condition))
+            }
+            (GraphNodeKind::Switch, _) => format!("switch ({})", part(CNodeRole::Selector)),
+            (GraphNodeKind::CaseGroup, _) => format!("{}:", self.case_label(n)),
+            (GraphNodeKind::Scope, _) if n.name.as_deref() == Some("else") => "else".into(),
+            (GraphNodeKind::Scope, _) => "{ … }".into(),
+            (GraphNodeKind::Sequence | GraphNodeKind::Opaque, _) => {
+                collapse(&self.text(n.span.lo, n.span.hi)).trim_end_matches(';').to_string()
             }
             _ => n.name.clone().unwrap_or_else(|| n.template.clone()),
-        }
+        };
+        clip(&text, HEADER_MAX)
+    }
+}
+
+/// Header text longer than this is cut with an ellipsis.
+const HEADER_MAX: usize = 44;
+
+/// Source text on one line: newlines and runs of spaces become single spaces.
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        format!("{}…", text.chars().take(max - 1).collect::<String>().trim_end())
+    } else {
+        text.to_string()
     }
 }

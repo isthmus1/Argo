@@ -121,7 +121,21 @@ impl State {
             [body] if body.kind == NodeKind::Scope => body.id,
             _ => f.id,
         };
-        Ok(State::from_snapshot("snapshot", snap, Some(container), HashSet::new(), vec![]))
+        // `ARGO_OPEN=all` opens every construct inside the shown level.
+        let open = if std::env::var("ARGO_OPEN").is_ok_and(|v| v == "all") {
+            let mut open = HashSet::new();
+            let mut stack = vec![container];
+            while let Some(c) = stack.pop() {
+                for n in snap.graph.nodes.iter().filter(|n| n.parent == Some(c)) {
+                    open.insert(n.id);
+                    stack.push(n.id);
+                }
+            }
+            open
+        } else {
+            HashSet::new()
+        };
+        Ok(State::from_snapshot("snapshot", snap, Some(container), open, vec![]))
     }
 
     /// Apply up to `n` pending deltas at once (scripted captures).
@@ -169,7 +183,8 @@ impl State {
     /// and centre on where an agent is working (or the entry), leaving the rest to panning.
     pub fn fit(&mut self) {
         self.fit_all();
-        if self.cam.zoom >= READABLE_ZOOM {
+        // Captures can ask for the whole graph regardless of readability (`ARGO_FIT=all`).
+        if self.cam.zoom >= READABLE_ZOOM || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
             return;
         }
         // Start where the program starts (reading order); the far edge fades to show more.

@@ -92,12 +92,46 @@ const fn claim(worker: u8, active: bool) -> Option<Claim> {
 }
 
 pub fn scene(name: &str) -> Graph {
-    match name {
+    let mut g = match name {
         "branches" => branches(),
         "dataflow" => dataflow(),
         "devices" => devices(),
         "interp" => interp(),
         _ => fixture(),
+    };
+    code_headers(&mut g);
+    g
+}
+
+/// Headers say what construct a node is, in C terms: `if (cond)` with the condition's source,
+/// `switch (opcode)`, `for (…)`, `return`, `x = …`.
+fn code_headers(g: &mut Graph) {
+    let source = |g: &Graph, node: usize, pin: usize| {
+        g.wires.iter().find(|w| w.to == (node, pin)).map(|w| g.nodes[w.from.0].title.clone())
+    };
+    for i in 0..g.nodes.len() {
+        let n = &g.nodes[i];
+        let title = match n.kind {
+            Kind::Branch if n.title == "Branch" => {
+                let cond = n.ins.iter().position(|p| p.ty == Ty::Bool);
+                match cond.and_then(|c| source(g, i, c)) {
+                    Some(c) => format!("if ({c})"),
+                    None => "if".into(),
+                }
+            }
+            Kind::Switch => match n.title.strip_prefix("Switch ") {
+                Some(sel) => format!("switch ({sel})"),
+                None => continue,
+            },
+            Kind::GroupOut if n.title == "Return" => "return".into(),
+            Kind::Set => match n.title.strip_prefix("Set ") {
+                Some(var) => format!("{var} = …"),
+                None => continue,
+            },
+            Kind::Loop if n.title == "for i in 0..n" => "for (i = 0; i < n; i++)".into(),
+            _ => continue,
+        };
+        g.nodes[i].title = title;
     }
 }
 
