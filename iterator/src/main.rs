@@ -1,15 +1,12 @@
-mod returnValue_AI;
 use serde_json::Value;
 const testCode: &str = "
  printf(\"Hello, World!\\n\");
 ";
 
 fn main() {
-    // if let Err(err) = sendPrompt(getLines(testCode, 3, 1000)) {
-    //     eprintln!("error: {err}");
-    // }
-
-    println!("{}", returnValue_AI::compiled_c_return_val(testCode));
+    if let Err(err) = sendPrompt(getLines(testCode, 3, 1000)) {
+        eprintln!("error: {err}");
+    }
 }
 
 fn getLines(code: &str, startLine: u32, endLine: u32) -> String {
