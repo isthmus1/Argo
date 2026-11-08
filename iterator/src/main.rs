@@ -1,11 +1,9 @@
 use serde_json::Value;
-const CONTEXT_LINES: u32 = 5;
-const testCode: &str = "
- printf(\"Hello, World!\\n\");
-";
+const CONTEXT_LINES: u32 = 10;
+const testCode: &str = include_str!("../../tests/basic_game.c");
 
 fn main() {
-    if let Err(err) = sendPrompt(testCode, 3, 1000) {
+    if let Err(err) = sendPrompt(testCode, 100, 115) {
         eprintln!("error: {err}");
     }
 }
@@ -48,10 +46,9 @@ async fn sendPrompt(
     end_line: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if start_line == 0 || end_line < start_line {
-        return Err(format!(
-            "invalid line range: start_line={start_line}, end_line={end_line}"
-        )
-        .into());
+        return Err(
+            format!("invalid line range: start_line={start_line}, end_line={end_line}").into(),
+        );
     }
 
     let context_start = start_line.saturating_sub(CONTEXT_LINES).max(1);
@@ -114,7 +111,7 @@ async fn sendPrompt(
     //.or_else(|| text_at(&response, "/choices/0/message/reasoning_content"));
 
     match text {
-        Some(content) => println!("{content}"),
+        Some(content) => println!("CODING AGENT CONTENT:\n{content}"),
         None => eprintln!("no text content in response: {response}"),
     }
 
