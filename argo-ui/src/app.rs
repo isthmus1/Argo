@@ -148,6 +148,10 @@ pub struct Live {
     pub container: Option<NodeId>,
     pub open: HashSet<NodeId>,
     pending: VecDeque<Update>,
+    /// The whole-program view is showing (`open` then holds the files drawn as frames).
+    pub whole: bool,
+    /// Calls between functions, worked out once per structure for the whole-program view.
+    pub(crate) calls: Option<std::sync::Arc<Vec<(NodeId, NodeId)>>>,
     /// View node index → protocol node (see [`bridge::Projection::origin`]).
     pub(crate) origin: Vec<NodeId>,
     pub(crate) frames: Vec<NodeId>,
@@ -281,7 +285,7 @@ impl State {
     /// `transcript` as live deltas.
     pub fn from_snapshot(scene: &'static str, snap: Snapshot, container: Option<NodeId>, open: HashSet<NodeId>, transcript: Vec<Update>) -> State {
         let mut s = State::empty(scene, vec![]);
-        s.live = Some(Live { snap, container, open, pending: transcript.into(), origin: vec![], frames: vec![] });
+        s.live = Some(Live { snap, container, open, pending: transcript.into(), whole: false, calls: None, origin: vec![], frames: vec![] });
         s.reproject();
         s.relayout();
         s.fit();
@@ -351,7 +355,10 @@ impl State {
     /// Re-derive the semantic graph from the protocol snapshot (live scenes only).
     pub(crate) fn reproject(&mut self) {
         let Some(live) = &mut self.live else { return };
-        let p = bridge::project(&live.snap, live.container, &live.open);
+        let p = match (&live.calls, live.whole) {
+            (Some(calls), true) => bridge::program(&live.snap, calls, &live.open),
+            _ => bridge::project(&live.snap, live.container, &live.open),
+        };
         live.origin = p.origin;
         live.frames = p.frames;
         self.graph = layout::with_getters(p.graph);
@@ -361,7 +368,11 @@ impl State {
     /// Rebuild the view graph and its layout after a structural view change (collapse/expand).
     pub(crate) fn relayout(&mut self) {
         self.view = self.graph.collapse(&self.collapsed).0;
-        self.placed = layout::layout(&self.view);
+        self.placed = if self.live.as_ref().is_some_and(|l| l.whole) {
+            layout::packed(&self.view)
+        } else {
+            layout::layout(&self.view)
+        };
     }
 
     /// Rebuild the view graph only: claims and evidence changed, positions did not.
@@ -426,6 +437,10 @@ impl State {
             let zoom = std::env::var("ARGO_ZOOM").ok().and_then(|z| z.parse().ok()).unwrap_or(1.0);
             let (c, r) = t.split_once(',').and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?))).unwrap_or((0, 0));
             self.tile(zoom, c, r);
+            return;
+        }
+        // The whole-program view is a map: as much of it as fits, from its top-left.
+        if self.live.as_ref().is_some_and(|l| l.whole) {
             return;
         }
         // The whole flow, entry to exits, beats a readable slice of it. Captures can ask for the
@@ -822,6 +837,14 @@ impl State {
             return;
         }
         let ident = self.ident(Item::Node(i));
+        // In the whole-program view a function opens on its own level, as from the explorer.
+        if let (Some(live), Some(Ident::Proto(id))) = (&self.live, ident)
+            && live.whole
+            && live.snap.graph.nodes.iter().any(|n| n.id == id && n.kind == argo_protocol::NodeKind::Function)
+        {
+            crate::project::open_function(self, id);
+            return;
+        }
         self.reshape(Item::Node(i), |s| match (&mut s.live, ident) {
             (Some(live), Some(Ident::Proto(id))) => live.open.insert(id),
             (None, Some(Ident::Group(g))) => s.collapsed.get_mut(g).is_some_and(|c| std::mem::replace(c, false)),

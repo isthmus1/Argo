@@ -249,7 +249,24 @@ fn breadcrumb(p: &Pal, s: &State) -> El {
         }
         None => r = r.child(plain_crumbs(p, &s.view.crumbs).key("crumbs")),
     }
-    bar(p, r.child(source_chip(p, &source(s)).ml(2.0).mr(4.0))).key("breadcrumb")
+    let r = r.child(source_chip(p, &source(s)).ml(2.0).mr(4.0));
+    // The whole program, every file and function at once, wired by calls.
+    let r = if s.project.is_some() {
+        let on = crate::project::showing_program(s);
+        let t = if on { text("Whole program").font(UI_STRONG).color(p.text) } else { label("Whole program", p.muted) };
+        r.child(el().w(1.0).h(18.0).fill(p.panel_border).mx(4.0)).child(
+            row().h(CONTROL_H).px(8.0).radius(CONTROL_R).items_center()
+                .fill(if on { p.accent.alpha(0.16) } else { Color::TRANSPARENT })
+                .hover(p.code_bg).cursor(Cursor::Pointer)
+                .help("Show every file and function at once, wired by their calls")
+                .key("whole-program")
+                .on_press(|s: &mut State| crate::project::open_program(s))
+                .child(t),
+        )
+    } else {
+        r
+    };
+    bar(p, r).key("breadcrumb")
 }
 
 /// Crumbs that lead nowhere (a mock scene's) as one title, not buttons: the ancestors faint,

@@ -574,6 +574,7 @@ pub fn open_function(s: &mut State, f: NodeId) {
         .collect();
     live.container = Some(f);
     live.open = body;
+    live.whole = false;
     if let Some(p) = &s.project {
         s.forms.expanded = p.module_of(f).map(|m| m.id);
     }
@@ -582,6 +583,30 @@ pub fn open_function(s: &mut State, f: NodeId) {
     s.reproject();
     s.relayout();
     s.fit();
+}
+
+/// Show the whole program: every file as a dashed frame of its functions, wired by their calls.
+/// The calls are worked out the first time (parsing the stored C), then kept.
+pub fn open_program(s: &mut State) {
+    let Some(live) = &mut s.live else { return };
+    let Some(program) = live.snap.graph.nodes.iter().find(|n| n.kind == NodeKind::Program).map(|n| n.id) else { return };
+    if live.calls.is_none() {
+        live.calls = Some(std::sync::Arc::new(crate::calls::calls(&live.snap)));
+    }
+    live.open = live.snap.graph.nodes.iter().filter(|n| n.kind == NodeKind::Module).map(|n| n.id).collect();
+    live.container = Some(program);
+    live.whole = true;
+    s.forms.expanded = None;
+    s.selected = None;
+    s.hovered = None;
+    s.reproject();
+    s.relayout();
+    s.fit();
+}
+
+/// Whether the whole-program view is showing.
+pub fn showing_program(s: &State) -> bool {
+    s.live.as_ref().is_some_and(|l| l.whole)
 }
 
 /// The function on the canvas, if a project is open.

@@ -189,7 +189,10 @@ fn frame(p: &Pal, f: &model::Group, gi: usize, w: f32, h: f32, look: Look) -> El
         .child(el().size(GROUP_HIT * look.badge_scale, model::GROUP_BUTTON).center().child(collapse));
     let border = if look.selected { (2.0, p.accent) } else if look.hovered { (1.5, p.muted) } else { (1.5, p.frame_text.alpha(0.22)) };
     let fr = el().size(w, h).fill(p.frame_fill).radius(FRAME_RADIUS)
-        .border(border.0, border.1)
+        .border(border.0, border.1);
+    // A file in the whole-program view: dashed, a grouping rather than an opened node group.
+    let fr = if f.dashed { fr.border_dash(8.0, 5.0) } else { fr };
+    let fr = fr
         .child(title.absolute(0.0, 0.0))
         .on_press(move |s: &mut State| if !s.cam.take_panned() { s.select(Item::Group(gi)) })
         .on_double_press(move |s: &mut State| s.toggle_group(gi))

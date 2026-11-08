@@ -57,6 +57,7 @@ fn c_ty(ty: Ty) -> &'static str {
         Ty::U32 => "uint32_t",
         Ty::Bool => "bool",
         Ty::Ptr => "void *",
+        Ty::Call => "call",
     }
 }
 
@@ -99,6 +100,7 @@ pub fn ty_name(ty: Ty) -> &'static str {
         Ty::U32 => "u32",
         Ty::Bool => "bool",
         Ty::Ptr => "*mut T",
+        Ty::Call => "call",
     }
 }
 

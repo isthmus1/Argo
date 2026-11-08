@@ -34,7 +34,7 @@ impl B {
     }
 
     fn begin_group(&mut self, title: &str, lang: Lang, evidence: Evidence, claim: Option<Claim>) -> usize {
-        self.g.groups.push(Group { title: title.into(), lang, evidence, claim, effects: None, rejection: None });
+        self.g.groups.push(Group { title: title.into(), dashed: false, lang, evidence, claim, effects: None, rejection: None });
         self.group = Some(self.g.groups.len() - 1);
         self.g.groups.len() - 1
     }

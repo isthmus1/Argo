@@ -151,36 +151,69 @@ fn dot_slot(p: &Pal, s: &State, id: argo_protocol::NodeId) -> El {
     }
 }
 
-/// The right-hand status column of a folder row: a small blue bubble counting its functions being
-/// translated right now, or empty space.
-fn bubble_slot(p: &Pal, s: &State, functions: &[(argo_protocol::NodeId, String)]) -> El {
-    let working = functions
-        .iter()
-        .filter(|(id, _)| matches!(mark(s, *id), Some((Mark::Working, _))))
-        .count();
-    let slot = row().min_w(MARK_W).h(MARK_W).items_center().justify_end();
-    if working == 0 {
-        return slot;
+/// A folder row's counts, from its functions' marks: how many are being translated right now
+/// (the blue bubble) and how many have Rust pushed (all of them: the green check).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct Tally {
+    working: usize,
+    done: usize,
+}
+
+impl Tally {
+    fn of(marks: impl IntoIterator<Item = Option<Mark>>) -> Tally {
+        let mut t = Tally::default();
+        for m in marks {
+            match m {
+                Some(Mark::Working) => t.working += 1,
+                Some(Mark::Done) => t.done += 1,
+                _ => {}
+            }
+        }
+        t
     }
-    let tip = match working {
-        1 => "1 function in this file is being translated".to_string(),
-        n => format!("{n} functions in this file are being translated"),
-    };
-    slot.help(tip).child(
+}
+
+/// The right-hand status column of a folder row: a green check once every one of its functions
+/// has Rust pushed, and a blue bubble counting those being translated right now (rightmost),
+/// left out at zero.
+fn bubble_slot(p: &Pal, s: &State, functions: &[(argo_protocol::NodeId, String)]) -> El {
+    let t = Tally::of(functions.iter().map(|(id, _)| mark(s, *id).map(|(m, _)| m)));
+    let bubble = |n: usize, fill: Color, tip: String| {
         row()
             .h(14.0)
             .min_w(14.0)
             .px(4.0)
             .radius(7.0)
-            .fill(p.accent)
+            .fill(fill)
             .items_center()
             .justify_center()
+            .help(tip)
             .child(
-                text(working.to_string())
+                text(n.to_string())
                     .font(TextStyle::new(9.0, 700.0))
                     .color(Color::WHITE),
-            ),
-    )
+            )
+    };
+    let mut slot = row().min_w(MARK_W).h(MARK_W).gap(4.0).items_center().justify_end();
+    if t.done > 0 && t.done == functions.len() {
+        // A plain check in the dots' green, no background.
+        let tip = format!("All {} functions in this file have Rust pushed", t.done);
+        slot = slot.child(
+            row()
+                .h(14.0)
+                .items_center()
+                .help(tip)
+                .child(text("✓").font(TextStyle::new(11.0, 800.0)).color(p.ok)),
+        );
+    }
+    if t.working > 0 {
+        let tip = match t.working {
+            1 => "1 function in this file is being translated".to_string(),
+            n => format!("{n} functions in this file are being translated"),
+        };
+        slot = slot.child(bubble(t.working, p.accent, tip));
+    }
+    slot
 }
 
 /// Files and their functions, filterable, docked on the left under the breadcrumb.
@@ -775,6 +808,14 @@ mod tests {
         let p = crate::palette::Pal::new(true);
         assert_eq!(Mark::Working.color(&p), p.accent);
         assert_eq!(Mark::Done.color(&p), p.ok);
+    }
+
+    #[test]
+    fn a_folder_counts_its_functions_being_translated_and_done() {
+        let (w, d, f) = (Some(Mark::Working), Some(Mark::Done), Some(Mark::Failed));
+        assert_eq!(Tally::of([w, d, None]), Tally { working: 1, done: 1 });
+        assert_eq!(Tally::of([w, w, d, d, d, f]), Tally { working: 2, done: 3 });
+        assert_eq!(Tally::of([None, f]), Tally::default());
     }
 
     #[test]

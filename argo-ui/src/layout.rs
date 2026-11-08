@@ -140,6 +140,76 @@ fn bounds(upos: &[[f32; 2]], sizes: &[[f32; 2]]) -> [f32; 4] {
     [b[0], b[1], b[2] - b[0], b[3] - b[1]]
 }
 
+/// The whole-program view's layout: every file's functions arranged inside its frame, callers
+/// generally left of callees, wrapped into columns no taller than the frame is wide; then the
+/// frames (and closed files) packed into rows about as wide as the view is shaped. A layered
+/// layout of hundreds of mostly unconnected functions would be one endless column.
+pub fn packed(g: &Graph) -> Placed {
+    const GAP: f32 = 24.0;
+    const COLUMN_GAP: f32 = 70.0;
+    const UNIT_GAP: f32 = 90.0;
+    let n = g.nodes.len();
+    let size: Vec<[f32; 2]> = g.nodes.iter().map(drawn_size).collect();
+    let mut pos = vec![[0.0, 0.0]; n];
+    // Units: each framed group (members placed relative to it), then each free node.
+    let mut units: Vec<([f32; 2], Vec<(usize, [f32; 2])>, Option<usize>)> = Vec::new();
+    for gi in 0..g.groups.len() {
+        let members: Vec<usize> = (0..n).filter(|&i| g.nodes[i].group == Some(gi)).collect();
+        if members.is_empty() {
+            continue;
+        }
+        // The layered order inside the file: by column, then down it.
+        let (offs, _, _) = arrange(g, &size, &members);
+        let mut order: Vec<usize> = (0..members.len()).collect();
+        order.sort_by(|&a, &b| offs[a][0].total_cmp(&offs[b][0]).then(offs[a][1].total_cmp(&offs[b][1])));
+        let area: f32 = members.iter().map(|&m| (size[m][0] + COLUMN_GAP) * (size[m][1] + GAP)).sum();
+        let tallest = members.iter().map(|&m| size[m][1]).fold(0.0, f32::max);
+        let limit = (area / 1.6).sqrt().max(tallest);
+        let (mut x, mut y, mut col_w, mut h) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let mut placed = Vec::new();
+        for k in order {
+            let m = members[k];
+            if y > 0.0 && y + size[m][1] > limit {
+                x += col_w + COLUMN_GAP;
+                (y, col_w) = (0.0, 0.0);
+            }
+            placed.push((m, [x + FRAME_PAD, y + FRAME_TITLE]));
+            col_w = col_w.max(size[m][0]);
+            h = h.max(y + size[m][1]);
+            y += size[m][1] + GAP;
+        }
+        units.push(([x + col_w + 2.0 * FRAME_PAD, h + FRAME_TITLE + FRAME_PAD], placed, Some(gi)));
+    }
+    for i in 0..n {
+        if g.nodes[i].group.is_none() {
+            units.push((size[i], vec![(i, [0.0, 0.0])], None));
+        }
+    }
+    // Rows of units, about as wide as the view is shaped.
+    let area: f32 = units.iter().map(|(s, _, _)| (s[0] + UNIT_GAP) * (s[1] + UNIT_GAP)).sum();
+    let widest = units.iter().map(|(s, _, _)| s[0]).fold(0.0, f32::max);
+    let row_w = (area * VIEW_ASPECT).sqrt().max(widest);
+    let (mut x, mut y, mut row_h) = (0.0f32, 0.0f32, 0.0f32);
+    let mut frames = vec![[0.0; 4]; g.groups.len()];
+    let (mut upos, mut usize_) = (Vec::new(), Vec::new());
+    for (s, members, group) in &units {
+        if x > 0.0 && x + s[0] > row_w {
+            (x, y, row_h) = (0.0, y + row_h + UNIT_GAP, 0.0);
+        }
+        for &(m, [ox, oy]) in members {
+            pos[m] = [x + ox, y + oy];
+        }
+        if let Some(gi) = group {
+            frames[*gi] = [x, y, s[0], s[1]];
+        }
+        upos.push([x, y]);
+        usize_.push(*s);
+        x += s[0] + UNIT_GAP;
+        row_h = row_h.max(s[1]);
+    }
+    Placed { pos, size, frames, bounds: bounds(&upos, &usize_), row_gaps: vec![], generation: next_generation() }
+}
+
 /// [`layout`], with the lanes its long edges reserve and the units' rects, both in the outer
 /// layered layout's space before rows wrap (see [`layered_lanes`]). A view with collapsed groups
 /// is laid out [`in_place`] (and reports no lanes).

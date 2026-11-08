@@ -253,7 +253,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         .iter()
         .map(|&f| {
             let Shown { lang, evidence, claim, rejection, effects } = status(snap, &ix, f);
-            Group { title: ix.node(f).map_or_else(String::new, frame_title), lang, evidence, claim, effects, rejection }
+            Group { title: ix.node(f).map_or_else(String::new, frame_title), dashed: false, lang, evidence, claim, effects, rejection }
         })
         .collect();
 
@@ -361,6 +361,129 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
     }
 }
 
+/// The whole program: every file as a dashed frame holding its functions, and a wire for every
+/// call between them (`calls`, see [`crate::calls`]). A file not in `open` is one node instead,
+/// its functions' calls merged onto it. Status shows as on every other level.
+pub fn program(snap: &Snapshot, calls: &[(NodeId, NodeId)], open: &HashSet<NodeId>) -> Projection {
+    let ix = GraphIndex::new(&snap.graph);
+    let program = snap.graph.nodes.iter().find(|n| n.kind == P::Program);
+    let functions_of = |m: NodeId| -> Vec<&argo_protocol::Node> {
+        let mut f: Vec<_> = snap.graph.nodes.iter().filter(|n| n.parent == Some(m) && n.kind == P::Function).collect();
+        f.sort_by_key(|n| n.order);
+        f
+    };
+    let mut modules: Vec<&argo_protocol::Node> = snap.graph.nodes.iter()
+        .filter(|n| n.kind == P::Module && !functions_of(n.id).is_empty())
+        .collect();
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Each function's view node: its own, or its closed file's.
+    let (mut nodes, mut origin, mut frames, mut groups) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut view_of: HashMap<NodeId, usize> = HashMap::new();
+    for m in &modules {
+        let functions = functions_of(m.id);
+        if open.contains(&m.id) {
+            let gi = groups.len();
+            groups.push(Group {
+                title: m.name.clone(),
+                dashed: true,
+                lang: Lang::None,
+                evidence: Evidence::None,
+                claim: None,
+                effects: None,
+                rejection: None,
+            });
+            frames.push(m.id);
+            for f in functions {
+                let Shown { lang, evidence, claim, rejection, effects } = status(snap, &ix, f.id);
+                view_of.insert(f.id, nodes.len());
+                nodes.push(Node {
+                    kind: Kind::Call, title: f.name.clone(), lang, evidence, claim, ins: vec![], outs: vec![],
+                    group: Some(gi), members: 0, effects, rejection,
+                });
+                origin.push(f.id);
+            }
+        } else {
+            let vi = nodes.len();
+            for f in &functions {
+                view_of.insert(f.id, vi);
+            }
+            nodes.push(Node {
+                kind: Kind::Group, title: m.name.clone(), lang: Lang::None, evidence: Evidence::None, claim: None,
+                ins: vec![], outs: vec![], group: None, members: functions.len(), effects: None, rejection: None,
+            });
+            origin.push(m.id);
+        }
+    }
+
+    // One wire per caller and callee view node; calls inside a closed file vanish into it.
+    let mut links: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in calls {
+        if let (Some(&x), Some(&y)) = (view_of.get(a), view_of.get(b))
+            && x != y
+            && !links.contains(&(x, y))
+        {
+            links.push((x, y));
+        }
+    }
+    // Calls that close a cycle (recursion) are drawn but don't rank the layout's columns.
+    let back = back_links(nodes.len(), &links);
+    let count = |pick: fn(&(usize, usize)) -> usize, v: usize| links.iter().filter(|l| pick(l) == v).count();
+    for (v, n) in nodes.iter_mut().enumerate() {
+        let (callers, callees) = (count(|l| l.1, v), count(|l| l.0, v));
+        if callers > 0 {
+            n.ins.push(Pin { label: format!("called by {callers}"), ty: Ty::Call, spelled: None });
+        }
+        if callees > 0 {
+            n.outs.push(Pin { label: format!("calls {callees}"), ty: Ty::Call, spelled: None });
+        }
+    }
+    let wires = links.iter().zip(back).map(|(&(x, y), back)| Wire { from: (x, 0), to: (y, 0), back }).collect();
+    let crumbs = vec![program.map_or_else(|| "program".to_string(), |n| n.name.clone())];
+    Projection {
+        graph: Graph { crumbs, nodes, wires, groups, selected_group: None, expanded: None },
+        origin,
+        frames,
+    }
+}
+
+/// Which of `links` (over `n` nodes) close a cycle in a depth-first walk: without them the rest
+/// is acyclic, which the layered layout needs.
+fn back_links(n: usize, links: &[(usize, usize)]) -> Vec<bool> {
+    let mut out: Vec<Vec<usize>> = vec![vec![]; n];
+    for (i, &(a, _)) in links.iter().enumerate() {
+        out[a].push(i);
+    }
+    // 0 unvisited, 1 on the current path, 2 done.
+    let mut state = vec![0u8; n];
+    let mut back = vec![false; links.len()];
+    for start in 0..n {
+        if state[start] != 0 {
+            continue;
+        }
+        let mut stack = vec![(start, 0usize)];
+        state[start] = 1;
+        while let Some(&mut (v, ref mut next)) = stack.last_mut() {
+            if let Some(&li) = out[v].get(*next) {
+                *next += 1;
+                let w = links[li].1;
+                match state[w] {
+                    0 => {
+                        state[w] = 1;
+                        stack.push((w, 0));
+                    }
+                    1 => back[li] = true,
+                    _ => {}
+                }
+            } else {
+                state[v] = 2;
+                stack.pop();
+            }
+        }
+    }
+    back
+}
+
 /// The Rust source a node shows (its callee's for a call site): the accepted implementation, else
 /// the latest candidate's, when its preview was recorded.
 pub fn rust_source(snap: &Snapshot, id: NodeId) -> Option<&str> {
@@ -388,6 +511,34 @@ mod tests {
         let (_, ids) = fixture::graph();
         let open = [ids.loop_region, ids.loop_body].into_iter().collect();
         project(snap, Some(ids.compute), &open)
+    }
+
+    #[test]
+    fn the_whole_program_frames_files_dashed_and_wires_calls() {
+        let snap = fixture::snapshot();
+        let (_, ids) = fixture::graph();
+        let calls = crate::calls::calls(&snap);
+        let open: HashSet<NodeId> = [ids.module].into_iter().collect();
+        let p = program(&snap, &calls, &open);
+        assert_eq!(p.graph.groups.len(), 1);
+        assert!(p.graph.groups[0].dashed && p.graph.groups[0].title == "compute.c");
+        let titles: Vec<_> = p.graph.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, ["normalize", "step", "compute"]);
+        assert!(p.graph.nodes.iter().all(|n| n.group == Some(0) && n.kind == Kind::Call));
+        let wired: Vec<_> = p.graph.wires.iter().map(|w| (titles[w.from.0], titles[w.to.0])).collect();
+        assert_eq!(wired, [("step", "normalize"), ("compute", "step")]);
+        // Closed, the file is one node and its own calls vanish into it.
+        let closed = program(&snap, &calls, &HashSet::new());
+        assert_eq!(closed.graph.nodes.len(), 1);
+        assert_eq!((closed.graph.nodes[0].kind, closed.graph.nodes[0].members), (Kind::Group, 3));
+        assert!(closed.graph.wires.is_empty());
+    }
+
+    #[test]
+    fn calls_closing_a_cycle_are_back_links() {
+        // 0 → 1 → 2 → 0 (mutual recursion), and 0 → 2.
+        let back = back_links(3, &[(0, 1), (1, 2), (2, 0), (0, 2)]);
+        assert_eq!(back, [false, false, true, false]);
     }
 
     #[test]

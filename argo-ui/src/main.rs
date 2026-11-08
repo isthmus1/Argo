@@ -16,13 +16,15 @@
 //! temporary folder, preprocesses and opens it; Ctrl+O opens the same from inside the app.
 //!
 //! SpacetimeDB: `argo-ui --db ws://127.0.0.1:3000 [--module argo]` (or `ARGO_DB`, `ARGO_MODULE`)
-//! watches the database `argo-server` ingested and workers translate, live. Everything shown comes
+//! watches the database `argo-server` ingested and workers translate, live. `ARGO_VIEW=program`
+//! starts a capture on the whole-program view. Everything shown comes
 //! from its rows; nothing is cloned or parsed. A lost connection keeps the last rows on screen,
 //! marked offline, and reconnects. The window is read-only there: Ctrl+O and the scene keys
 //! `1`–`6` do nothing. `--snap` waits for the rows, then captures.
 
 mod app;
 mod bridge;
+mod calls;
 mod db;
 mod describe;
 mod dialogs;
@@ -157,6 +159,10 @@ fn watch(uri: &str, module: &str) -> State {
     });
     open_env_function(&mut s);
     s.open_all_if_requested();
+    // Captures: `ARGO_VIEW=program` shows the whole-program view.
+    if std::env::var("ARGO_VIEW").is_ok_and(|v| v == "program") {
+        project::open_program(&mut s);
+    }
     s
 }
 

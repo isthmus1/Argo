@@ -6,6 +6,8 @@ pub enum Ty {
     U32,
     Bool,
     Ptr,
+    /// The whole-program view's caller → callee links: not a value, no exec order.
+    Call,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -192,6 +194,9 @@ pub struct Wire {
 #[derive(Clone)]
 pub struct Group {
     pub title: String,
+    /// Drawn with a dashed outline: a file in the whole-program view, a grouping rather than a
+    /// node group that opens and closes.
+    pub dashed: bool,
     pub lang: Lang,
     pub evidence: Evidence,
     pub claim: Option<Claim>,

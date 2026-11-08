@@ -64,6 +64,7 @@ impl Pal {
             Ty::U32 => self.u32_,
             Ty::Bool => self.bool_,
             Ty::Ptr => self.ptr,
+            Ty::Call => self.muted,
         }
     }
 
@@ -145,6 +146,7 @@ impl Pal {
             Ty::Bool => h("#a52f68"),
             Ty::Ptr => h("#315da8"),
             Ty::Exec => self.text,
+            Ty::Call => self.muted,
         }
     }
 }
