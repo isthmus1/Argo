@@ -31,7 +31,7 @@ const FRAME_TITLE: f32 = 34.0;
 const DUMMY_H: f32 = 4.0;
 const DUMMY_GAP: f32 = 10.0;
 /// Crossing-minimisation sweeps (alternating direction) and transposition rounds per sweep.
-const SWEEPS: usize = 24;
+const SWEEPS: usize = 48;
 const TRANSPOSE_ROUNDS: usize = 8;
 /// Crossing weight of an exec segment relative to a data segment.
 const EXEC_CROSS: f32 = 6.0;
@@ -62,6 +62,12 @@ fn drawn_size(n: &Node) -> [f32; 2] {
 }
 
 pub fn layout(g: &Graph) -> Placed {
+    layout_lanes(g).0
+}
+
+/// [`layout`], with the lanes its long edges reserve and the units' rects, both in the outer
+/// layered layout's space before rows wrap (see [`layered_lanes`]).
+fn layout_lanes(g: &Graph) -> (Placed, Vec<[f32; 4]>, Vec<[f32; 4]>) {
     let n = g.nodes.len();
     let size: Vec<[f32; 2]> = g.nodes.iter().map(drawn_size).collect();
     let mut pos = vec![[0.0, 0.0]; n];
@@ -110,8 +116,9 @@ pub fn layout(g: &Graph) -> Placed {
         !nd.ins.iter().chain(&nd.outs).any(|p| p.ty == Ty::Exec)
     })).collect();
     let sizes: Vec<[f32; 2]> = units.iter().map(|u| u.size).collect();
-    let (upos, _, _) = layered(&sizes, &edges, &pure);
-    let (upos, row_gaps) = wrap_rows(upos, &sizes, &edges);
+    let (upos, _, _, lanes) = layered_lanes(&sizes, &edges, &pure);
+    let unit_rects: Vec<[f32; 4]> = upos.iter().zip(&sizes).map(|(p, s)| [p[0], p[1], s[0], s[1]]).collect();
+    let (upos, row_gaps) = wrap_rows(upos, &sizes, &edges, &pure);
 
     for (ui, u) in units.iter().enumerate() {
         let [ux, uy] = upos[ui];
@@ -135,13 +142,13 @@ pub fn layout(g: &Graph) -> Placed {
         b[2] = b[2].max(upos[ui][0] + u.size[0]);
         b[3] = b[3].max(upos[ui][1] + u.size[1]);
     }
-    Placed { pos, size, frames, bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], row_gaps }
+    (Placed { pos, size, frames, bounds: [b[0], b[1], b[2] - b[0], b[3] - b[1]], row_gaps }, lanes, unit_rects)
 }
 
 /// A long left-to-right chain shrinks to unreadable when framed. Cut it into rows at column
 /// boundaries so the whole graph keeps roughly the canvas's shape, reading order intact: each row
 /// continues where the previous one ended, like lines of text.
-fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge]) -> (Vec<[f32; 2]>, Vec<f32>) {
+fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool]) -> (Vec<[f32; 2]>, Vec<f32>) {
     if pos.is_empty() {
         return (pos, vec![]);
     }
@@ -163,6 +170,24 @@ fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge]) -> (Vec
     for &s in &starts {
         if s - breaks.last().copied().unwrap_or(x0) >= target && breaks.len() < rows {
             breaks.push(s);
+        }
+    }
+    // A column of pure producers that only feed the next row (the inputs of the loop starting
+    // it, say) moves down with it, so their wires stay short instead of running back under the
+    // whole row; the long wrap is left to the execution path.
+    for k in 1..breaks.len() {
+        let b = breaks[k];
+        let Some(&prev) = starts.iter().rev().find(|&&s| s < b) else { continue };
+        if prev <= breaks[k - 1] {
+            continue;
+        }
+        let column: Vec<usize> = (0..pos.len()).filter(|&u| pos[u][0] == prev).collect();
+        let feeds_next_row = column.iter().all(|&u| {
+            let mut succ = edges.iter().filter(|e| e.from == u).map(|e| pos[e.to][0]).peekable();
+            pure[u] && succ.peek().is_some() && succ.all(|x| x >= b)
+        });
+        if feeds_next_row {
+            breaks[k] = prev;
         }
     }
     let row_at = |x: f32| breaks.iter().rposition(|&b| x >= b).unwrap_or(0);
@@ -202,6 +227,26 @@ fn wrap_rows(mut pos: Vec<[f32; 2]>, sizes: &[[f32; 2]], edges: &[Edge]) -> (Vec
             row[c] = row[p];
             pos[c] = [x, pos[p][1]];
             x += sizes[c][0] + COL_GAP / 2.0;
+        }
+    }
+    // A pure producer with no inputs (a getter, a constant) feeding one consumer in a later row
+    // moves beside it, socket to socket, when that spot is free: its wire stays short.
+    for u in 0..pos.len() {
+        let out: Vec<&Edge> = edges.iter().filter(|e| e.from == u).collect();
+        let Some(e) = out.first() else { continue };
+        let c = e.to;
+        if !pure[u] || edges.iter().any(|e| e.to == u) || out.iter().any(|e| e.to != c) || row[c] <= row[u] {
+            continue;
+        }
+        let at = [pos[c][0] - COL_GAP / 2.0 - sizes[u][0], pos[c][1] + e.to_y - e.from_y];
+        let m = ROW_GAP / 2.0;
+        let clear = (0..pos.len()).filter(|&v| v != u && row[v] == row[c]).all(|v| {
+            at[0] - m >= pos[v][0] + sizes[v][0] || pos[v][0] >= at[0] + sizes[u][0] + m
+                || at[1] - m >= pos[v][1] + sizes[v][1] || pos[v][1] >= at[1] + sizes[u][1] + m
+        });
+        if clear {
+            row[u] = row[c];
+            pos[u] = at;
         }
     }
     let n_rows = breaks.len();
@@ -246,15 +291,34 @@ fn arrange(g: &Graph, size: &[[f32; 2]], members: &[usize]) -> (Vec<[f32; 2]>, f
         let nd = &g.nodes[m];
         !nd.ins.iter().chain(&nd.outs).any(|p| p.ty == Ty::Exec)
     }).collect();
-    layered(&sizes, &edges, &pure)
+    let (mut offs, w, _) = layered(&sizes, &edges, &pure);
+    // Inside a frame each column hangs from the top, so members line up under the title and
+    // the frame shrink-wraps them (a straight wire matters less than a tidy block here).
+    let mut cols: Vec<f32> = offs.iter().map(|o| o[0]).collect();
+    cols.sort_by(f32::total_cmp);
+    cols.dedup();
+    for x in cols {
+        let top = offs.iter().filter(|o| o[0] == x).map(|o| o[1]).fold(f32::MAX, f32::min);
+        offs.iter_mut().filter(|o| o[0] == x).for_each(|o| o[1] -= top);
+    }
+    let h = offs.iter().zip(&sizes).map(|(o, s)| o[1] + s[1]).fold(0.0, f32::max);
+    (offs, w, h)
 }
 
 /// Sugiyama layered placement of boxes connected by weighted port-to-port edges: ranks, dummy
 /// nodes on long edges, port-aware crossing minimisation, then priority-method coordinates.
 fn layered(sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool]) -> (Vec<[f32; 2]>, f32, f32) {
+    let (pos, w, h, _) = layered_lanes(sizes, edges, pure);
+    (pos, w, h)
+}
+
+/// [`layered`], also returning the lane each long edge's dummy reserves in every column it
+/// crosses: as wide as the column, [`DUMMY_H`] tall. Between columns a long wire runs in the
+/// channel; within one it keeps to its lane, clear of the column's nodes.
+fn layered_lanes(sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool]) -> (Vec<[f32; 2]>, f32, f32, Vec<[f32; 4]>) {
     let n = sizes.len();
     if n == 0 {
-        return (vec![], 0.0, 0.0);
+        return (vec![], 0.0, 0.0, vec![]);
     }
     let (rank, topo) = ranks(n, edges, pure);
     let lg = split(sizes, edges, &rank);
@@ -275,10 +339,12 @@ fn layered(sizes: &[[f32; 2]], edges: &[Edge], pure: &[bool]) -> (Vec<[f32; 2]>,
     let pos: Vec<[f32; 2]> = (0..n).map(|v| [col_x[rank[v]], y[v] - min_y]).collect();
     let w = (0..n).map(|v| pos[v][0] + sizes[v][0]).fold(0.0, f32::max);
     let h = (0..n).map(|v| pos[v][1] + sizes[v][1]).fold(0.0, f32::max);
-    (pos, w, h)
+    let lanes = (n..lg.h.len()).map(|d| [col_x[lg.rank[d]], y[d] - min_y, col_w[lg.rank[d]], DUMMY_H]).collect();
+    (pos, w, h, lanes)
 }
 
-/// Longest-path ranks with pure producers pulled one column left of their earliest consumer.
+/// Longest-path ranks with pure producers, and nodes feeding a single consumer, pulled one
+/// column left of their earliest consumer.
 /// Also returns a topological order (any cycle remainder appended in index order).
 fn ranks(n: usize, edges: &[Edge], pure: &[bool]) -> (Vec<usize>, Vec<usize>) {
     let mut indeg = vec![0usize; n];
@@ -308,8 +374,15 @@ fn ranks(n: usize, edges: &[Edge], pure: &[bool]) -> (Vec<usize>, Vec<usize>) {
         }
     }
     for &v in topo.iter().rev() {
-        let min_succ = edges.iter().filter(|e| e.from == v).map(|e| rank[e.to]).min();
-        if let (true, Some(m)) = (pure[v], min_succ) {
+        let out: Vec<&Edge> = edges.iter().filter(|e| e.from == v).collect();
+        let Some(m) = out.iter().map(|e| rank[e.to]).min() else { continue };
+        // A pure producer, or a node fed by others whose data outputs all go to one consumer,
+        // sits in the column just before it rather than wherever its own inputs left it. (Exec
+        // successors already follow the execution path; a source like the function's input
+        // stays first.)
+        let fed = edges.iter().any(|e| e.to == v);
+        let one_consumer = out.iter().all(|e| e.to == out[0].to && e.weight < EXEC_WEIGHT);
+        if pure[v] || (fed && one_consumer) {
             rank[v] = rank[v].max(m.saturating_sub(1));
         }
     }
@@ -381,9 +454,15 @@ fn order(lg: &Lg, topo: &[usize]) -> Vec<Vec<usize>> {
     let mut seen = vec![false; m];
     let mut walk = vec![];
     for &v in topo {
-        dfs(lg, v, &mut seen, &mut walk);
+        dfs(lg, v, &mut seen, &mut walk, false);
     }
-    let starts = [topo.iter().copied().chain(topo.len()..m).collect::<Vec<_>>(), walk];
+    // And from the sinks back: each consumer's producers stay together.
+    let mut seen = vec![false; m];
+    let mut back = vec![];
+    for &v in topo.iter().rev() {
+        dfs(lg, v, &mut seen, &mut back, true);
+    }
+    let starts = [topo.iter().copied().chain(topo.len()..m).collect::<Vec<_>>(), walk, back];
     let mut best: Option<(f32, Vec<Vec<usize>>)> = None;
     for start in starts {
         let mut layers: Vec<Vec<usize>> = vec![vec![]; cols];
@@ -395,11 +474,12 @@ fn order(lg: &Lg, topo: &[usize]) -> Vec<Vec<usize>> {
             best = Some(run);
         }
     }
-    best.expect("two starts").1
+    best.expect("three starts").1
 }
 
-/// Depth-first discovery order: outputs top to bottom, then inputs top to bottom.
-fn dfs(lg: &Lg, v: usize, seen: &mut [bool], out: &mut Vec<usize>) {
+/// Depth-first discovery order: outputs top to bottom, then inputs top to bottom (inputs first
+/// when walking `back` from the sinks).
+fn dfs(lg: &Lg, v: usize, seen: &mut [bool], out: &mut Vec<usize>, back: bool) {
     if seen[v] {
         return;
     }
@@ -409,13 +489,17 @@ fn dfs(lg: &Lg, v: usize, seen: &mut [bool], out: &mut Vec<usize>) {
     right.sort_by(|a, b| a.ay.total_cmp(&b.ay));
     let mut left: Vec<&Seg> = lg.left[v].iter().map(|&s| &lg.segs[s]).collect();
     left.sort_by(|a, b| a.by.total_cmp(&b.by));
-    let next: Vec<usize> = right.iter().map(|s| s.b).chain(left.iter().map(|s| s.a)).collect();
+    let outs = right.iter().map(|s| s.b);
+    let ins = left.iter().map(|s| s.a);
+    let next: Vec<usize> = if back { ins.chain(outs).collect() } else { outs.chain(ins).collect() };
     for u in next {
-        dfs(lg, u, seen, out);
+        dfs(lg, u, seen, out, back);
     }
 }
 
-/// Weighted-median sweeps with adjacent transposition; returns the best ordering seen.
+/// Sweeps with adjacent transposition, alternating direction; each down-and-up pair sorts by
+/// weighted barycentre (which settles the overall order) or by weighted median (which
+/// straightens single wires), in turn. Returns the best ordering seen.
 fn sweep(lg: &Lg, mut layers: Vec<Vec<usize>>) -> (f32, Vec<Vec<usize>>) {
     let cols = layers.len();
     let mut idx = vec![0usize; lg.h.len()];
@@ -427,9 +511,10 @@ fn sweep(lg: &Lg, mut layers: Vec<Vec<usize>>) -> (f32, Vec<Vec<usize>>) {
     let mut best = (crossings(lg, &idx), layers.clone());
     for it in 0..SWEEPS {
         let down = it % 2 == 0;
+        let mean = (it / 2) % 2 == 0;
         let rs: Vec<usize> = if down { (1..cols).collect() } else { (0..cols.saturating_sub(1)).rev().collect() };
         for r in rs {
-            median_sort(lg, &mut layers[r], &idx, down);
+            median_sort(lg, &mut layers[r], &idx, down, mean);
             for (i, &v) in layers[r].iter().enumerate() {
                 idx[v] = i;
             }
@@ -446,9 +531,9 @@ fn sweep(lg: &Lg, mut layers: Vec<Vec<usize>>) -> (f32, Vec<Vec<usize>>) {
     best
 }
 
-/// Sorts one layer by the weighted median port key of each node's neighbours on one side.
-/// Nodes without neighbours on that side keep their slot.
-fn median_sort(lg: &Lg, layer: &mut [usize], idx: &[usize], from_left: bool) {
+/// Sorts one layer by the weighted median (or, with `mean`, the weighted barycentre) port key
+/// of each node's neighbours on one side. Nodes without neighbours on that side keep their slot.
+fn median_sort(lg: &Lg, layer: &mut [usize], idx: &[usize], from_left: bool, mean: bool) {
     let mut keyed: Vec<(f32, usize)> = vec![];
     let mut slots = vec![];
     for (slot, &v) in layer.iter().enumerate() {
@@ -457,7 +542,7 @@ fn median_sort(lg: &Lg, layer: &mut [usize], idx: &[usize], from_left: bool) {
             let sg = &lg.segs[s];
             if from_left { (key(lg, idx, sg.a, sg.ay), sg.w) } else { (key(lg, idx, sg.b, sg.by), sg.w) }
         }).collect();
-        if let Some(m) = weighted_median(ks) {
+        if let Some(m) = if mean { barycentre(&ks) } else { weighted_median(ks) } {
             keyed.push((m, v));
             slots.push(slot);
         }
@@ -466,6 +551,12 @@ fn median_sort(lg: &Lg, layer: &mut [usize], idx: &[usize], from_left: bool) {
     for (slot, (_, v)) in slots.into_iter().zip(keyed) {
         layer[slot] = v;
     }
+}
+
+/// Weighted mean of port keys, `None` without any.
+fn barycentre(ks: &[(f32, f32)]) -> Option<f32> {
+    let total: f32 = ks.iter().map(|k| k.1).sum();
+    (total > 0.0).then(|| ks.iter().map(|k| k.0 * k.1).sum::<f32>() / total)
 }
 
 /// Upper weighted median: on an even split it picks the upper value, so a node lines up with
@@ -702,10 +793,58 @@ mod tests {
                 let insets = [min(0) - f[0], f[0] + f[2] - max(0), f[1] + f[3] - max(1), min(1) - f[1]];
                 let want = [FRAME_PAD, FRAME_PAD, FRAME_PAD, FRAME_TITLE];
                 assert!(insets.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-3), "{}: group {gi} insets {insets:?}", s.scene);
+                // Each column of members hangs from the title: its top member right under it.
+                for &i in &m {
+                    let top = m.iter().filter(|&&j| pl.pos[j][0] == pl.pos[i][0]).map(|&j| pl.pos[j][1]).fold(f32::MAX, f32::min);
+                    assert!((top - (f[1] + FRAME_TITLE)).abs() < 1e-3, "{}: group {gi}: {} column starts {} below the title", s.scene, g.nodes[i].title, top - f[1] - FRAME_TITLE);
+                }
                 checked += 1;
             }
         }
         assert!(checked >= 2, "only {checked} frames");
+    }
+
+    #[test]
+    fn the_fixture_frames_members_are_top_aligned() {
+        let s = State::load("fixture");
+        let at = |t: &str| s.placed.pos[s.view.nodes.iter().position(|n| n.title == t).unwrap()];
+        assert_eq!(at("acc + i")[1], at("normalize")[1]);
+    }
+
+    #[test]
+    fn long_edge_lanes_stay_clear_of_nodes() {
+        for scene in ["interp", "branches", "dataflow", "devices", "fixture"] {
+            let s = State::load(scene);
+            let (_, lanes, units) = layout_lanes(&s.view);
+            if scene == "interp" {
+                assert!(lanes.len() >= 10, "interp has long edges: {} lanes", lanes.len());
+            }
+            let overlaps = |a: [f32; 4], b: [f32; 4]| a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
+            for l in &lanes {
+                for u in &units {
+                    assert!(!overlaps(*l, *u), "{scene}: lane {l:?} crosses node {u:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_loops_inputs_sit_just_before_it_in_its_row() {
+        // `entry_count` and `total = 0` feed only the loop: they sit in the column right before
+        // it, in its row, so their wires are short and not a second return lane under the row.
+        let s = State::load("branches");
+        let (g, pl) = (&s.view, &s.placed);
+        let find = |t: &str| g.nodes.iter().position(|n| n.title == t).unwrap_or_else(|| panic!("{t}"));
+        let lp = find("for (i = 0; i < n; i++)");
+        let row = |i: usize| pl.row_gaps.iter().filter(|&&y| y < pl.pos[i][1]).count();
+        for t in ["entry_count", "total = 0"] {
+            let i = find(t);
+            let gap = pl.pos[lp][0] - (pl.pos[i][0] + pl.size[i][0]);
+            assert!(gap >= COL_GAP - 1e-3, "{t} sits {gap} before the loop");
+            let between = (0..g.nodes.len()).filter(|&j| row(j) == row(lp) && pl.pos[j][0] > pl.pos[i][0] && pl.pos[j][0] < pl.pos[lp][0]).count();
+            assert_eq!(between, 0, "{t}: the loop is the next column");
+            assert_eq!(row(i), row(lp), "{t} is in the loop's row");
+        }
     }
 
     #[test]

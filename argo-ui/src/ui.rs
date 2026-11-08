@@ -580,8 +580,10 @@ fn hover_anchor(s: &State, item: Item, card_w: f32, card_h: f32) -> Option<Spot>
     let on_screen = |r: [f32; 4]| overlap(r, [0.0, 0.0, vw, vh]) > 0.0;
     let neighbour = |i: usize| s.view.wires.iter().any(|wi| Some(wi.from.0) == me && wi.to.0 == i || Some(wi.to.0) == me && wi.from.0 == i);
     let mut others: Vec<([f32; 4], f32)> = vec![];
-    // What a card must not cover: every other node, and every other frame's title row.
-    let mut solid: Vec<[f32; 4]> = vec![];
+    // What a card must not cover: every other node, every other frame's title row, and the
+    // overview card when it shows.
+    let mut solid: Vec<[f32; 4]> = crate::overview::rect(s).filter(|_| crate::overview::overflows(s)).into_iter().collect();
+    others.extend(solid.iter().map(|&r| (r, TITLE_WEIGHT)));
     for i in (0..s.view.nodes.len()).filter(|i| Some(*i) != me) {
         let r = s.screen_rect(i);
         if !on_screen(r) {
