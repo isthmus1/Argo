@@ -15,7 +15,7 @@ const P: Ty = Ty::Ptr;
 
 impl B {
     fn new(crumbs: Vec<&'static str>) -> B {
-        B { g: Graph { crumbs: crumbs.into_iter().map(String::from).collect(), nodes: vec![], wires: vec![], groups: vec![], selected_group: None }, group: None }
+        B { g: Graph { crumbs: crumbs.into_iter().map(String::from).collect(), nodes: vec![], wires: vec![], groups: vec![], selected_group: None, expanded: None }, group: None }
     }
 
     fn node(&mut self, kind: Kind, title: &str, lang: Lang, ins: &[(&str, Ty)], outs: &[(&str, Ty)]) -> usize {

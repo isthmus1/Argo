@@ -339,7 +339,7 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         .collect();
     crumbs.reverse();
     Projection {
-        graph: Graph { crumbs, nodes, wires, groups, selected_group: None },
+        graph: Graph { crumbs, nodes, wires, groups, selected_group: None, expanded: None },
         origin,
         frames,
     }

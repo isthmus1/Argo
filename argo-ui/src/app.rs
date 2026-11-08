@@ -975,10 +975,12 @@ mod tests {
     }
 
     /// Wires of a view graph with exactly one end inside group `gi`'s frame, as
-    /// (outside node title, outside pin label, entering the frame).
+    /// (outside node title, outside pin label, entering the frame); entering wires once per
+    /// outside source value, as the collapsed node draws them.
     fn crossing(g: &Graph, gi: usize) -> Vec<(String, String, bool)> {
         let inside = |i: usize| g.nodes[i].group == Some(gi);
-        let mut v: Vec<_> = g.wires.iter().filter(|w| inside(w.from.0) != inside(w.to.0)).map(|w| outside_end(g, w, inside(w.to.0))).collect();
+        let mut seen = HashSet::new();
+        let mut v: Vec<_> = g.wires.iter().filter(|w| inside(w.from.0) != inside(w.to.0) && (!inside(w.to.0) || seen.insert(w.from))).map(|w| outside_end(g, w, inside(w.to.0))).collect();
         v.sort();
         v
     }
