@@ -67,7 +67,21 @@ fn try_hold(dir: &Path) -> Result<Option<Held>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{hold, take};
+
+    /// A released lock is free once no process holds its descriptor. A child process spawned
+    /// at that moment (other tests run compilers) holds it until it execs, so allow a moment.
+    fn eventually<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
+        for _ in 0..200 {
+            if let Some(t) = f() {
+                return Some(t);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
 
     #[test]
     fn concurrent_slots_differ_and_a_released_one_is_reused() {
@@ -77,7 +91,8 @@ mod tests {
         assert_ne!(first.dir, second.dir);
         let dir = first.dir.clone();
         drop(first);
-        assert_eq!(take(base.path()).unwrap().dir, dir);
+        let reused = eventually(|| take(base.path()).ok().filter(|h| h.dir == dir));
+        assert!(reused.is_some(), "slot {} is reused", dir.display());
     }
 
     #[test]
@@ -94,7 +109,10 @@ mod tests {
             "another spelling"
         );
         drop(held);
-        assert!(hold(&alias).is_ok(), "released with its holder");
+        assert!(
+            eventually(|| hold(&alias).ok()).is_some(),
+            "released with its holder"
+        );
     }
 
     #[test]

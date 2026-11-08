@@ -15,12 +15,16 @@
 - Running it again with an unchanged repository sends nothing.
 - `argo-server` builds on macOS as well as Linux.
 
-## Translation (`argo-worker`, `iterator`)
-- `argo-worker --db <ws-uri>` claims one row at a time, sends its C to Nemotron (via `iterator`), and saves the Rust to `rust_chunk` under the same id as the C row.
+## Translation (`argo-worker`)
+- `argo-worker --db <ws-uri>` claims one row at a time and runs a Nemotron **agent** on it, then saves the accepted Rust to `rust_chunk` under the same id as the C row.
 - Each claim is locked to one worker with a lease and heartbeat, so no two workers translate the same row.
 - **Worker pool:** `--jobs N` runs N workers in one process, each translating one row at a time. Starting more processes adds more workers.
-- **Compile check:** each Rust reply is compiled with `rustc` before it's saved. If it fails, the compiler errors go into the next prompt, up to `--max-attempts` (default 3), then the row is marked `Failed`.
-- Rust that compiles is saved as `Unvalidated`, because it isn't linked into the C program or tested yet.
+- **The agent** is a multi-turn tool-calling conversation (OpenAI-compatible chat completions) with exactly four tools:
+  - `read`, `grep`, `glob`: read-only, over the worker's clone and the claim's session directory (the target's preprocessed translation unit, each submission and its logs). Paths can't leave those two places, symlinks included. There is no write or shell tool: the clone is shared and must stay the ingested commit.
+  - `submit_rewrite(rust_source)`: takes the raw `.rs` text (markdown is rejected, not stripped). The submission is compiled with `rustc`, checked against the C program's symbols (not exported, redefines a C function, calls a `static` one), linked into the C program in place of the C definition (link errors the C program already has are ignored), and its exported signature is compared with the C function's ABI from both compilers' debug info. An accepted submission ends the agent. A rejected one gets back each failing check, why, and the paths of the full rustc/linker/ABI logs, and the agent keeps going in the same conversation.
+- **Budgets:** `--max-attempts` rejected submissions (default 5) and `--max-turns` model turns (default 40) per row, then the row is marked `Failed`. `--escalation-model` takes over the same conversation after `--escalate-after` rejections.
+- At startup the worker checks that the endpoint accepts tool calls, so a server without them can't fail rows.
+- Rust that passes every check is saved as `Unvalidated`, because nothing runs the program or its tests yet.
 - **Model proxy:** only `argo-server` holds the OpenRouter key and picks the model. Each worker attaches to the server's proxy (port 3101) and gets its own key and the model; the proxy forwards its requests as that model (optionally pinned to one provider) with the real key and logs requests, tokens and cost per worker and overall to `usage.log` in the data dir.
 
 ## Compile helpers (`argo/src/comp`)
@@ -47,11 +51,13 @@ keeps its data in `~/.local/state/argo-server/3100`.
 
 Give the server an OpenRouter key (`OPENROUTER_API_KEY=...`) and it also runs the model proxy for
 workers on port 3101 (`--proxy-port`), logging usage to `usage.log` in the data dir. It uses the
-free `nvidia/nemotron-3.5-lightning:free` by default; for the demo, the paid model pinned to
-Fireworks for speed:
+free `nvidia/nemotron-3.5-lightning:free` by default; for the demo, the paid model pinned to one
+provider. The worker's agent needs tool calling, which OpenRouter lists the Fireworks endpoint
+for this model as not supporting (DeepInfra, CoreWeave, Io Net and Darkbloom do), so pin one of
+those:
 ```sh
 ./target/release/argo-server <repo> --listen 0.0.0.0 \
-  --model nvidia/nemotron-3.5-lightning --model-provider fireworks
+  --model nvidia/nemotron-3.5-lightning --model-provider deepinfra
 ```
 
 **2. Workers: translate rows with Nemotron**
@@ -60,7 +66,9 @@ Fireworks for speed:
 ```
 No API key or model needed: workers use the server's model proxy (the `--db` host, port + 1;
 `--proxy URL` to change it) and its model. `--direct --model M` with `OPENROUTER_API_KEY` skips
-the proxy, for a database set up with `--server`. Needs `rustc` on the machine. Start more processes to add workers.
+the proxy, for a database set up with `--server`. Needs `rustc` on the machine, and a C compiler
+(`cc`, or `$CC`) for the link and ABI checks. The model's provider must support tool calling.
+Start more processes to add workers.
 
 **3. UI: watch the database live**
 ```sh
@@ -81,5 +89,5 @@ cargo test --workspace
 - On/off switch for the workers from the UI, and control over who may use it.
 - Changing the number of workers inside a process that's already running.
 - Handing a failed row to a different worker instead of marking it `Failed`.
-- Linking each Rust result into the full C program and testing it.
+- Running the C program (or its tests) with each Rust result linked in.
 - Passing the byte-range struct to `iterator` in place of line numbers.
