@@ -187,6 +187,13 @@ impl State {
     /// and centre on where an agent is working (or the entry), leaving the rest to panning.
     pub fn fit(&mut self) {
         self.fit_all();
+        // Captures can pan like a person would: `ARGO_TILE=col,row` at `ARGO_ZOOM`.
+        if let Ok(t) = std::env::var("ARGO_TILE") {
+            let zoom = std::env::var("ARGO_ZOOM").ok().and_then(|z| z.parse().ok()).unwrap_or(1.0);
+            let (c, r) = t.split_once(',').and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?))).unwrap_or((0, 0));
+            self.tile(zoom, c, r);
+            return;
+        }
         // Captures can ask for the whole graph regardless of readability (`ARGO_FIT=all`).
         if self.cam.zoom >= READABLE_ZOOM || std::env::var("ARGO_FIT").is_ok_and(|v| v == "all") {
             return;
@@ -202,6 +209,44 @@ impl State {
             if wh > vh {
                 self.cam.pan[1] += vy + vh / 2.0 - (y + h / 2.0);
             }
+        }
+    }
+
+    /// Point the camera at one tile of a grid covering the whole graph at `zoom`. Neighbouring
+    /// tiles overlap by about one typical node, so their edges can be matched.
+    /// Prints the grid size (`tiles COLSxROWS`) to stderr for capture scripts.
+    pub fn tile(&mut self, zoom: f32, col: usize, row: usize) {
+        let [_, _, bw, bh] = self.placed.bounds;
+        let (ww, wh) = ((bw + 2.0 * MARGIN) * zoom, (bh + 2.0 * MARGIN) * zoom);
+        let [vx, vy, vw, vh] = ui::free_area(self.selected.is_some());
+        let median = |i: usize| {
+            let mut v: Vec<f32> = self.placed.size.iter().map(|s| s[i]).collect();
+            v.sort_by(f32::total_cmp);
+            v.get(v.len() / 2).copied().unwrap_or(100.0)
+        };
+        let (ox, oy) = (median(0) * zoom, median(1) * zoom);
+        // Tiles per axis, the step between them, and where the first starts: a graph that fits
+        // one view is centred; a larger one is read from its top-left corner, like a page.
+        let axis = |world: f32, view: f32, overlap: f32| {
+            if world <= view {
+                return (1, 0.0, (view - world) / 2.0);
+            }
+            let step = view - overlap;
+            (((world - view) / step).ceil() as usize + 1, step, 0.0)
+        };
+        let ((cols, sx, x0), (rows, sy, y0)) = (axis(ww, vw, ox), axis(wh, vh, oy));
+        eprintln!("tiles {cols}x{rows}");
+        let (col, row) = (col.min(cols - 1), row.min(rows - 1));
+        let x = vx + x0 - col as f32 * sx;
+        let y = vy + y0 - row as f32 * sy;
+        self.cam.zoom = zoom;
+        self.cam.pan = [x, y];
+        let shows_a_node = (0..self.placed.pos.len()).any(|i| {
+            let [nx, ny, nw, nh] = self.screen_rect(i);
+            nx < vx + vw && nx + nw > vx && ny < vy + vh && ny + nh > vy
+        });
+        if !shows_a_node {
+            eprintln!("tile empty");
         }
     }
 

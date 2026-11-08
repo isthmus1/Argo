@@ -141,10 +141,30 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
                 *lane += 1;
                 y
             });
+        let mut path_below = None;
         let path = if w.back || wrap_gap.is_some() {
             // A loop backedge runs out of its source, under both nodes, and back into the target.
             let bottom = |i: usize| pl.pos[i][1] + pl.size[i][1] + o[1];
-            let below = wrap_gap.unwrap_or_else(|| bottom(w.from.0).max(bottom(w.to.0)) + 22.0);
+            let below = wrap_gap.unwrap_or_else(|| {
+                // Drop under every node the run would cross, but stay above the next row.
+                let (lo, hi) = (a[0].min(b[0]) - 40.0, a[0].max(b[0]) + 40.0);
+                let limit = pl.row_gaps.iter().map(|g| g + o[1]).find(|&g| g > a[1]).unwrap_or(f32::MAX);
+                let mut below = bottom(w.from.0).max(bottom(w.to.0)) + 22.0;
+                loop {
+                    let deeper = (0..pl.pos.len())
+                        .filter(|&i| {
+                            let (x, y) = (pl.pos[i][0] + o[0], pl.pos[i][1] + o[1]);
+                            x < hi && x + pl.size[i][0] > lo && y < below && bottom(i) + 22.0 > below
+                        })
+                        .map(|i| bottom(i) + 22.0)
+                        .fold(below, f32::max);
+                    if deeper <= below || deeper >= limit {
+                        break below;
+                    }
+                    below = deeper;
+                }
+            });
+            path_below = Some(below);
             let r = 26.0;
             Path::new()
                 .move_to(a)
@@ -164,17 +184,85 @@ fn wires(p: &Pal, g: &Graph, pl: &crate::layout::Placed, o: [f32; 2], focus: Opt
         // double-blend at their joints and read as dotted.
         let fade = |c: Color| if lit { c } else { c.mix(p.canvas, 0.6) };
         let core = fade(p.ty(ty));
-        if exec {
-            s = s.stroke_path(&path, width + 2.0, LineCap::Round, fade(p.exec_casing));
-        } else if p.dark && lit {
-            s = s.stroke_path(&path, width + 1.6, LineCap::Round, p.canvas.mix(Color::BLACK, 0.4));
+        if w.back {
+            // A loop's way back is dashed, so it never reads as forward flow.
+            for dash in dashes(&back_points(a, b, path_below.unwrap_or_default()), 9.0, 6.0) {
+                if exec {
+                    s = s.stroke(dash.clone(), width + 2.0, fade(p.exec_casing));
+                }
+                s = s.stroke(dash, width, core);
+            }
+        } else {
+            if exec {
+                s = s.stroke_path(&path, width + 2.0, LineCap::Round, fade(p.exec_casing));
+            } else if p.dark && lit {
+                s = s.stroke_path(&path, width + 1.6, LineCap::Round, p.canvas.mix(Color::BLACK, 0.4));
+            }
+            s = s.stroke_path(&path, width, LineCap::Round, core);
         }
-        s = s.stroke_path(&path, width, LineCap::Round, core);
         // Arrowhead just before the target socket: direction never depends on layout.
         let (tip, back, half) = (b[0] - 7.0, b[0] - 15.0, if exec { 5.0 } else { 4.0 });
         s = s.fill(vec![[back, b[1] - half], [tip, b[1]], [back, b[1] + half]], core);
     }
     s
+}
+
+/// The backedge route as a polyline: out of `a`, down to `below`, across, and up into `b`
+/// (the same curve as the solid route, sampled so it can be dashed).
+fn back_points(a: [f32; 2], b: [f32; 2], below: f32) -> Vec<[f32; 2]> {
+    let r = 26.0 * 1.4;
+    let cubic = |p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2], out: &mut Vec<[f32; 2]>| {
+        for k in 0..=16 {
+            let t = k as f32 / 16.0;
+            let u = 1.0 - t;
+            let (c0, c1, c2, c3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+            out.push([
+                c0 * p0[0] + c1 * p1[0] + c2 * p2[0] + c3 * p3[0],
+                c0 * p0[1] + c1 * p1[1] + c2 * p2[1] + c3 * p3[1],
+            ]);
+        }
+    };
+    let mut pts = vec![];
+    cubic(a, [a[0] + r, a[1]], [a[0] + r, below], [a[0], below], &mut pts);
+    cubic([b[0], below], [b[0] - r, below], [b[0] - r, b[1]], b, &mut pts);
+    pts
+}
+
+/// Split a polyline into dashes of length `on` separated by `off`.
+fn dashes(pts: &[[f32; 2]], on: f32, off: f32) -> Vec<Vec<[f32; 2]>> {
+    let mut out = vec![];
+    let mut cur = vec![];
+    let (mut drawing, mut left) = (true, on);
+    for seg in pts.windows(2) {
+        let ([x0, y0], [x1, y1]) = (seg[0], seg[1]);
+        let len = ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+        let mut t = 0.0;
+        if drawing && cur.is_empty() {
+            cur.push([x0, y0]);
+        }
+        while len - t > left {
+            t += left;
+            let p = [x0 + (x1 - x0) * t / len, y0 + (y1 - y0) * t / len];
+            if drawing {
+                cur.push(p);
+                out.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(p);
+            }
+            drawing = !drawing;
+            left = if drawing { on } else { off };
+        }
+        left -= len - t;
+        if drawing {
+            cur.push([x1, y1]);
+        } else {
+            cur.clear();
+        }
+    }
+    if cur.len() > 1 {
+        out.push(cur);
+    }
+    out
 }
 
 /// Headers that hold source code are set in monospace, so `&` and `&&`, `=` and `==` stay

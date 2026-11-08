@@ -242,6 +242,17 @@ pub fn project(snap: &Snapshot, container: Option<NodeId>, open: &HashSet<NodeId
         }
     }
 
+    // Each Output says what it returns, read off the `return …;` statement that ends there.
+    for w in &wires {
+        let (src, dst) = (w.from.0, w.to.0);
+        if nodes[dst].kind == Kind::GroupOut
+            && nodes[dst].ins[w.to.1].ty == Ty::Exec
+            && let Some(v) = nodes[src].title.strip_prefix("return ").map(|v| v.trim_end_matches(';').trim())
+        {
+            nodes[dst].title = format!("Output · returns {v}");
+        }
+    }
+
     let mut crumbs: Vec<String> = container
         .into_iter()
         .flat_map(|c| std::iter::once(c).chain(ix.ancestors(c)))
@@ -275,7 +286,7 @@ mod tests {
     fn control_flow_opens_flat_without_frames() {
         let p = compute_level(&fixture::snapshot());
         let titles: Vec<_> = p.graph.nodes.iter().map(|n| n.title.as_str()).collect();
-        assert_eq!(titles, ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output"]);
+        assert_eq!(titles, ["Input", "uint32_t acc = 0", "for (uint32_t i = 0; i < n; i++)", "step(acc, i)", "return acc", "Output · returns acc"]);
         assert!(p.graph.groups.is_empty(), "an opened loop is not a node group");
         assert!(p.graph.nodes.iter().all(|n| n.group.is_none()));
         let back: Vec<_> = p.graph.wires.iter().filter(|w| w.back).map(|w| p.graph.nodes[w.from.0].title.as_str()).collect();
