@@ -2,11 +2,12 @@
 //!
 //! Syntax nodes are deliberately separate from future UI/graph nodes. The parser reads plain C:
 //! [`project`] runs the system preprocessor first, so `#include`s and macros are already expanded.
-//! Names, types and graph interfaces are not resolved yet.
+//! Names, types and graph interfaces are not resolved yet. [`comp`] asks libclang directly.
 
 pub mod ast;
 pub mod c_node;
 pub mod c_node_role;
+pub mod comp;
 pub mod export;
 pub mod graph;
 pub mod lexer;

@@ -5,6 +5,10 @@ use rucc_base::Interner;
 use rucc_diag::Diagnostic;
 use rucc_parse::{Context, parse};
 
+mod summary;
+
+pub use summary::{Report, parse_source, run};
+
 use crate::ast::Ast;
 use crate::lexer::Lexer;
 use crate::lowering;

@@ -19,6 +19,7 @@ path = "src/main.rs"
 # are the stable thing here; the parser is an implementation detail behind them.
 [dependencies]
 argo-protocol = { path = "../argo-protocol" }
+clang = { version = "2.1.0", features = ["runtime"] }
 serde.workspace = true
 serde_json.workspace = true
 rucc-ast = "=0.30.15"
@@ -28,3 +29,6 @@ rucc-lex = "=0.30.15"
 rucc-parse = "=0.30.15"
 rucc-session = "=0.30.15"
 rucc-target = "=0.30.15"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt"] }
